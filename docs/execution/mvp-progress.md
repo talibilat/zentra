@@ -2,11 +2,11 @@
 
 ## Current State
 
-- Current phase: Wave 2 is integrated and Task 7 is next.
-- Active task: Task 7, single-project integration queue.
-- Last verified integration commit: `55633dc` on `feature/zentra-mvp`.
+- Current phase: Task 7 is complete and Task 8 is active.
+- Active task: Task 8, complete tracer-bullet orchestration.
+- Last verified integration commit: `ccec845` on `feature/zentra-mvp`.
 - Blocking issue: none.
-- Next action: implement Task 7 with real-Git tests, independent specification and quality reviews, and full integration verification.
+- Next action: implement Task 8 end to end with exact journal replay, independently verified review evidence, and candidate-worktree integration.
 
 ## Task Ledger
 
@@ -19,8 +19,8 @@
 | Task 4 projects/workspaces | `feature/mvp-workspaces` | `.worktrees/mvp-workspaces` | done | `33b5ba2` | 39/39 pass | spec compliant; 3 Important and 4 Minor findings fixed | yes (`c519b36`) |
 | Task 5 worker supervisor | `feature/mvp-worker` | `.worktrees/mvp-worker` | done | `eded574` | 14/14 pass | spec and quality approved after Important fixes | yes (`23ad815`) |
 | Task 6 validation/review | `feature/mvp-validation-review` | `.worktrees/mvp-validation-review` | done | `e8a558c` | 50/50 pass with worker coverage | spec and quality approved; all Important findings fixed | yes (`55633dc`) |
-| Task 7 integration queue | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
-| Task 8 tracer bullet | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
+| Task 7 integration queue | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `ccec845` | 44/44 pass | spec and quality approved; all Critical and Important findings fixed | yes |
+| Task 8 tracer bullet | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | in progress | - | - | - | - |
 | Task 9 recovery | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
 | Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
 
@@ -33,6 +33,8 @@
 - 2026-07-12: Task 3 prospectively validates the exact JSON-canonical event payload before durable append so rejected commands cannot poison replay.
 - 2026-07-12: Task 6 extends worker results with actual exit-code and raw bounded-output evidence so validation and review digests remain complete without changing worker event parsing.
 - 2026-07-12: Task 6 uses one shared output byte budget across stdout and stderr and allows output-limit evidence to override a provisional process exit before settlement.
+- 2026-07-12: Task 7 requires a frozen `ReviewGate` snapshot, validates the exact clean candidate commit, disables Git hooks and configured external programs, and atomically updates only the exact nonsymbolic integration ref.
+- 2026-07-12: Task 7 preserves uncertain candidate and CAS state for reconciliation and never retries an uncertain Git effect.
 
 ## Deferred Minor Findings
 
@@ -44,6 +46,9 @@
 - Task 3 does not include a synthetic optimistic-concurrency race test and uses placeholder storage metadata for prospective projection events.
 - The reviewer protocol permits non-JSON stdout around its one strict JSON event and runs with `/tmp` as its working directory.
 - The process supervisor does not explicitly ignore late `decide` calls after settlement, although they cannot change the returned result.
+- Task 7 cleanup and reconciliation records are process-local and unbounded until Task 9 supplies durable recovery decisions.
+- Task 7 conservatively preserves some empty private candidate roots after uncertain creation, and complete same-UID filesystem isolation remains outside the local MVP.
+- Git process-group termination cannot kill a descendant that deliberately escapes into another process group.
 
 ## Blockers
 
@@ -62,3 +67,5 @@ None.
 - 2026-07-12: Task 3 merged with `--no-ff` at `05b20fa`; `pnpm test` passed 97/97, `pnpm check` passed, and `pnpm build` passed.
 - 2026-07-12: Task 6 merged with `--no-ff` at `55633dc`; `pnpm test` passed 138/138, `pnpm check` passed, and `pnpm build` passed.
 - 2026-07-12: `feature/zentra-mvp` was pushed through `55633dc` without merging to `main`.
+- 2026-07-12: Task 7 at `ccec845` passed 44 focused integration tests, 187/187 full tests, `pnpm check`, and `pnpm build`; final independent spec and quality reviews reported no Critical or Important findings.
+- 2026-07-12: `feature/zentra-mvp` was pushed through `ccec845` without merging to `main`.

@@ -6,7 +6,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 ## Current Branch And Commit
 
 - Integration worktree: `/Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp`.
-- Integration branch: `feature/zentra-mvp` at `55633dc`, pushed to `origin/feature/zentra-mvp`.
+- Integration branch: `feature/zentra-mvp` at `ccec845`, pushed to `origin/feature/zentra-mvp`.
 - `main` remains unchanged and must not receive the MVP branch.
 - Repository-local Git identity is configured as `Md Talib / talibilat2019@gmail.com`.
 
@@ -19,6 +19,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 - Task 5 deterministic worker supervision: `eded574`, merged at `23ad815`.
 - Task 3 durable task projection: `d889433`, merged at `05b20fa`.
 - Task 6 validation and independent review: `e8a558c`, merged at `55633dc`.
+- Task 7 serialized reviewed integration: `ccec845`.
 
 ## Wave 2 Review Outcomes
 
@@ -39,16 +40,17 @@ Independent specification and quality re-reviews reported no unresolved Critical
 - After Task 6 merge at `55633dc`: 138/138 tests passed, `pnpm check` passed, and `pnpm build` passed.
 - Task 3 branch focused verification: 46/46 tests passed and `pnpm check` passed.
 - Task 6 branch verification: 50 focused Task 5/6 tests passed, 92/92 full branch tests passed, and `pnpm check` passed.
+- Task 7 verification: 44/44 focused integration tests passed, 187/187 full tests passed, `pnpm check` passed, and `pnpm build` passed.
 
 ## Exact Next Step
 
-Implement Task 7 from `docs/plans/mvp.md` lines 988-1061.
-Use real temporary Git repositories and test first.
-The integration queue must serialize per project, create a disposable candidate from the current integration head, merge the reviewed source commit only in that candidate, run full validation there, and update the integration branch only with compare-and-swap semantics after validation succeeds.
-Conflict, stale review, cancellation, timeout, failed validation, or a changed integration head must leave the integration branch unchanged and preserve the ticket worktree.
-Do not automatically retry uncertain Git effects.
+Implement Task 8 from `docs/plans/mvp.md` lines 1065-1160.
+The end-to-end test must create a real temporary Git repository, run the deterministic worker, retain patch and integration evidence, run focused validation, obtain and verify an independent review, commit only reviewed paths, integrate through Task 7's validated candidate, and reach `completed`.
+Every accepted state transition must be journaled before the following effect.
+Every failure must map to one canonical terminal outcome and preserve the ticket worktree.
+The final event replay must reconstruct the exact terminal task view.
 
-After Task 7 passes independent specification and quality review, continue Tasks 8, 9, and 10 sequentially.
+After Task 8 passes independent specification and quality review, continue Tasks 9 and 10 sequentially.
 Run focused verification and full `pnpm test`, `pnpm check`, and `pnpm build` gates before each integration.
 
 ## Active Worktrees
