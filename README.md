@@ -50,7 +50,11 @@ The CLI reads a JSON object containing the project identity, absolute repository
 }
 ```
 
-Validation commands are executable and argument arrays invoked with `shell: false`, not shell command strings.
+Each validation executable must exactly match the canonical absolute real path of the Node.js executable running Zentra.
+
+Relative paths, symlinks, `env` and similar wrappers, alternate spellings, missing targets, and absolute executables outside that allowlist are rejected during configuration parsing and checked again before process creation.
+
+Approved validation commands are executable and argument arrays invoked with `shell: false`, not shell command strings.
 
 The `project validate` command accepts one configuration object or an array of configuration objects, while the MVP `task run` command requires exactly one configured project because its command contract has no project selector.
 
@@ -111,19 +115,27 @@ Task identities are also validated as safe single path and ref components before
 
 ## Security Boundary
 
-The CLI chooses the current Node.js executable and Zentra's bundled deterministic worker and reviewer internally.
+The CLI chooses Zentra's bundled deterministic worker and reviewer executables internally; CLI callers cannot select or replace those executables.
 
-Callers cannot provide an executable, command, working directory, workspace, worker fixture, or reviewer fixture through the CLI.
+Configured validations are different: trusted project configuration supplies their argument arrays, while each validation executable must exactly match the approved canonical absolute path of the Node.js executable running Zentra.
+
+CLI callers cannot provide a working directory, workspace, worker fixture, or reviewer fixture.
 
 Workers, reviewers, and validations receive explicit minimal environments and do not inherit arbitrary parent secrets.
 
 The CLI emits stable JSON without stack traces and does not serialize inherited environment variables.
 
-Project validation arrays remain trusted project configuration, so a user who can edit project configuration can choose direct executables that run with that user's host authority.
+Configured validation commands run with the same operating-system authority as the user who runs the Zentra CLI.
 
-The current local process and filesystem isolation are not sufficient for untrusted repositories, untrusted configuration authors, hostile executables, or multi-user operation.
+The exact-executable allowlist reduces accidental use of unintended executables, but it is not a filesystem sandbox and does not restrict what the approved Node.js executable or validation code can access with that user's authority.
 
-Zentra exposes no general shell capability, but it cannot make an explicitly configured executable safe.
+Using executable and argument arrays with `shell: false` prevents shell-string interpretation, but it does not reduce filesystem authority.
+
+This Trusted-Project MVP is intended only for projects that the operator controls and configures themselves.
+
+Hostile repositories, hostile or untrusted project configuration, hostile validation code, and multi-user operation are prohibited.
+
+Repository owner Md Talib explicitly accepted this Trusted-Project MVP authority model on 2026-07-12.
 
 ## Events And Recovery
 

@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
-import type { ProjectConfig } from "../projects/project-config.js";
+import {
+  assertApprovedValidationExecutable,
+  assertApprovedValidationExecutableIdentity,
+  type ProjectConfig,
+} from "../projects/project-config.js";
 import { z } from "zod";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -121,6 +125,7 @@ export class ValidationRunner {
       configuredCommand[0],
       ...configuredCommand.slice(1),
     ];
+    assertApprovedValidationExecutable(command[0]);
     const invocationId = context?.invocationId ?? randomUUID();
     if (invocationId === "" || usedInvocationIds.has(invocationId)) {
       throw new Error("validation invocationId must be nonempty and single-use");
@@ -131,6 +136,7 @@ export class ValidationRunner {
     usedInvocationIds.add(invocationId);
     const canonicalCwd = await realpath(cwd);
     const startedAt = new Date().toISOString();
+    await assertApprovedValidationExecutableIdentity(command[0]);
 
     const result = await this.supervisor.execute(
       {
