@@ -16,4 +16,10 @@ if (descendant.pid === undefined) {
 descendant.unref();
 
 writeFileSync(pidFile, String(descendant.pid), "utf8");
-console.log(JSON.stringify({ type: "worker.completed" }));
+console.log(
+  JSON.stringify({
+    type: "artifact.ready",
+    path: "out.txt",
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+  }),
+);

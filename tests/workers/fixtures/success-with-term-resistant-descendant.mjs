@@ -23,4 +23,10 @@ await once(descendant, "message");
 writeFileSync(pidFile, String(descendant.pid), "utf8");
 descendant.disconnect();
 descendant.unref();
-console.log(JSON.stringify({ type: "worker.completed" }));
+console.log(
+  JSON.stringify({
+    type: "artifact.ready",
+    path: "out.txt",
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+  }),
+);

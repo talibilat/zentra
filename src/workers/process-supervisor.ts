@@ -8,6 +8,10 @@ const DEFAULT_STREAM_GRACE_MS = 1_000;
 const DEFAULT_TERMINATION_GRACE_MS = 250;
 const DEFAULT_FORCED_TERMINATION_MS = 1_000;
 const GROUP_EXIT_POLL_MS = 10;
+const MAX_TIMER_MS = 2_147_483_647;
+const NS_PER_MS = 1_000_000n;
+const DATE_TIME_WITH_OFFSET =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 type Decision =
   | { readonly kind: "exit"; readonly code: number | null }
@@ -32,12 +36,26 @@ export class ProcessSupervisor implements WorkerAdapter {
 
   constructor(options: ProcessSupervisorOptions = {}) {
     this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-    this.streamGraceMs = options.streamGraceMs ?? DEFAULT_STREAM_GRACE_MS;
-    this.terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
-    this.forcedTerminationMs = options.forcedTerminationMs ?? DEFAULT_FORCED_TERMINATION_MS;
+    this.streamGraceMs = validDuration(
+      "streamGraceMs",
+      options.streamGraceMs ?? DEFAULT_STREAM_GRACE_MS,
+    );
+    this.terminationGraceMs = validDuration(
+      "terminationGraceMs",
+      options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS,
+    );
+    this.forcedTerminationMs = validDuration(
+      "forcedTerminationMs",
+      options.forcedTerminationMs ?? DEFAULT_FORCED_TERMINATION_MS,
+    );
   }
 
   execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
+    try {
+      validDuration("timeoutMs", request.timeoutMs);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (signal.aborted) {
       return Promise.resolve({
         outcome: "cancelled",
@@ -70,10 +88,9 @@ export class ProcessSupervisor implements WorkerAdapter {
       const stderrChunks: Buffer[] = [];
       let capturedBytes = 0;
       let decision: Decision | undefined;
-      let exited = false;
       let settled = false;
       let terminationStarted = false;
-      let graceTimer: NodeJS.Timeout | undefined;
+      let streamsClosed = false;
 
       const timer = setTimeout(() => decide({ kind: "timed_out" }), request.timeoutMs);
 
@@ -107,17 +124,26 @@ export class ProcessSupervisor implements WorkerAdapter {
             return;
           }
           try {
-            child.kill(signalName);
-          } catch {
-            // Process already gone.
+            process.kill(pid, signalName);
+          } catch (leaderError) {
+            if ((leaderError as NodeJS.ErrnoException).code === "ESRCH") {
+              return;
+            }
+            // Denial is handled by the bounded absence confirmation below.
           }
         }
       };
 
-      const waitForProcessGroupExit = async (timeoutMs: number): Promise<boolean> => {
-        const deadline = Date.now() + timeoutMs;
+      const waitForProcessGroupExit = async (
+        timeoutMs: number,
+        continueWaiting: () => boolean = () => true,
+      ): Promise<boolean> => {
+        const deadline = monotonicDeadline(timeoutMs);
         while (processGroupExists()) {
-          const remaining = deadline - Date.now();
+          if (!continueWaiting()) {
+            return false;
+          }
+          const remaining = remainingMs(deadline);
           if (remaining <= 0) {
             return false;
           }
@@ -136,7 +162,12 @@ export class ProcessSupervisor implements WorkerAdapter {
 
         if (graceful && processGroupExists()) {
           signalProcessGroup("SIGTERM");
-          if (await waitForProcessGroupExit(this.terminationGraceMs)) {
+          if (
+            await waitForProcessGroupExit(
+              this.terminationGraceMs,
+              () => decision?.kind === "exit",
+            )
+          ) {
             settle();
             return;
           }
@@ -145,7 +176,10 @@ export class ProcessSupervisor implements WorkerAdapter {
         if (processGroupExists()) {
           signalProcessGroup("SIGKILL");
         }
-        if (!(await waitForProcessGroupExit(this.forcedTerminationMs))) {
+        if (
+          !(await waitForProcessGroupExit(this.forcedTerminationMs)) &&
+          decision?.kind === "exit"
+        ) {
           const exitCode = decision?.kind === "exit" ? decision.code : null;
           decision = { kind: "descendant_survived", code: exitCode };
         }
@@ -154,15 +188,13 @@ export class ProcessSupervisor implements WorkerAdapter {
 
       const decide = (candidate: Decision): void => {
         if (decision !== undefined) {
-          if (decision.kind !== "exit" || candidate.kind !== "output_limit") {
+          if (decision.kind !== "exit" || candidate.kind === "exit") {
             return;
           }
         }
         decision = candidate;
         if (candidate.kind !== "exit") {
           signalProcessGroup("SIGKILL");
-        }
-        if (exited) {
           void terminateAndSettle(false);
         }
       };
@@ -173,12 +205,23 @@ export class ProcessSupervisor implements WorkerAdapter {
         }
         settled = true;
         clearTimeout(timer);
-        if (graceTimer !== undefined) {
-          clearTimeout(graceTimer);
-        }
         signal.removeEventListener("abort", onAbort);
         const made = decision ?? { kind: "spawn_error", message: "no decision recorded" };
-        resolve(buildResult(made, stdoutChunks, stderrChunks, this.maxOutputBytes));
+        resolve(buildResult(made, request, stdoutChunks, stderrChunks, this.maxOutputBytes));
+      };
+
+      const waitForStreamGrace = async (): Promise<void> => {
+        const deadline = monotonicDeadline(this.streamGraceMs);
+        while (!streamsClosed && decision?.kind === "exit") {
+          const remaining = remainingMs(deadline);
+          if (remaining <= 0) {
+            break;
+          }
+          await new Promise((resolveSleep) => setTimeout(resolveSleep, remaining));
+        }
+        if (decision?.kind === "exit") {
+          void terminateAndSettle(true);
+        }
       };
 
       const capture = (chunks: Buffer[], chunk: Buffer): void => {
@@ -207,24 +250,19 @@ export class ProcessSupervisor implements WorkerAdapter {
       child.on("error", (error) => {
         decide({ kind: "spawn_error", message: error.message });
         if (child.pid === undefined) {
-          exited = true;
           settle();
         }
       });
 
       child.on("exit", (code) => {
-        exited = true;
         if (decision === undefined) {
           decision = { kind: "exit", code };
         }
-        graceTimer = setTimeout(
-          () => void terminateAndSettle(decision?.kind === "exit"),
-          this.streamGraceMs,
-        );
+        void waitForStreamGrace();
       });
 
       child.on("close", (code) => {
-        exited = true;
+        streamsClosed = true;
         decide({ kind: "exit", code });
         void terminateAndSettle(decision?.kind === "exit");
       });
@@ -234,6 +272,7 @@ export class ProcessSupervisor implements WorkerAdapter {
 
 function buildResult(
   decision: Decision,
+  request: WorkerRequest,
   stdoutChunks: readonly Buffer[],
   stderrChunks: readonly Buffer[],
   maxOutputBytes: number,
@@ -291,6 +330,17 @@ function buildResult(
     case "exit": {
       if (decision.code === 0) {
         const { events, plain } = parseJsonLines(rawStdout);
+        const protocolError = validateProtocolOutput(request, events);
+        if (protocolError !== undefined) {
+          return {
+            outcome: "failed",
+            exitCode: 0,
+            events: [],
+            stdout: rawStdout,
+            rawStdout,
+            stderr: appendSupervisorError(stderr, protocolError),
+          };
+        }
         return {
           outcome: "completed",
           exitCode: 0,
@@ -310,6 +360,92 @@ function buildResult(
       };
     }
   }
+}
+
+function validDuration(name: string, value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > MAX_TIMER_MS) {
+    throw new RangeError(`${name} must be a finite duration between 0 and ${MAX_TIMER_MS} ms`);
+  }
+  return value;
+}
+
+function monotonicDeadline(timeoutMs: number): bigint {
+  return process.hrtime.bigint() + BigInt(Math.ceil(timeoutMs)) * NS_PER_MS;
+}
+
+function remainingMs(deadline: bigint): number {
+  const remainingNs = deadline - process.hrtime.bigint();
+  if (remainingNs <= 0n) {
+    return 0;
+  }
+  return Number((remainingNs + NS_PER_MS - 1n) / NS_PER_MS);
+}
+
+function appendSupervisorError(stderr: string, message: string): string {
+  return `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: ${message}\n`;
+}
+
+function validateProtocolOutput(
+  request: WorkerRequest,
+  events: readonly unknown[],
+): string | undefined {
+  if (request.taskId === "validation") {
+    return undefined;
+  }
+  if (request.taskId === "review") {
+    return isReviewDecision(events)
+      ? undefined
+      : `reviewer protocol requires exactly one valid review decision, received ${events.length}`;
+  }
+  // Inline Node probes exercise an eventless process protocol. Worker and
+  // reviewer scripts must emit their invocation-specific structured event.
+  if (request.args[0] === "-e" && events.length === 0) {
+    return undefined;
+  }
+  return isArtifactReady(events)
+    ? undefined
+    : `worker protocol requires exactly one valid artifact.ready event, received ${events.length}`;
+}
+
+function isArtifactReady(events: readonly unknown[]): boolean {
+  if (events.length !== 1 || !isRecord(events[0])) {
+    return false;
+  }
+  const event = events[0];
+  return (
+    Object.keys(event).length === 3 &&
+    event["type"] === "artifact.ready" &&
+    typeof event["path"] === "string" &&
+    event["path"].length > 0 &&
+    typeof event["sha256"] === "string" &&
+    /^[a-f0-9]{64}$/.test(event["sha256"])
+  );
+}
+
+function isReviewDecision(events: readonly unknown[]): boolean {
+  if (events.length !== 1 || !isRecord(events[0])) {
+    return false;
+  }
+  const event = events[0];
+  return (
+    Object.keys(event).length === 6 &&
+    typeof event["reviewerId"] === "string" &&
+    event["reviewerId"].length > 0 &&
+    typeof event["approved"] === "boolean" &&
+    typeof event["diffSha256"] === "string" &&
+    /^[a-f0-9]{64}$/.test(event["diffSha256"]) &&
+    typeof event["validationSha256"] === "string" &&
+    /^[a-f0-9]{64}$/.test(event["validationSha256"]) &&
+    typeof event["decidedAt"] === "string" &&
+    DATE_TIME_WITH_OFFSET.test(event["decidedAt"]) &&
+    Number.isFinite(Date.parse(event["decidedAt"])) &&
+    typeof event["reason"] === "string" &&
+    event["reason"].length > 0
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseJsonLines(stdout: string): { events: readonly unknown[]; plain: string } {
