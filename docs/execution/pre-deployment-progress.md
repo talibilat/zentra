@@ -9,7 +9,7 @@ All implementation, testing, review, and documentation edits are performed by se
 - Integration branch: `fix/pre-deployment`
 - Integration worktree: `.worktrees/predeploy-integration` (reserved for merges, progress records, final verification only)
 - Issue corpus base commit: `f54ba31` (`docs/pre-deployment-issues`, pushed to origin)
-- Current integration commit: `f54ba31` (baseline; no merges yet)
+- Current integration commit: `2cd2a31` (013, 001, 009 integrated with --no-ff; baseline green after each; pushed)
 - Node: v24.2.0
 - pnpm: 10.0.0
 - OpenCode: 1.17.18 (`/Users/talibilat/.opencode/bin/opencode`)
@@ -126,6 +126,17 @@ Writer count: 4 concurrent (013, 011, 009, 001) - at cap. 008 is a read-only rep
 - 001 spec: COMPLIANT (no findings). Quality: ISSUES_FOUND - replaced-target TOCTOU (approval bound to canonical pathname, not stable file identity; check-to-exec race); missing dot-segment/trailing-slash/case-variant rejection tests; report overstates completion. -> issue-001-fix session running. Disposition frame: Trusted-Project MVP Mode accepts host-user authority on owner-controlled projects; fixer adds pre-spawn identity/content re-verification to shrink the TOCTOU window and documents the residual as within the accepted model (writer may NOT edit the issue brief). Re-review will confirm acceptability; escalate to owner if re-reviewer still rates Critical.
 - 009 spec: ISSUES_FOUND - identity-only reviewer not excluded from production package (own acceptance criterion); digest test gap. Quality: ISSUES_FOUND - unbounded reviewer settlement (waits for `close`); stdin error handling; fixture echoes validation digest. -> issue-009-fix session running. Cross-issue disposition: physical tarball exclusion of test fixtures is owned by issue 019 files allowlist (verified at 016/019 gate); 009 makes the identity-only reviewer code-unselectable in production now.
 - 011: writer DONE (102095a,bebe79a; test 482 passed) pushed. Round-1 reviews: spec ISSUES_FOUND (`completed` must require valid protocol output; weak temporal test guarantees; fixtures emit unrecognized worker.completed event). Quality ISSUES_FOUND (unbounded wait on denied EPERM signaling; non-monotonic deadlines; need ESRCH/EPERM tests; cancellation/timeout precedence during cleanup). -> issue-011-fix session running. All four Wave-1 ready issues (013,001,009,011) now in fix round 1.
+
+### Wave 1 Integration Checkpoint (2026-07-12T23:40Z)
+
+Integrated into fix/pre-deployment (each --no-ff, full baseline test/check/build green after each merge):
+- **013** (Low) merge 4186ec8 -> test green. Confirmation re-review: INTEGRATE. Residual: better-sqlite3 no async interrupt (structural bound, documented).
+- **001** (Critical) merge b94cba9 -> 512 tests. Confirmation re-review: INTEGRATE, no blocking findings. Accepted risk: replaced-executable TOCTOU (named acceptor Md Talib).
+- **009** (High) merge c0ae7b2 -> 529 tests. Confirmation re-review: INTEGRATE. Deterministic reviewer moved to tests/ (test-only). Packaging exclusion delegated to 019/016.
+- Integration branch head after Wave-1 merges + prompts: 2cd2a31 (pushed to origin).
+- **011** (High): fix round 3 RUNNING (2 Important findings: completion must reject consumer-rejectable protocol output; inherited-stream test must prove grace-wait after leader exit). Not yet integrated.
+
+Closed with evidence so far: 3 Critical target -> 1 (001). 7 High -> 1 (009). Plus 013 (Low) and 008 (Low, not-reproduced disposition, evidence-only; integrate its doc separately).
 
 ### Known environment constraint (recorded)
 
