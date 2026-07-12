@@ -6,6 +6,8 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  truncateSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,8 +16,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import {
   MAX_JOURNAL_EVENT_BYTES,
+  MAX_JOURNAL_DATABASE_BYTES,
   MAX_JOURNAL_READ_EVENTS,
   MAX_JOURNAL_READ_TOTAL_BYTES,
+  MAX_JOURNAL_SHARED_MEMORY_BYTES,
+  MAX_JOURNAL_WAL_BYTES,
   SqliteEventJournal,
 } from "../../src/journal/sqlite-journal.js";
 
@@ -53,6 +58,10 @@ function rawDatabase(journal: SqliteEventJournal): Database.Database {
   return (journal as unknown as { db: Database.Database }).db;
 }
 
+function assertAdmittedFiles(journal: SqliteEventJournal): void {
+  (journal as unknown as { assertAdmittedFiles(): void }).assertAdmittedFiles();
+}
+
 function injectEvents(
   journal: SqliteEventJournal,
   streamId: string,
@@ -77,6 +86,52 @@ function injectEvents(
         payload,
         streamId,
         "2026-07-12T00:00:00.000Z",
+      );
+    }
+  })();
+}
+
+function createSparseFile(path: string, bytes: number): void {
+  writeFileSync(path, "");
+  truncateSync(path, bytes);
+}
+
+function eventMetadataBytes(streamId: string): number {
+  return Buffer.byteLength("0".repeat(36)) +
+    Buffer.byteLength(streamId) +
+    Buffer.byteLength("task.created") +
+    Buffer.byteLength(streamId) +
+    Buffer.byteLength("2026-07-12T00:00:00.000Z");
+}
+
+function injectEventsWithTotalBytes(
+  journal: SqliteEventJournal,
+  streamId: string,
+  totalBytes: number,
+  eventCount: number,
+): void {
+  const database = rawDatabase(journal);
+  database.prepare("INSERT INTO streams (stream_id, current_version) VALUES (?, ?)")
+    .run(streamId, eventCount);
+  const insert = database.prepare(`
+    INSERT INTO events (
+      event_id, stream_id, stream_version, type, payload,
+      causation_id, correlation_id, recorded_at
+    ) VALUES (?, ?, ?, 'task.created', ?, NULL, ?, '2026-07-12T00:00:00.000Z')
+  `);
+  const metadataBytes = eventMetadataBytes(streamId);
+  const payloadBytes = totalBytes - metadataBytes * eventCount;
+  const basePayloadBytes = Math.floor(payloadBytes / eventCount);
+  const remainder = payloadBytes % eventCount;
+  database.transaction(() => {
+    for (let index = 0; index < eventCount; index += 1) {
+      const bytes = basePayloadBytes + (index < remainder ? 1 : 0);
+      insert.run(
+        String(index).padStart(36, "0"),
+        streamId,
+        index + 1,
+        JSON.stringify("x".repeat(bytes - 2)),
+        streamId,
       );
     }
   })();
@@ -180,12 +235,228 @@ describe("SqliteEventJournal", () => {
     expect(readdirSync(directory)).toEqual([]);
   });
 
+  it.each([
+    ["database", "", MAX_JOURNAL_DATABASE_BYTES],
+    ["WAL", "-wal", MAX_JOURNAL_WAL_BYTES],
+    ["shared-memory", "-shm", MAX_JOURNAL_SHARED_MEMORY_BYTES],
+  ] as const)("rejects an oversized %s file before opening SQLite", (_, suffix, limit) => {
+    const { databasePath } = temporaryDatabase();
+    if (suffix !== "") {
+      const database = new Database(databasePath);
+      database.close();
+    }
+    createSparseFile(`${databasePath}${suffix}`, limit + 1);
+
+    expect(() => new SqliteEventJournal(databasePath)).toThrow(/journal file size limit/i);
+  });
+
+  it.each([
+    ["database", "", MAX_JOURNAL_DATABASE_BYTES],
+    ["WAL", "-wal", MAX_JOURNAL_WAL_BYTES],
+    ["shared-memory", "-shm", MAX_JOURNAL_SHARED_MEMORY_BYTES],
+  ] as const)("admits a %s file exactly at its size limit", (_, suffix, limit) => {
+    const { databasePath } = temporaryDatabase();
+    const journal = new SqliteEventJournal(databasePath);
+    journals.push(journal);
+    createSparseFile(`${databasePath}${suffix}`, limit);
+
+    expect(() => assertAdmittedFiles(journal)).not.toThrow();
+  });
+
+  it("configures SQLite operation and growth limits", () => {
+    const { databasePath } = temporaryDatabase();
+    const journal = new SqliteEventJournal(databasePath);
+    journals.push(journal);
+    const database = rawDatabase(journal);
+    const pageSize = database.pragma("page_size", { simple: true }) as number;
+    const maxPageCount = database.pragma("max_page_count", { simple: true }) as number;
+
+    expect(maxPageCount * pageSize).toBeLessThanOrEqual(MAX_JOURNAL_DATABASE_BYTES);
+    expect(database.pragma("journal_size_limit", { simple: true })).toBe(MAX_JOURNAL_WAL_BYTES);
+  });
+
+  it("uses bounded indexed discovery for stream and global reads", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const database = rawDatabase(journal);
+    const preparedSql: string[] = [];
+    const prepare = database.prepare.bind(database);
+    database.prepare = ((sql: string) => {
+      preparedSql.push(sql);
+      return prepare(sql);
+    }) as typeof database.prepare;
+
+    journal.readStream("task-1");
+    journal.readAll();
+
+    const operationalSql = preparedSql.filter((sql) => !/EXPLAIN QUERY PLAN/i.test(sql));
+    const readSql = operationalSql.join("\n");
+    expect(readSql).not.toMatch(/\b(?:COUNT|SUM|MAX)\s*\(/i);
+    expect(readSql.match(/\bLIMIT\s+\?/gi)).toHaveLength(4);
+    expect(readSql.match(/zentra_operation_guard\(\)/g)).toHaveLength(4);
+
+    const streamSql = operationalSql.filter((sql) =>
+      sql.includes("stream_id = ? AND stream_version > ?")
+    );
+    const globalSql = operationalSql.filter((sql) => sql.includes("global_position > ?"));
+    expect(streamSql).toHaveLength(2);
+    expect(globalSql).toHaveLength(2);
+    for (const sql of streamSql) {
+      const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(
+        "task-1",
+        0,
+        MAX_JOURNAL_READ_EVENTS + 1,
+      ) as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toMatch(
+        /SEARCH events USING (?:COVERING )?INDEX .*stream_id.*stream_version/i,
+      );
+    }
+    for (const sql of globalSql) {
+      const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(
+        0,
+        MAX_JOURNAL_READ_EVENTS + 1,
+      ) as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toMatch(
+        /SEARCH events USING INTEGER PRIMARY KEY \(rowid>\?\)/i,
+      );
+    }
+  });
+
+  it("materializes a normal replay from the same snapshot used for discovery", () => {
+    const { databasePath } = temporaryDatabase();
+    const reader = new SqliteEventJournal(databasePath);
+    const writer = new SqliteEventJournal(databasePath);
+    journals.push(reader, writer);
+    writer.append("snapshot", 0, [{
+      streamId: "snapshot",
+      type: "event.1",
+      payload: { sequence: 1 },
+      causationId: null,
+      correlationId: "snapshot",
+    }]);
+    const database = rawDatabase(reader);
+    const prepare = database.prepare.bind(database);
+    let appendedDuringRead = false;
+    database.prepare = ((sql: string) => {
+      if (
+        !appendedDuringRead &&
+        !/EXPLAIN QUERY PLAN/.test(sql) &&
+        /SELECT \* FROM events/.test(sql)
+      ) {
+        appendedDuringRead = true;
+        writer.append("snapshot", 1, [{
+          streamId: "snapshot",
+          type: "event.2",
+          payload: { sequence: 2 },
+          causationId: null,
+          correlationId: "snapshot",
+        }]);
+      }
+      return prepare(sql);
+    }) as typeof database.prepare;
+
+    expect(reader.readStream("snapshot").map((event) => event.type)).toEqual(["event.1"]);
+    expect(reader.readStream("snapshot").map((event) => event.type)).toEqual([
+      "event.1",
+      "event.2",
+    ]);
+  });
+
+  it("rejects a large malicious journal with bounded read time and memory", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const database = rawDatabase(journal);
+    const eventCount = 300_000;
+    database.prepare("INSERT INTO streams (stream_id, current_version) VALUES (?, ?)")
+      .run("malicious", eventCount);
+    database.prepare(`
+      WITH RECURSIVE rows(n) AS (
+        VALUES(1)
+        UNION ALL
+        SELECT n + 1 FROM rows WHERE n < ?
+      )
+      INSERT INTO events (
+        event_id, stream_id, stream_version, type, payload,
+        causation_id, correlation_id, recorded_at
+      )
+      SELECT hex(n), ?, n, 'event', '{}', NULL, ?, '2026-07-12T00:00:00.000Z'
+      FROM rows
+    `).run(eventCount, "malicious", "malicious");
+    const preparedSql: string[] = [];
+    const prepare = database.prepare.bind(database);
+    database.prepare = ((sql: string) => {
+      preparedSql.push(sql);
+      return prepare(sql);
+    }) as typeof database.prepare;
+    const beforeRss = process.memoryUsage().rss;
+    const startedAt = performance.now();
+
+    expect(() => journal.readAll()).toThrow(/journal read limit/i);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(process.memoryUsage().rss - beforeRss).toBeLessThan(64 * 1024 * 1024);
+    expect(preparedSql.join("\n")).not.toMatch(/\b(?:COUNT|SUM|MAX)\s*\(/i);
+  });
+
+  it("rejects an adversarial schema that could bypass bounded query work", () => {
+    const { databasePath } = temporaryDatabase();
+    const database = new Database(databasePath);
+    database.exec(`
+      CREATE TABLE streams (stream_id TEXT, current_version INTEGER);
+      CREATE TABLE events (
+        global_position INTEGER,
+        event_id TEXT,
+        stream_id TEXT,
+        stream_version INTEGER,
+        type TEXT,
+        payload TEXT,
+        causation_id TEXT,
+        correlation_id TEXT,
+        recorded_at TEXT
+      );
+    `);
+    database.prepare("INSERT INTO streams VALUES (?, ?)").run("unindexed", 100_000);
+    database.prepare(`
+      WITH RECURSIVE rows(n) AS (
+        VALUES(1)
+        UNION ALL
+        SELECT n + 1 FROM rows WHERE n < ?
+      )
+      INSERT INTO events
+      SELECT n, hex(n), ?, n, 'event', '{}', NULL, ?, '2026-07-12T00:00:00.000Z'
+      FROM rows
+    `).run(100_000, "nonmatching", "nonmatching");
+    database.close();
+    const startedAt = performance.now();
+
+    expect(() => SqliteEventJournal.openReadOnly(databasePath)).toThrow(
+      /journal schema does not support bounded reads/i,
+    );
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+  });
+
   it("fails before materializing an oversized individual payload", () => {
     const journal = new SqliteEventJournal(":memory:");
     journals.push(journal);
     injectEvents(journal, "oversized", [JSON.stringify("x".repeat(MAX_JOURNAL_EVENT_BYTES))]);
 
     expect(() => journal.readStream("oversized")).toThrow(/journal read limit/i);
+  });
+
+  it("accepts an event exactly at the per-event byte limit", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEventsWithTotalBytes(journal, "event-boundary", MAX_JOURNAL_EVENT_BYTES, 1);
+
+    expect(journal.readStream("event-boundary")).toHaveLength(1);
+  });
+
+  it("rejects an event one byte over the per-event byte limit", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEventsWithTotalBytes(journal, "event-over", MAX_JOURNAL_EVENT_BYTES + 1, 1);
+
+    expect(() => journal.readStream("event-over")).toThrow(/journal read limit/i);
   });
 
   it("fails before materializing excessive total payload bytes", () => {
@@ -196,6 +467,22 @@ describe("SqliteEventJournal", () => {
 
     expect(() => journal.readStream("total")).toThrow(/journal read limit/i);
     expect(() => journal.readAll()).toThrow(/journal read limit/i);
+  });
+
+  it("accepts total materialized bytes exactly at the read limit", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEventsWithTotalBytes(journal, "total-boundary", MAX_JOURNAL_READ_TOTAL_BYTES, 9);
+
+    expect(journal.readStream("total-boundary")).toHaveLength(9);
+  });
+
+  it("rejects total materialized bytes one byte over the read limit", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEventsWithTotalBytes(journal, "total-over", MAX_JOURNAL_READ_TOTAL_BYTES + 1, 9);
+
+    expect(() => journal.readStream("total-over")).toThrow(/journal read limit/i);
   });
 
   it("fails before materializing an excessive event count", () => {
@@ -209,6 +496,18 @@ describe("SqliteEventJournal", () => {
 
     expect(() => journal.readStream("count")).toThrow(/journal read limit/i);
     expect(() => journal.readAll()).toThrow(/journal read limit/i);
+  });
+
+  it("accepts exactly the maximum event count", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEvents(
+      journal,
+      "count-boundary",
+      Array.from({ length: MAX_JOURNAL_READ_EVENTS }, () => "{}"),
+    );
+
+    expect(journal.readStream("count-boundary")).toHaveLength(MAX_JOURNAL_READ_EVENTS);
   });
 
   it("rejects an oversized appended row before creating a stream", () => {
