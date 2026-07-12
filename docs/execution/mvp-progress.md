@@ -2,11 +2,11 @@
 
 ## Current State
 
-- Current phase: Task 8 is complete and Task 9 is active.
-- Active task: Task 9, restart recovery and reconciliation.
-- Last verified integration commit: `2e553e8` on `feature/zentra-mvp`.
+- Current phase: Task 9 is complete and Task 10 is active.
+- Active task: Task 10, local CLI and MVP documentation.
+- Last verified integration commit: `e4185bf` on `feature/zentra-mvp`.
 - Blocking issue: none.
-- Next action: implement Task 9 recovery decisions without automatically repeating uncertain effects.
+- Next action: implement Task 10 CLI composition, stable JSON commands, signal handling, and README.
 
 ## Task Ledger
 
@@ -21,8 +21,8 @@
 | Task 6 validation/review | `feature/mvp-validation-review` | `.worktrees/mvp-validation-review` | done | `e8a558c` | 50/50 pass with worker coverage | spec and quality approved; all Important findings fixed | yes (`55633dc`) |
 | Task 7 integration queue | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `ccec845` | 44/44 pass | spec and quality approved; all Critical and Important findings fixed | yes |
 | Task 8 tracer bullet | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `2e553e8` | 59/59 pass | spec and quality approved; all Critical and Important findings fixed | yes |
-| Task 9 recovery | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | in progress | - | - | - | - |
-| Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
+| Task 9 recovery | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `e4185bf` | 51/51 pass | spec and quality approved; all Critical and Important findings fixed | yes |
+| Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | in progress | - | - | - | - |
 
 ## Decisions
 
@@ -37,6 +37,8 @@
 - 2026-07-12: Task 7 preserves uncertain candidate and CAS state for reconciliation and never retries an uncertain Git effect.
 - 2026-07-12: Task 8 restricts the local deterministic worker to one attested root-level file operation, binds focused and full validation to single-use opaque execution provenance, and journals every known transition before its following effect.
 - 2026-07-12: Task 8 records `task.commit_observed` and uncertain `task.integration_observed` events without terminalizing effects that Task 9 must reconcile.
+- 2026-07-12: Task 9 classifies recovery through bounded read-only journal, workspace, ref, commit, diff, and evidence inspection and never automatically repeats an uncertain effect.
+- 2026-07-12: Task 9 persists validation subject/workspace provenance and the original integration base so a restarted process can strictly prove completed candidate integration without runtime WeakSet state.
 
 ## Deferred Minor Findings
 
@@ -53,6 +55,7 @@
 - Git process-group termination cannot kill a descendant that deliberately escapes into another process group.
 - Validation and review provenance is process-local and fails closed after restart; Task 9 reconciles durable Git and journal facts rather than attempting to reuse runtime provenance.
 - The deterministic fixture intentionally supports only one root-level target file in the MVP.
+- Recovery trusts the durable event journal as the source of truth and detects malformed or contradictory evidence; cryptographic resistance to a privileged actor coherently rewriting both SQLite and Git is outside the approved MVP threat model.
 
 ## Blockers
 
@@ -75,3 +78,5 @@ None.
 - 2026-07-12: `feature/zentra-mvp` was pushed through `ccec845` without merging to `main`.
 - 2026-07-12: Task 8 at `2e553e8` passed 59 focused tracer tests, 293/293 full tests, `pnpm check`, and `pnpm build`; final independent spec and quality reviews reported no Critical or Important findings.
 - 2026-07-12: `feature/zentra-mvp` was pushed through `2e553e8` without merging to `main`.
+- 2026-07-12: Task 9 at `e4185bf` passed 51 focused recovery tests, 351/351 full tests, `pnpm check`, and `pnpm build`; final independent spec and quality reviews reported no in-scope Critical or Important findings.
+- 2026-07-12: `feature/zentra-mvp` was pushed through `e4185bf` without merging to `main`.

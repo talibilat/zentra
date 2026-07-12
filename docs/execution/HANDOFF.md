@@ -6,7 +6,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 ## Current Branch And Commit
 
 - Integration worktree: `/Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp`.
-- Integration branch: `feature/zentra-mvp` at `2e553e8`, pushed to `origin/feature/zentra-mvp`.
+- Integration branch: `feature/zentra-mvp` at `e4185bf`, pushed to `origin/feature/zentra-mvp`.
 - `main` remains unchanged and must not receive the MVP branch.
 - Repository-local Git identity is configured as `Md Talib / talibilat2019@gmail.com`.
 
@@ -21,6 +21,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 - Task 6 validation and independent review: `e8a558c`, merged at `55633dc`.
 - Task 7 serialized reviewed integration: `ccec845`.
 - Task 8 complete verified tracer bullet: `2e553e8`.
+- Task 9 restart recovery and reconciliation: `e4185bf`.
 
 ## Wave 2 Review Outcomes
 
@@ -43,15 +44,15 @@ Independent specification and quality re-reviews reported no unresolved Critical
 - Task 6 branch verification: 50 focused Task 5/6 tests passed, 92/92 full branch tests passed, and `pnpm check` passed.
 - Task 7 verification: 44/44 focused integration tests passed, 187/187 full tests passed, `pnpm check` passed, and `pnpm build` passed.
 - Task 8 verification: 59/59 focused tracer tests passed, 293/293 full tests passed, `pnpm check` passed, and `pnpm build` passed.
+- Task 9 verification: 51/51 focused recovery tests passed, 351/351 full tests passed, `pnpm check` passed, and `pnpm build` passed.
 
 ## Exact Next Step
 
-Implement Task 9 from `docs/plans/mvp.md` lines 1164-1233.
-Recovery must inspect journal, project, worktree, branch, commit, and integration evidence without performing a new effect.
-Safe preparation may resume, but uncertain worker, commit, and integration effects must enter reconciliation and must never be repeated automatically.
-A completed integration may append completion exactly once only after its durable source, result, review, validation, and exact integration-ref facts are established.
+Implement Task 10 from `docs/plans/mvp.md` lines 1237-1302.
+The CLI must compose the existing modules, resolve only the bundled deterministic worker, reject unsafe file values before task creation, handle termination signals through one AbortController, emit one JSON object, and use stable success/failure exit codes.
+The README must document the Zentra-only product boundary, local limitations, configuration, commands, security, event/recovery behavior, and test commands.
 
-After Task 9 passes independent specification and quality review, continue Task 10.
+After Task 10 passes independent specification and quality review, run the complete final evidence gate and write `docs/execution/mvp-final-report.md`.
 Run focused verification and full `pnpm test`, `pnpm check`, and `pnpm build` gates before each integration.
 
 ## Active Worktrees
