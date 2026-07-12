@@ -77,7 +77,12 @@ const journals: SqliteEventJournal[] = [];
 afterEach(() => {
   for (const journal of journals.splice(0)) journal.close();
   for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 25,
+    });
   }
 });
 
