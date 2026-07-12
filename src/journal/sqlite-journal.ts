@@ -20,9 +20,21 @@ interface EventRow {
 
 export class SqliteEventJournal implements EventJournal {
   private readonly db: Database.Database;
+  private readonly readOnly: boolean;
 
-  constructor(databasePath: string) {
-    this.db = new Database(databasePath);
+  static openReadOnly(databasePath: string): SqliteEventJournal {
+    return new SqliteEventJournal(databasePath, { readOnly: true });
+  }
+
+  constructor(
+    databasePath: string,
+    options: { readonly readOnly?: boolean } = {},
+  ) {
+    this.readOnly = options.readOnly ?? false;
+    this.db = this.readOnly
+      ? new Database(databasePath, { readonly: true, fileMustExist: true })
+      : new Database(databasePath);
+    if (this.readOnly) return;
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(`
@@ -50,6 +62,7 @@ export class SqliteEventJournal implements EventJournal {
     expectedVersion: number,
     events: readonly NewEvent<string, unknown>[],
   ): readonly StoredEvent[] {
+    if (this.readOnly) throw new Error("event journal is read-only");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const streamRow = this.db

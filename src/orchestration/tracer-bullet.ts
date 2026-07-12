@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
@@ -11,6 +10,7 @@ import type {
 } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
 import type { TerminalOutcome } from "../contracts/task.js";
+import { resolveBundledFixture } from "../fixtures/bundled-fixtures.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -53,9 +53,6 @@ import {
 
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
 const MAX_WORKER_TIMEOUT_MS = 300_000;
-const DETERMINISTIC_WORKER_SHA256 =
-  "9839f5c1ae46c984bd0a3180b4dcaa9967bf81b73610b024d0a38538f973ce22";
-
 const ArtifactReadySchema = z.strictObject({
   type: z.literal("artifact.ready"),
   path: z.string().min(1),
@@ -434,31 +431,9 @@ async function validateWorkerAuthority(
   const parsedInput = parseWorkerInput(request.args);
   const fixture = parsedInput.fixture;
   const fixturePath = await realpath(fixture);
-  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const directoryParts = moduleDirectory.split(path.sep).filter(Boolean);
-  const sourceTail = directoryParts.slice(-2).join("/");
-  const builtTail = directoryParts.slice(-3).join("/");
-  const isBuiltModule = builtTail === "dist/src/orchestration";
-  if (!isBuiltModule && sourceTail !== "src/orchestration") {
-    throw new Error("tracer module path is neither source nor built layout");
-  }
-  const expectedFixture = fileURLToPath(
-    new URL(
-      isBuiltModule
-        ? "../../../fixtures/deterministic-worker.mjs"
-        : "../../fixtures/deterministic-worker.mjs",
-      import.meta.url,
-    ),
-  );
-  const bundledFixture = await realpath(expectedFixture);
+  const bundledFixture = resolveBundledFixture("deterministic-worker.mjs");
   if (fixturePath !== bundledFixture) {
     throw new Error("tracer worker script must be Zentra's bundled deterministic fixture");
-  }
-  const fixtureDigest = createHash("sha256")
-    .update(await readFile(bundledFixture))
-    .digest("hex");
-  if (fixtureDigest !== DETERMINISTIC_WORKER_SHA256) {
-    throw new Error("bundled deterministic worker fixture failed byte attestation");
   }
   return parsedInput;
 }
