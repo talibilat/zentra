@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and verified on `fix/predeploy-d-persistence`.
+Implemented, independently reviewed, remediated, and verified on `fix/predeploy-d-persistence`.
 
 ## Root Cause
 
@@ -26,21 +26,27 @@ The journal also opened database sidecars without file-size admission and did no
 - A malicious nonmatching schema test that proves missing indexes fail closed before a read.
 - A concurrent WAL writer test that proves discovery and materialization observe one read snapshot.
 - Exact and one-unit-over boundary tests for event count, per-event bytes, and total materialized bytes.
+- A malicious indexed schema with an extra 128 MiB virtual generated column that cannot be evaluated by the journal connection.
+- Runtime assertions of the actual stream and global discovery bindings, including the `MAX_JOURNAL_READ_EVENTS + 1` limit.
+- Deterministic operation-deadline expiry that proves SQLite invokes the guard and the journal translates the interruption to the public read-limit error.
+- A wall-clock rejection test that proves operation deadlines use monotonic time.
 
 ## Commands And Results
 
 - Baseline reproduction: a 300,000-event `readAll` prepared the unbounded aggregate and rejected after scanning all rows in 61 ms.
   `/usr/bin/time -l` reported 144,637,952 bytes maximum resident set size and 101,174,032 bytes peak memory footprint for the full setup and rejection process.
 - Red test run: `pnpm test -- tests/journal/sqlite-journal.test.ts` exposed six intended gaps, including aggregate SQL in normal and malicious reads, absent file admission, and absent SQLite growth limits.
-- Focused final run: `pnpm exec vitest run tests/journal/sqlite-journal.test.ts` passed 29 of 29 tests in 876 ms.
-- Full suite: `pnpm test` passed 494 of 494 tests across 15 files in 34.24 seconds.
+- Initial focused final run: `pnpm exec vitest run tests/journal/sqlite-journal.test.ts` passed 29 of 29 tests in 876 ms.
+- Review-fix red run: `pnpm exec vitest run tests/journal/sqlite-journal.test.ts` failed on generated-column materialization and wall-clock deadline use before the production fix.
+- Review-fix focused run: `pnpm exec vitest run tests/journal/sqlite-journal.test.ts` passed 32 of 32 tests in 1.14 seconds.
+- Review-fix full suite: `pnpm test` passed 497 of 497 tests across 15 files in 41.38 seconds.
 - Typecheck: `pnpm check` exited 0.
 - Build: `pnpm build` exited 0.
 - Diff hygiene: `git diff --check` exited 0.
 - Final benchmark: the same 300,000-event rejection completed its read in 5 ms.
   `/usr/bin/time -l` reported 152,911,872 bytes maximum resident set size and 107,777,024 bytes peak memory footprint for the full database setup and bounded rejection process.
   The focused test separately asserts that rejection adds less than 64 MiB RSS and completes within one second.
-- Independent review: standards and specification reviewers reported no remaining actionable findings after fail-closed production-plan validation was added.
+- Follow-up fixes address all independent-review findings for explicit materialization projections, monotonic deadlines, malicious generated columns, runtime limit bindings, and deterministic interruption evidence.
 
 ## Acceptance Criteria Evidence
 
@@ -53,6 +59,9 @@ The journal also opened database sidecars without file-size admission and did no
 - A schema that cannot provide indexed bounded reads is rejected before data access.
 - Discovery and materialization remain inside one SQLite transaction.
   The concurrent-writer test proves both phases replay one consistent snapshot in order.
+- Stream and global materialization select only `event_id`, `stream_id`, `stream_version`, `global_position`, `type`, `payload`, `causation_id`, `correlation_id`, and `recorded_at`.
+  Extra generated columns are neither evaluated nor materialized.
+- Operation deadlines use `process.hrtime.bigint()` and are independent of wall-clock changes.
 - Existing append, event-count, per-event, total-byte, read-only, persistence, and optimistic-concurrency behavior remains covered by the passing full suite.
 
 ## Security Boundary
@@ -72,4 +81,6 @@ The wall-time threshold is intentionally generous for supported macOS CI variati
 ## Commit Identity
 
 Implementation commit: `40e1666` (`fix: bound SQLite journal read work`).
-Report commit: this document's containing commit on `fix/predeploy-d-persistence`.
+Initial report commit: `4dc57c1` (`docs: record issue 013 verification`).
+Independent-review fix commit: `ac409c9` (`fix: address journal review findings`).
+Review-fix report commit: this document's containing commit on `fix/predeploy-d-persistence`.
