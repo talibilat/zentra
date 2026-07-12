@@ -62,6 +62,10 @@ export class IntegrationUncertainError extends Error {
   }
 }
 
+class IntegrationPreparationError extends Error {
+  override readonly name = "IntegrationPreparationError";
+}
+
 export interface CleanupFailure {
   readonly projectId: string;
   readonly taskId: string;
@@ -87,6 +91,7 @@ export class IntegrationQueue {
     lease: WorkspaceLease;
     review: ReviewDecision;
     signal: AbortSignal;
+    onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
   }): Promise<IntegrationReceipt> {
     return withProjectLock(input.project.projectId, () =>
       this.integrateUnderLock(input),
@@ -98,6 +103,7 @@ export class IntegrationQueue {
     lease: WorkspaceLease;
     review: ReviewDecision;
     signal: AbortSignal;
+    onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
   }): Promise<IntegrationReceipt> {
     const { project, lease, review, signal } = input;
     const integrationRef = `refs/heads/${project.integrationBranch}`;
@@ -522,6 +528,13 @@ export class IntegrationQueue {
         review,
         validation,
       });
+      if (input.onPrepared !== undefined) {
+        try {
+          await input.onPrepared(preparedReceipt);
+        } catch (error) {
+          throw new IntegrationPreparationError(errorMessage(error));
+        }
+      }
 
       let update: CommandResult;
       let uncertainUpdateReason: string | null = null;
@@ -646,7 +659,8 @@ export class IntegrationQueue {
     } catch (error) {
       if (
         error instanceof IntegrationExecutionError ||
-        error instanceof IntegrationUncertainError
+        error instanceof IntegrationUncertainError ||
+        error instanceof IntegrationPreparationError
       ) {
         throw error;
       }
@@ -735,7 +749,8 @@ function prepareCompletedReceipt(input: {
   }
   ValidationReportSchema.parse(input.validation);
   const command = Object.freeze([...input.validation.command]);
-  const validation = Object.freeze({ ...input.validation, command });
+  const provenance = Object.freeze({ ...input.validation.provenance });
+  const validation = Object.freeze({ ...input.validation, command, provenance });
   const receipt: IntegrationReceipt = Object.freeze({
     taskId: input.taskId,
     projectId: input.projectId,

@@ -210,6 +210,7 @@ describe("IntegrationQueue", () => {
     expect(Object.isFrozen(receipt)).toBe(true);
     expect(Object.isFrozen(receipt.validation)).toBe(true);
     expect(Object.isFrozen(receipt.validation.command)).toBe(true);
+    expect(Object.isFrozen(receipt.validation.provenance)).toBe(true);
     expect(isVerifiedIntegrationReceipt({ ...receipt })).toBe(false);
     expect(
       await gitOk(repositoryPath, [
@@ -217,6 +218,55 @@ describe("IntegrationQueue", () => {
         `${project.integrationBranch}:feature.txt`,
       ]),
     ).toBe("integrated");
+  });
+
+  it("invokes the prepared sink exactly once before update-ref", async () => {
+    const reviewed = await ticket("task-prepared-order", "prepared.txt", "prepared\n");
+    const ordering: string[] = [];
+    class OrderingGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (args.includes("update-ref")) ordering.push("update-ref");
+        return super.run(cwd, args, options);
+      }
+    }
+    const integrationQueue = new IntegrationQueue(
+      new OrderingGitClient(),
+      new ValidationRunner(new ProcessSupervisor()),
+    );
+
+    const receipt = await integrationQueue.integrate({
+      project,
+      lease: reviewed.lease,
+      review: reviewed.review,
+      signal: AbortSignal.timeout(10_000),
+      onPrepared(prepared) {
+        ordering.push("prepared");
+        expect(Object.isFrozen(prepared)).toBe(true);
+        expect(prepared).toMatchObject({ outcome: "completed", resultCommit: expect.any(String) });
+      },
+    });
+
+    expect(receipt.outcome).toBe("completed");
+    expect(ordering).toEqual(["prepared", "update-ref"]);
+  });
+
+  it("does not update the integration ref when the prepared sink fails", async () => {
+    const reviewed = await ticket("task-prepared-failure", "prepared-failure.txt", "prepared\n");
+
+    await expect(queue().integrate({
+      project,
+      lease: reviewed.lease,
+      review: reviewed.review,
+      signal: AbortSignal.timeout(10_000),
+      onPrepared() {
+        throw new Error("journal unavailable");
+      },
+    })).rejects.toThrow("journal unavailable");
+    expect(await integrationHead()).toBe(originalIntegrationHead);
   });
 
   it("throws a typed timed_out error when source identity lookup times out", async () => {

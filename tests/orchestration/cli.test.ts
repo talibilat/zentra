@@ -199,6 +199,13 @@ describe("Zentra CLI", () => {
     });
     expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:greeting.txt"]))
       .toBe("hello from CLI");
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees", "task-cli"))).toBe(false);
+    const ticketRef = await new GitClient().run(testFixture.repositoryPath, [
+      "show-ref",
+      "--verify",
+      "refs/heads/ticket/task-cli",
+    ]);
+    expect(ticketRef.exitCode).not.toBe(0);
 
     const status = await invoke([
       "task", "status",
@@ -625,6 +632,79 @@ describe("Zentra CLI", () => {
       "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
     ])).toBe(refsBefore);
   });
+
+  it("rejects an unsafe integration branch as a generic config error", async () => {
+    const testFixture = await fixture();
+    const config = JSON.parse(readFileSync(testFixture.configPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(
+      testFixture.configPath,
+      JSON.stringify({ ...config, integrationBranch: "-unsafe..branch.lock" }),
+      "utf8",
+    );
+
+    const result = await invoke(["project", "validate", "--config", testFixture.configPath]);
+
+    expect(result).toEqual(expect.objectContaining({
+      code: 1,
+      stdout: "",
+      json: {
+        command: "project.validate",
+        error: { code: "INVALID_CONFIG", message: "Project configuration is invalid." },
+      },
+    }));
+  });
+
+  it.each(["task.status", "recover"])(
+    "fails %s with one bounded generic error before parsing an oversized journal payload",
+    async (command) => {
+      const testFixture = await fixture();
+      const journal = new SqliteEventJournal(testFixture.databasePath);
+      new TaskService(journal).create({
+        taskId: "task-hostile-journal",
+        projectId: "cli-project",
+        title: "Hostile journal",
+        correlationId: "task-hostile-journal",
+      });
+      journal.close();
+      const database = new Database(testFixture.databasePath);
+      database.prepare("UPDATE events SET payload = ? WHERE stream_id = ?").run(
+        JSON.stringify(ATTACKER_MARKER.repeat(400_000)),
+        "task-hostile-journal",
+      );
+      database.close();
+
+      const args = command === "task.status"
+        ? ["task", "status", "--database", testFixture.databasePath, "--task-id", "task-hostile-journal"]
+        : [
+            "recover",
+            "--config",
+            testFixture.configPath,
+            "--database",
+            testFixture.databasePath,
+            "--task-id",
+            "task-hostile-journal",
+          ];
+      const result = await invoke(args);
+
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).not.toContain(ATTACKER_MARKER);
+      expect(Buffer.byteLength(result.stderr)).toBeLessThan(512);
+      expect(result.json).toEqual(command === "task.status"
+        ? {
+            command,
+            error: { code: "OPERATION_FAILED", message: "Operation failed." },
+          }
+        : {
+            command,
+            decision: {
+              taskId: "task-hostile-journal",
+              action: "record_failure",
+              message: "Recovery found invalid durable state.",
+            },
+          });
+    },
+  );
 
   it("bounds and sanitizes an oversized attacker-controlled recovery reason", async () => {
     const testFixture = await fixture();

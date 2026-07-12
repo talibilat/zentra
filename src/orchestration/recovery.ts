@@ -14,6 +14,7 @@ import {
   ReviewDecisionSchema,
 } from "../reviews/reviewer-adapter.js";
 import type { TaskService } from "../tasks/task-service.js";
+import type { TaskView } from "../tasks/task-projection.js";
 import {
   assertNoGitObjectSubstitution,
   type CommandResult,
@@ -80,9 +81,21 @@ const IntegrationReceiptSchema = z.strictObject({
   validation: ValidationReportSchema,
   outcome: z.literal("completed"),
 });
+const CleanupFailureSchema = z.strictObject({
+  projectId: z.string().min(1),
+  taskId: z.string().min(1),
+  candidatePath: z.string().min(1),
+  reason: z.string().min(1),
+  timestamp: z.string().datetime(),
+});
+const CleanupFailuresSchema = z.array(CleanupFailureSchema).optional();
+const IntegrationPreparedPayloadSchema = z.strictObject({
+  receipt: IntegrationReceiptSchema,
+});
 const IntegrationObservedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
   verification: z.literal("verified"),
+  cleanupFailures: CleanupFailuresSchema,
 });
 const CommitObservedPayloadSchema = z.strictObject({
   stage: z.literal("commit"),
@@ -99,17 +112,37 @@ const IntegrationUncertainPayloadSchema = z.strictObject({
     reconciliationIssue: z.string().nullable(),
     candidatePath: z.string().min(1),
   }),
+  cleanupFailures: CleanupFailuresSchema,
 });
 const IntegrationErrorPayloadSchema = z.strictObject({
   error: z.strictObject({
     name: z.string().min(1),
     message: z.string(),
   }),
+  cleanupFailures: CleanupFailuresSchema,
 });
 const IntegrationVerificationFailedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
   verification: z.literal("failed"),
   reason: z.string().min(1),
+  cleanupFailures: CleanupFailuresSchema,
+});
+const CleanupStartedPayloadSchema = z.strictObject({
+  sourceCommit: z.string().regex(COMMIT_ID),
+  resultCommit: z.string().regex(COMMIT_ID),
+  workspace: z.string().min(1),
+  branch: z.string().min(1),
+});
+const CleanupCompletedPayloadSchema = CleanupStartedPayloadSchema;
+const CleanupObservedPayloadSchema = z.strictObject({
+  phase: z.string().min(1),
+  uncertain: z.boolean(),
+  evidence: z.record(z.string(), z.unknown()),
+  reason: z.string().min(1),
+});
+const CleanupReconciledPayloadSchema = z.strictObject({
+  cleanup: CleanupStartedPayloadSchema,
+  observation: CleanupObservedPayloadSchema,
 });
 const CompletedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
@@ -127,6 +160,12 @@ interface RecoveryChain {
   readonly reviewRequested: z.infer<typeof ReviewRequestedPayloadSchema> | null;
   readonly reviewApproved: z.infer<typeof ReviewApprovedPayloadSchema> | null;
   readonly integrationStarted: z.infer<typeof IntegrationStartedPayloadSchema> | null;
+  readonly integrationPrepared: z.infer<typeof IntegrationPreparedPayloadSchema> | null;
+  readonly integrationObserved: z.infer<typeof IntegrationObservedPayloadSchema> | null;
+  readonly cleanupStarted: z.infer<typeof CleanupStartedPayloadSchema> | null;
+  readonly cleanupCompleted: z.infer<typeof CleanupCompletedPayloadSchema> | null;
+  readonly cleanupObserved: z.infer<typeof CleanupObservedPayloadSchema> | null;
+  readonly cleanupReconciled: z.infer<typeof CleanupReconciledPayloadSchema> | null;
 }
 
 export interface RecoveryDecision {
@@ -180,12 +219,16 @@ export class RecoveryService {
       event.type === "task.started" ||
       event.type === "task.commit_observed" ||
       event.type === "task.integration_started" ||
-      event.type === "task.integration_observed"
+      event.type === "task.integration_prepared" ||
+      event.type === "task.integration_observed" ||
+      event.type.startsWith("task.cleanup_")
     );
     const hasCommitOrIntegrationEffect = events.some((event) =>
       event.type === "task.commit_observed" ||
       event.type === "task.integration_started" ||
-      event.type === "task.integration_observed"
+      event.type === "task.integration_prepared" ||
+      event.type === "task.integration_observed" ||
+      event.type.startsWith("task.cleanup_")
     );
 
     let chain: RecoveryChain;
@@ -242,6 +285,97 @@ export class RecoveryService {
           );
         }
         return decision(taskId, "resume_preparation", "task creation is durable and workspace preparation has not started");
+      }
+
+      if (last.type === "task.cleanup_started") {
+        if (workspace.registered || workspace.pathExists || workspace.branchExists) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "cleanup started but exact ticket worktree or ref state remains; cleanup must not be retried automatically",
+          );
+        }
+        const observed = chain.integrationObserved;
+        if (observed === null) {
+          return decision(taskId, "await_reconciliation", "verified integration evidence is missing before cleanup");
+        }
+        const issue = await this.completionEvidenceIssue(
+          project,
+          taskId,
+          chain,
+          {
+            ...workspace,
+            head: observed.receipt.sourceCommit,
+            dirty: false,
+            diff: "",
+          },
+          observed.receipt,
+        );
+        return issue === null
+          ? decision(taskId, "record_completion", "cleanup effects are absent and durable completion may be recorded")
+          : decision(taskId, "await_reconciliation", issue);
+      }
+
+      if (
+        last.type === "task.cleanup_observed" ||
+        last.type === "task.cleanup_reconciled"
+      ) {
+        if (workspace.registered || workspace.pathExists || workspace.branchExists) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "cleanup uncertainty remains while exact ticket worktree or ref state is present",
+          );
+        }
+        const observed = chain.integrationObserved;
+        if (observed === null) {
+          return decision(taskId, "await_reconciliation", "verified integration evidence is missing before cleanup reconciliation");
+        }
+        const issue = await this.completionEvidenceIssue(
+          project,
+          taskId,
+          chain,
+          {
+            ...workspace,
+            head: observed.receipt.sourceCommit,
+            dirty: false,
+            diff: "",
+          },
+          observed.receipt,
+        );
+        return issue === null
+          ? decision(taskId, "record_completion", "cleanup uncertainty was reconciled from exact absent ticket state")
+          : decision(taskId, "await_reconciliation", issue);
+      }
+
+      if (last.type === "task.cleanup_completed") {
+        if (workspace.registered || workspace.pathExists || workspace.branchExists) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "durable cleanup completion contradicts remaining ticket worktree or ref state",
+          );
+        }
+        const observed = chain.integrationObserved;
+        if (observed === null) {
+          return decision(taskId, "await_reconciliation", "verified integration evidence is missing before cleanup");
+        }
+        const virtualWorkspace: WorkspaceInspection = {
+          ...workspace,
+          head: observed.receipt.sourceCommit,
+          dirty: false,
+          diff: "",
+        };
+        const issue = await this.completionEvidenceIssue(
+          project,
+          taskId,
+          chain,
+          virtualWorkspace,
+          observed.receipt,
+        );
+        return issue === null
+          ? decision(taskId, "record_completion", "durable cleanup and integration evidence were strictly verified")
+          : decision(taskId, "await_reconciliation", issue);
       }
 
       if (!workspace.registered) {
@@ -327,6 +461,30 @@ export class RecoveryService {
         return decision(taskId, "await_reconciliation", "integration or merge effect started without a durable result and must not be retried");
       }
 
+
+      if (last.type === "task.integration_prepared") {
+        await assertNoGitObjectSubstitution(this.git, project.repositoryPath, GIT_READ_TIMEOUT_MS);
+        await this.inspectIntegrationStart(project, chain, workspace);
+        const prepared = chain.integrationPrepared;
+        if (prepared === null) {
+          return decision(taskId, "await_reconciliation", "prepared integration evidence is invalid or missing");
+        }
+        const verified = await this.completionEvidenceIssue(
+          project,
+          taskId,
+          chain,
+          workspace,
+          prepared.receipt,
+        );
+        return verified === null
+          ? decision(
+              taskId,
+              "record_completion",
+              "prepared receipt and exact post-CAS integration ref were strictly verified",
+            )
+          : decision(taskId, "await_reconciliation", verified);
+      }
+
       if (last.type === "task.integration_observed") {
         await assertNoGitObjectSubstitution(this.git, project.repositoryPath, GIT_READ_TIMEOUT_MS);
         await this.inspectIntegrationStart(project, chain, workspace);
@@ -334,7 +492,7 @@ export class RecoveryService {
         if (!observed.success) {
           return decision(taskId, "await_reconciliation", "integration evidence is uncertain, invalid, missing, or truncated");
         }
-        const verified = await this.verifyCompletedIntegration(
+        const verified = await this.completionEvidenceIssue(
           project,
           taskId,
           chain,
@@ -359,6 +517,101 @@ export class RecoveryService {
         `recovery inspection failed closed: ${errorMessage(error)}`,
       );
     }
+  }
+
+  async recordCompletion(taskId: string): Promise<TaskView> {
+    const authorization = await this.inspect(taskId);
+    if (authorization.action !== "record_completion") {
+      throw new Error(
+        `recovery completion is not authorized: ${authorization.action}`,
+      );
+    }
+
+    const events = this.journal.readStream(taskId);
+    const chain = reconstructChain(taskId, events);
+    const last = events.at(-1);
+    if (last === undefined) throw new Error(`task ${taskId} not found`);
+    const observedReceipt = chain.integrationObserved?.receipt ?? null;
+    const preparedReceipt = chain.integrationPrepared?.receipt ?? null;
+    const receipt = observedReceipt ?? preparedReceipt;
+    if (receipt === null) throw new Error("durable completed integration receipt is missing");
+
+    if (last.type === "task.cleanup_completed") {
+      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+    }
+    if (last.type === "task.cleanup_started") {
+      const reauthorization = await this.inspect(taskId);
+      if (reauthorization.action !== "record_completion") {
+        throw new Error(
+          `cleanup completion is not authorized after reinspection: ${reauthorization.action}`,
+        );
+      }
+      const refreshedEvents = this.journal.readStream(taskId);
+      const refreshedChain = reconstructChain(taskId, refreshedEvents);
+      if (refreshedEvents.at(-1)?.type !== "task.cleanup_started") {
+        throw new Error("cleanup completion state changed after reinspection");
+      }
+      this.tasks.append(
+        taskId,
+        "task.cleanup_completed",
+        refreshedChain.cleanupStarted,
+        null,
+      );
+      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+    }
+    if (last.type === "task.cleanup_observed") {
+      this.tasks.append(taskId, "task.cleanup_reconciled", {
+        cleanup: chain.cleanupStarted,
+        observation: chain.cleanupObserved,
+      }, null);
+      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+    }
+    if (last.type === "task.cleanup_reconciled") {
+      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+    }
+
+    if (last.type === "task.integration_prepared") {
+      this.tasks.append(
+        taskId,
+        "task.integration_observed",
+        { receipt, verification: "verified", cleanupFailures: [] },
+        null,
+      );
+    } else if (last.type !== "task.integration_observed") {
+      throw new Error(`unsupported record_completion state ${last.type}`);
+    }
+
+    const lease = chain.lease;
+    if (lease === null) throw new Error("durable workspace lease is missing");
+    const cleanupPayload = {
+      sourceCommit: receipt.sourceCommit,
+      resultCommit: receipt.resultCommit,
+      workspace: lease.workspace,
+      branch: `ticket/${taskId}`,
+    };
+    this.tasks.append(taskId, "task.cleanup_started", cleanupPayload, null);
+    try {
+      await this.worktrees.cleanupCompleted(
+        this.projects.get(chain.created.projectId),
+        { taskId, branch: cleanupPayload.branch, path: lease.workspace },
+        receipt.sourceCommit,
+        { timeoutMs: GIT_READ_TIMEOUT_MS },
+      );
+    } catch (error) {
+      const cleanupError = error as {
+        readonly phase?: unknown;
+        readonly uncertain?: unknown;
+        readonly evidence?: unknown;
+      };
+      return this.tasks.append(taskId, "task.cleanup_observed", {
+        phase: typeof cleanupError.phase === "string" ? cleanupError.phase : "unknown",
+        uncertain: cleanupError.uncertain === true,
+        evidence: isRecord(cleanupError.evidence) ? cleanupError.evidence : {},
+        reason: errorMessage(error),
+      }, null);
+    }
+    this.tasks.append(taskId, "task.cleanup_completed", cleanupPayload, null);
+    return this.tasks.append(taskId, "task.completed", { receipt }, null);
   }
 
   private async inspectWorkspace(
@@ -562,6 +815,53 @@ export class RecoveryService {
       resultShape[2] !== receipt.sourceCommit
     ) {
       return "integration result is not the exact Task 7 no-ff merge shape";
+    }
+    return null;
+  }
+
+  private async completionEvidenceIssue(
+    project: ProjectConfig,
+    taskId: string,
+    chain: RecoveryChain,
+    workspace: WorkspaceInspection,
+    receipt: z.infer<typeof IntegrationReceiptSchema>,
+  ): Promise<string | null> {
+    const integrationIssue = await this.verifyCompletedIntegration(
+      project,
+      taskId,
+      chain,
+      workspace,
+      receipt,
+    );
+    if (integrationIssue !== null) return integrationIssue;
+    return this.candidateCleanupIssue(project, receipt);
+  }
+
+  private async candidateCleanupIssue(
+    project: ProjectConfig,
+    receipt: z.infer<typeof IntegrationReceiptSchema>,
+  ): Promise<string | null> {
+    const candidatePath = receipt.validation.provenance.canonicalCwd;
+    let pathPresent = false;
+    try {
+      await lstat(candidatePath);
+      pathPresent = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        return `candidate cleanup state could not be inspected at ${candidatePath}`;
+      }
+    }
+    const listed = await this.read(project.repositoryPath, [
+      "worktree",
+      "list",
+      "--porcelain",
+      "-z",
+    ]);
+    const registered = parseWorktrees(listed.stdout).some(
+      (entry) => entry.path === candidatePath,
+    );
+    if (pathPresent || registered) {
+      return `candidate remains ${pathPresent ? "present" : "absent"} and ${registered ? "registered" : "unregistered"} at ${candidatePath}`;
     }
     return null;
   }
@@ -800,7 +1100,12 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   }
   for (const type of [
     "task.commit_observed",
+    "task.integration_prepared",
     "task.integration_observed",
+    "task.cleanup_started",
+    "task.cleanup_completed",
+    "task.cleanup_observed",
+    "task.cleanup_reconciled",
     "task.completed",
   ]) {
     if (events.filter((event) => event.type === type).length > 1) {
@@ -832,10 +1137,18 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     events,
     "task.integration_started",
   );
+  const integrationPrepared = parseOptionalEvent(
+    IntegrationPreparedPayloadSchema,
+    events,
+    "task.integration_prepared",
+  );
 
   const commitObserved = events.find((event) => event.type === "task.commit_observed");
   if (commitObserved !== undefined) parseEvent(CommitObservedPayloadSchema, commitObserved);
   const integrationObserved = events.find((event) => event.type === "task.integration_observed");
+  const successfulIntegrationObserved = integrationObserved === undefined
+    ? null
+    : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
   if (integrationObserved !== undefined) {
     const parsed = z.union([
       IntegrationObservedPayloadSchema,
@@ -845,6 +1158,26 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     ]).safeParse(integrationObserved.payload);
     if (!parsed.success) throw new Error("task.integration_observed payload is invalid");
   }
+  const cleanupStarted = parseOptionalEvent(
+    CleanupStartedPayloadSchema,
+    events,
+    "task.cleanup_started",
+  );
+  const cleanupCompleted = parseOptionalEvent(
+    CleanupCompletedPayloadSchema,
+    events,
+    "task.cleanup_completed",
+  );
+  const cleanupObserved = parseOptionalEvent(
+    CleanupObservedPayloadSchema,
+    events,
+    "task.cleanup_observed",
+  );
+  const cleanupReconciled = parseOptionalEvent(
+    CleanupReconciledPayloadSchema,
+    events,
+    "task.cleanup_reconciled",
+  );
   const completed = events.find((event) => event.type === "task.completed");
   const completedPayload = completed === undefined
     ? null
@@ -892,6 +1225,81 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
       throw new Error("receipt reviewer identity or evidence contradicts integration start");
     }
   }
+  if (integrationPrepared !== null) {
+    if (
+      integrationStarted === null ||
+      integrationPrepared.receipt.taskId !== taskId ||
+      integrationPrepared.receipt.projectId !== created.projectId ||
+      integrationPrepared.receipt.sourceCommit !== integrationStarted.sourceCommit ||
+      canonicalJson(integrationPrepared.receipt.review) !== canonicalJson(integrationStarted.review)
+    ) {
+      throw new Error("prepared receipt identities contradict the durable integration start");
+    }
+  }
+  if (
+    successfulObservation?.success &&
+    integrationPrepared !== null &&
+    canonicalJson(successfulObservation.data.receipt) !== canonicalJson(integrationPrepared.receipt)
+  ) {
+    throw new Error("verified integration observation contradicts the prepared receipt");
+  }
+  const indexOf = (type: string): number => events.findIndex((event) => event.type === type);
+  if (
+    integrationPrepared !== null &&
+    indexOf("task.integration_prepared") < indexOf("task.integration_started")
+  ) {
+    throw new Error("integration preparation precedes integration start");
+  }
+  if (cleanupStarted !== null) {
+    if (
+      !successfulIntegrationObserved?.success ||
+      indexOf("task.cleanup_started") < indexOf("task.integration_observed") ||
+      cleanupStarted.sourceCommit !== successfulIntegrationObserved.data.receipt.sourceCommit ||
+      cleanupStarted.resultCommit !== successfulIntegrationObserved.data.receipt.resultCommit ||
+      cleanupStarted.branch !== `ticket/${taskId}`
+    ) {
+      throw new Error("cleanup start contradicts verified integration evidence");
+    }
+  }
+  if (cleanupCompleted !== null || cleanupObserved !== null) {
+    const cleanupEnd = cleanupCompleted ?? cleanupObserved;
+    if (
+      cleanupStarted === null ||
+      indexOf(cleanupCompleted !== null ? "task.cleanup_completed" : "task.cleanup_observed") <
+        indexOf("task.cleanup_started")
+    ) {
+      throw new Error("cleanup result has no prior cleanup start");
+    }
+    if (
+      cleanupCompleted !== null &&
+      canonicalJson(cleanupCompleted) !== canonicalJson(cleanupStarted)
+    ) {
+      throw new Error("cleanup completion contradicts cleanup start");
+    }
+    void cleanupEnd;
+  }
+  if (cleanupCompleted !== null && cleanupObserved !== null) {
+    throw new Error("cleanup cannot be both completed and observed as uncertain");
+  }
+  if (cleanupReconciled !== null) {
+    if (
+      cleanupStarted === null ||
+      cleanupObserved === null ||
+      cleanupCompleted !== null ||
+      indexOf("task.cleanup_reconciled") < indexOf("task.cleanup_observed") ||
+      canonicalJson(cleanupReconciled.cleanup) !== canonicalJson(cleanupStarted) ||
+      canonicalJson(cleanupReconciled.observation) !== canonicalJson(cleanupObserved)
+    ) {
+      throw new Error("cleanup reconciliation contradicts cleanup start or observation");
+    }
+  }
+  if (
+    completedPayload !== null &&
+    cleanupCompleted === null &&
+    cleanupReconciled === null
+  ) {
+    throw new Error("completed task has no cleanup completion or reconciliation");
+  }
   if (
     completedPayload !== null &&
     (!successfulObservation?.success ||
@@ -936,6 +1344,12 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     reviewRequested,
     reviewApproved,
     integrationStarted,
+    integrationPrepared,
+    integrationObserved: successfulObservation?.success ? successfulObservation.data : null,
+    cleanupStarted,
+    cleanupCompleted,
+    cleanupObserved,
+    cleanupReconciled,
   };
 }
 
@@ -1000,4 +1414,8 @@ function decision(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

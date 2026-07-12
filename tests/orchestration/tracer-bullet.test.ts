@@ -22,6 +22,7 @@ import {
   IntegrationExecutionError,
   IntegrationUncertainError,
   IntegrationQueue,
+  type CleanupFailure,
   type IntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -47,9 +48,11 @@ import type {
 } from "../../src/workers/worker-adapter.js";
 import {
   GitClient,
+  type CommandResult,
   type GitRunOptions,
 } from "../../src/workspaces/git-client.js";
 import {
+  WorkspaceCleanupError,
   WorkspaceGitTerminationError,
   WorkspaceCommitUncertainError,
   WorktreeManager,
@@ -241,7 +244,7 @@ describe("TracerBulletOrchestrator", () => {
       title: "Update greeting",
       lifecycle: "terminal",
       terminalOutcome: "completed",
-      streamVersion: 9,
+      streamVersion: 12,
       leaseOwner: "worker-1",
     });
     expect(tasks.get("task-greeting")).toEqual(result);
@@ -261,7 +264,10 @@ describe("TracerBulletOrchestrator", () => {
       "task.review_requested",
       "task.review_approved",
       "task.integration_started",
+      "task.integration_prepared",
       "task.integration_observed",
+      "task.cleanup_started",
+      "task.cleanup_completed",
       "task.completed",
     ]);
     expect(events[3]?.payload).toMatchObject({
@@ -272,11 +278,12 @@ describe("TracerBulletOrchestrator", () => {
       validation: { name: "focused", outcome: "completed", exitCode: 0 },
     });
     const approved = events[5]?.payload as { review: unknown };
-    expect(events[7]?.payload).toMatchObject({
+    expect(events[8]?.payload).toMatchObject({
       verification: "verified",
       receipt: { outcome: "completed" },
+      cleanupFailures: [],
     });
-    const completed = events[8]?.payload as {
+    const completed = events[11]?.payload as {
       receipt: { outcome: string; resultCommit: string; review: unknown };
     };
     expect(completed.receipt).toMatchObject({
@@ -290,6 +297,13 @@ describe("TracerBulletOrchestrator", () => {
         "refs/heads/zentra/integration",
       ]),
     );
+    expect(existsSync(path.join(fixture.worktreeRoot, runInput.taskId))).toBe(false);
+    const ticketRef = await new GitClient().run(fixture.repositoryPath, [
+      "show-ref",
+      "--verify",
+      `refs/heads/ticket/${runInput.taskId}`,
+    ]);
+    expect(ticketRef.exitCode).not.toBe(0);
   });
 
   it("completes when integration advances after the ticket source was created", async () => {
@@ -324,15 +338,256 @@ describe("TracerBulletOrchestrator", () => {
     });
 
     expect(result.terminalOutcome).toBe("completed");
-    expect(journal.readStream(result.taskId).at(-2)?.payload).toMatchObject({
+    expect(journal.readStream(result.taskId).find((event) =>
+      event.type === "task.integration_observed")?.payload).toMatchObject({
       receipt: { originalIntegrationCommit: baseB, outcome: "completed" },
       verification: "verified",
     });
   });
 
-  it("recovers real supervised evidence when completion append crashes after integration observation", async () => {
+  it("persists candidate cleanup failures in integration evidence while completing", async () => {
+    const fixture = await fixtureRepository();
+    class CleanupFailingGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (
+          args.includes("worktree") &&
+          args.includes("remove") &&
+          args.some((argument) => argument.includes(".zentra-integration-"))
+        ) {
+          return Promise.resolve({
+            stdout: "",
+            stderr: "candidate cleanup denied",
+            exitCode: 1,
+            truncated: false,
+            termination: null,
+          });
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+    const validations = new ValidationRunner(new ProcessSupervisor());
+    const integrations = new IntegrationQueue(new CleanupFailingGitClient(), validations);
+    const { journal, orchestrator } = system(fixture.configPath, { validations, integrations });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-candidate-cleanup-evidence",
+      signal: runSignal(),
+    });
+
+    expect(result.terminalOutcome).toBe("completed");
+    expect(journal.readStream(result.taskId).find((event) =>
+      event.type === "task.integration_observed")?.payload).toMatchObject({
+      cleanupFailures: [
+        {
+          taskId: result.taskId,
+          reason: expect.stringContaining("candidate cleanup"),
+        },
+      ],
+    });
+  });
+
+  it("persists real candidate cleanup failure evidence with a failed full validation", async () => {
+    const fixture = await fixtureRepository();
+    class CleanupFailingGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (
+          args.includes("worktree") &&
+          args.includes("remove") &&
+          args.some((argument) => argument.includes(".zentra-integration-"))
+        ) {
+          return Promise.resolve({
+            stdout: "",
+            stderr: "candidate cleanup denied",
+            exitCode: 1,
+            truncated: false,
+            termination: null,
+          });
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+    class FailingFullValidation extends ValidationRunner {
+      override run(
+        project: ProjectConfig,
+        name: "focused" | "full",
+        cwd: string,
+        signal: AbortSignal,
+        context?: Parameters<ValidationRunner["run"]>[4],
+      ): Promise<ValidationReport> {
+        if (name === "full") return Promise.resolve(validationReport(project, name, "failed"));
+        return super.run(project, name, cwd, signal, context);
+      }
+    }
+    const validations = new FailingFullValidation(new ProcessSupervisor());
+    const integrations = new IntegrationQueue(new CleanupFailingGitClient(), validations);
+    const { journal, orchestrator } = system(fixture.configPath, { validations, integrations });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-failed-validation-cleanup",
+      signal: runSignal(),
+    });
+
+    expect(result.terminalOutcome).toBe("failed");
+    expect(journal.readStream(result.taskId).at(-1)?.payload).toMatchObject({
+      receipt: { outcome: "failed", validation: { outcome: "failed" } },
+      candidateCleanupFailures: [
+        {
+          taskId: result.taskId,
+          reason: expect.stringContaining("candidate cleanup"),
+        },
+      ],
+    });
+  });
+
+  it("recovers prepared evidence when integration observation append crashes after CAS", async () => {
     const fixture = await fixtureRepository();
     const databasePath = path.join(fixture.baseDirectory, "restart.sqlite");
+    const firstJournal = new SqliteEventJournal(databasePath);
+    journals.push(firstJournal);
+    class ObservationCrashTaskService extends TaskService {
+      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
+        if (args[1] === "task.integration_observed") {
+          throw new Error("simulated integration observation append crash");
+        }
+        return super.append(...args);
+      }
+    }
+    const tasks = new ObservationCrashTaskService(firstJournal);
+    const projects = ProjectRegistry.fromFile(fixture.configPath);
+    const worktrees = new WorktreeManager();
+    const supervisor = new ProcessSupervisor();
+    const validations = new ValidationRunner(supervisor);
+    const orchestrator = new TracerBulletOrchestrator(
+      tasks,
+      projects,
+      worktrees,
+      supervisor,
+      validations,
+      new DeterministicReviewerAdapter(supervisor, reviewerFixture),
+      new ReviewGate(),
+      new IntegrationQueue(new GitClient(), validations),
+    );
+
+    await expect(orchestrator.run({
+      ...runInput,
+      taskId: "task-restart-real-evidence",
+      signal: runSignal(),
+    })).rejects.toThrow("simulated integration observation append crash");
+    expect(firstJournal.readStream("task-restart-real-evidence").at(-1)?.type).toBe(
+      "task.integration_prepared",
+    );
+    firstJournal.close();
+    journals.splice(journals.indexOf(firstJournal), 1);
+
+    const restartedJournal = new SqliteEventJournal(databasePath);
+    journals.push(restartedJournal);
+    const recovery = new RecoveryService(
+      restartedJournal,
+      new TaskService(restartedJournal),
+      projects,
+      worktrees,
+      new GitClient(),
+    );
+    await expect(recovery.inspect("task-restart-real-evidence")).resolves.toMatchObject({
+      action: "record_completion",
+    });
+    await expect(recovery.recordCompletion("task-restart-real-evidence")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+    expect(existsSync(path.join(fixture.worktreeRoot, "task-restart-real-evidence"))).toBe(false);
+    const ticketRef = await new GitClient().run(fixture.repositoryPath, [
+      "show-ref",
+      "--verify",
+      "refs/heads/ticket/task-restart-real-evidence",
+    ]);
+    expect(ticketRef.exitCode).not.toBe(0);
+  });
+
+  it("blocks prepared-only completion when candidate cleanup failed before observation crash", async () => {
+    const fixture = await fixtureRepository();
+    const databasePath = path.join(fixture.baseDirectory, "retained-candidate.sqlite");
+    const journal = new SqliteEventJournal(databasePath);
+    journals.push(journal);
+    class ObservationCrashTaskService extends TaskService {
+      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
+        if (args[1] === "task.integration_observed") throw new Error("observation crash");
+        return super.append(...args);
+      }
+    }
+    class CandidateCleanupFailingGit extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (
+          args.includes("worktree") &&
+          args.includes("remove") &&
+          args.some((argument) => argument.includes(".zentra-integration-"))
+        ) {
+          return Promise.resolve({
+            stdout: "",
+            stderr: "candidate retained",
+            exitCode: 1,
+            truncated: false,
+            termination: null,
+          });
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+    const tasks = new ObservationCrashTaskService(journal);
+    const projects = ProjectRegistry.fromFile(fixture.configPath);
+    const worktrees = new WorktreeManager();
+    const supervisor = new ProcessSupervisor();
+    const validations = new ValidationRunner(supervisor);
+    const orchestrator = new TracerBulletOrchestrator(
+      tasks,
+      projects,
+      worktrees,
+      supervisor,
+      validations,
+      new DeterministicReviewerAdapter(supervisor, reviewerFixture),
+      new ReviewGate(),
+      new IntegrationQueue(new CandidateCleanupFailingGit(), validations),
+    );
+
+    await expect(orchestrator.run({
+      ...runInput,
+      taskId: "task-retained-candidate",
+      signal: runSignal(),
+    })).rejects.toThrow("observation crash");
+    const prepared = journal.readStream("task-retained-candidate").at(-1)?.payload as {
+      receipt: { validation: { provenance: { canonicalCwd: string } } };
+    };
+    expect(existsSync(prepared.receipt.validation.provenance.canonicalCwd)).toBe(true);
+    const recovery = new RecoveryService(
+      journal,
+      new TaskService(journal),
+      projects,
+      worktrees,
+      new GitClient(),
+    );
+    await expect(recovery.inspect("task-retained-candidate")).resolves.toMatchObject({
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/candidate.*registered|candidate.*present/i),
+    });
+  });
+
+  it("recovers completion after cleanup is durable but task completion append crashes", async () => {
+    const fixture = await fixtureRepository();
+    const databasePath = path.join(fixture.baseDirectory, "cleanup-restart.sqlite");
     const firstJournal = new SqliteEventJournal(databasePath);
     journals.push(firstJournal);
     class CompletionCrashTaskService extends TaskService {
@@ -359,12 +614,13 @@ describe("TracerBulletOrchestrator", () => {
 
     await expect(orchestrator.run({
       ...runInput,
-      taskId: "task-restart-real-evidence",
+      taskId: "task-cleanup-restart",
       signal: runSignal(),
     })).rejects.toThrow("simulated completion append crash");
-    expect(firstJournal.readStream("task-restart-real-evidence").at(-1)?.type).toBe(
-      "task.integration_observed",
+    expect(firstJournal.readStream("task-cleanup-restart").at(-1)?.type).toBe(
+      "task.cleanup_completed",
     );
+    expect(existsSync(path.join(fixture.worktreeRoot, "task-cleanup-restart"))).toBe(false);
     firstJournal.close();
     journals.splice(journals.indexOf(firstJournal), 1);
 
@@ -377,9 +633,64 @@ describe("TracerBulletOrchestrator", () => {
       worktrees,
       new GitClient(),
     );
-    await expect(recovery.inspect("task-restart-real-evidence")).resolves.toMatchObject({
+    await expect(recovery.inspect("task-cleanup-restart")).resolves.toMatchObject({
       action: "record_completion",
     });
+    await expect(recovery.recordCompletion("task-cleanup-restart")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+  });
+
+  it("records cleanup uncertainty and preserves the completed ticket worktree", async () => {
+    const fixture = await fixtureRepository();
+    let cleanupAttempts = 0;
+    class UncertainCleanupWorktrees extends WorktreeManager {
+      override cleanupCompleted(
+        _project: ProjectConfig,
+        lease: WorkspaceLease,
+        sourceCommit: string,
+      ): Promise<void> {
+        cleanupAttempts += 1;
+        throw new WorkspaceCleanupError(
+          "worktree_removal",
+          true,
+          { taskId: lease.taskId, sourceCommit },
+          "result unavailable",
+        );
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      worktrees: new UncertainCleanupWorktrees(),
+    });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-cleanup-uncertain",
+      signal: runSignal(),
+    });
+
+    expect(result).toMatchObject({ lifecycle: "integrating", terminalOutcome: null });
+    expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
+      type: "task.cleanup_observed",
+      payload: { phase: "worktree_removal", uncertain: true },
+    });
+    expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
+    expect(await gitOk(fixture.repositoryPath, [
+      "rev-parse",
+      `refs/heads/ticket/${result.taskId}`,
+    ])).toMatch(/^[a-f0-9]{40}$/);
+    const recovery = new RecoveryService(
+      journal,
+      new TaskService(journal),
+      ProjectRegistry.fromFile(fixture.configPath),
+      new UncertainCleanupWorktrees(),
+      new GitClient(),
+    );
+    await expect(recovery.inspect(result.taskId)).resolves.toMatchObject({
+      action: "await_reconciliation",
+    });
+    expect(cleanupAttempts).toBe(1);
   });
 
   it("injects the new workspace argument and ignores stale events on cancellation", async () => {
@@ -978,9 +1289,28 @@ describe("TracerBulletOrchestrator", () => {
             outcome,
           };
         }
+
+        override getCleanupFailures(): readonly CleanupFailure[] {
+          return [
+            {
+              projectId: "greeting-project",
+              taskId: "foreign-task",
+              candidatePath: "/foreign/candidate",
+              reason: "foreign cleanup failed",
+              timestamp: "2026-07-12T00:00:00.000Z",
+            },
+            {
+              projectId: "greeting-project",
+              taskId: `task-integration-${outcome}`,
+              candidatePath: "/retained/candidate",
+              reason: "candidate cleanup failed",
+              timestamp: "2026-07-12T00:00:00.000Z",
+            },
+          ];
+        }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
-      const { orchestrator } = system(fixture.configPath, {
+      const { journal, orchestrator } = system(fixture.configPath, {
         integrations: new OutcomeIntegration(new GitClient(), validations),
       });
 
@@ -992,6 +1322,16 @@ describe("TracerBulletOrchestrator", () => {
 
       expect(result.terminalOutcome).toBe(outcome);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
+      const terminalPayload = journal.readStream(result.taskId).at(-1)?.payload as {
+        candidateCleanupFailures: readonly CleanupFailure[];
+      };
+      expect(terminalPayload.candidateCleanupFailures).toEqual([
+        expect.objectContaining({
+          taskId: result.taskId,
+          candidatePath: "/retained/candidate",
+          reason: "candidate cleanup failed",
+        }),
+      ]);
     },
   );
 
@@ -1334,6 +1674,7 @@ describe("TracerBulletOrchestrator", () => {
     expect(journal.readStream(result.taskId).at(-1)?.payload).toEqual({
       reason: "update-ref reconciliation unresolved",
       evidence: { mode: "competing-head", candidatePath: "/candidate" },
+      cleanupFailures: [],
     });
   });
 

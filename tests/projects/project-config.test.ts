@@ -30,6 +30,34 @@ describe("ProjectConfigSchema", () => {
     ]);
   });
 
+  it.each([
+    "-danger",
+    "refs/heads/main",
+    "bad..branch",
+    "bad//branch",
+    "bad/",
+    "/bad",
+    "bad.lock",
+    "bad/component.lock/more",
+    "bad@{thing",
+    "bad branch",
+    "bad~branch",
+    "bad^branch",
+    "bad:branch",
+    "bad?branch",
+    "bad*branch",
+    "bad[branch",
+    "bad\\branch",
+    "bad\nbranch",
+    ".hidden/branch",
+    "branch.",
+    "@",
+  ])("rejects unsafe integration branch %j", (integrationBranch) => {
+    expect(() =>
+      ProjectConfigSchema.parse({ ...validConfig, integrationBranch }),
+    ).toThrow();
+  });
+
   it("rejects a relative repository path", () => {
     expect(() =>
       ProjectConfigSchema.parse({

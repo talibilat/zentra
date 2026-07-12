@@ -73,6 +73,7 @@ type Stage =
   | "review"
   | "commit"
   | "integration"
+  | "cleanup"
   | "completion";
 
 export class TracerBulletOrchestrator {
@@ -304,6 +305,14 @@ export class TracerBulletOrchestrator {
           lease,
           review: verifiedReview,
           signal: input.signal,
+          onPrepared: (preparedReceipt) => {
+            this.tasks.append(
+              input.taskId,
+              "task.integration_prepared",
+              { receipt: preparedReceipt },
+              null,
+            );
+          },
         });
       } catch (error) {
         if (error instanceof IntegrationUncertainError) {
@@ -323,7 +332,10 @@ export class TracerBulletOrchestrator {
           receipt.outcome,
           stage,
           "integration did not complete successfully",
-          { receipt },
+          {
+            receipt,
+            candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
+          },
         );
       }
       try {
@@ -345,7 +357,56 @@ export class TracerBulletOrchestrator {
       this.tasks.append(
         input.taskId,
         "task.integration_observed",
-        { receipt, verification: "verified" },
+        {
+          receipt,
+          verification: "verified",
+          cleanupFailures: this.integrationCleanupFailures(input.taskId),
+        },
+        null,
+      );
+      stage = "cleanup";
+      this.tasks.append(
+        input.taskId,
+        "task.cleanup_started",
+        {
+          sourceCommit,
+          resultCommit: receipt.resultCommit,
+          workspace: lease.path,
+          branch: lease.branch,
+        },
+        null,
+      );
+      try {
+        await this.worktrees.cleanupCompleted(project, lease, sourceCommit, {
+          timeoutMs: GIT_OPERATION_TIMEOUT_MS,
+        });
+      } catch (error) {
+        const cleanupError = error as {
+          readonly phase?: unknown;
+          readonly uncertain?: unknown;
+          readonly evidence?: unknown;
+        };
+        return this.tasks.append(
+          input.taskId,
+          "task.cleanup_observed",
+          {
+            phase: typeof cleanupError.phase === "string" ? cleanupError.phase : "unknown",
+            uncertain: cleanupError.uncertain === true,
+            evidence: cleanupError.evidence ?? {},
+            reason: errorMessage(error),
+          },
+          null,
+        );
+      }
+      this.tasks.append(
+        input.taskId,
+        "task.cleanup_completed",
+        {
+          sourceCommit,
+          resultCommit: receipt.resultCommit,
+          workspace: lease.path,
+          branch: lease.branch,
+        },
         null,
       );
       stage = "completion";
@@ -404,12 +465,19 @@ export class TracerBulletOrchestrator {
   }
 
   private observeIntegration(taskId: string, payload: unknown): TaskView {
+    const durablePayload = typeof payload === "object" && payload !== null
+      ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
+      : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
     return this.tasks.append(
       taskId,
       "task.integration_observed",
-      payload,
+      durablePayload,
       null,
     );
+  }
+
+  private integrationCleanupFailures(taskId: string): readonly unknown[] {
+    return this.integrations.getCleanupFailures().filter((failure) => failure.taskId === taskId);
   }
 
   private current(taskId: string): TaskView {

@@ -12,9 +12,17 @@ afterEach(() => {
   }
 });
 
-function delayedMarkerAlias(marker: string): readonly string[] {
-  const script = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran"), 150)`;
+function readyChildAlias(ready: string, forbidden: string): readonly string[] {
+  const script = `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(ready)},"ready");setTimeout(()=>fs.writeFileSync(${JSON.stringify(forbidden)},"ran"),10000)`;
   return ["-c", `alias.wait=!${process.execPath} -e '${script}'`, "wait"];
+}
+
+async function waitForFile(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(filePath)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 describe("GitClient bounded execution", () => {
@@ -63,33 +71,37 @@ describe("GitClient bounded execution", () => {
   it("times out and terminates the Git process group", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "zentra-git-timeout-"));
     cleanup.push(directory);
-    const marker = path.join(directory, "marker");
+    const ready = path.join(directory, "ready");
+    const forbidden = path.join(directory, "forbidden");
 
-    const result = await new GitClient().run(directory, delayedMarkerAlias(marker), {
-      timeoutMs: 25,
+    const running = new GitClient().run(directory, readyChildAlias(ready, forbidden), {
+      timeoutMs: 500,
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitForFile(ready);
+    const result = await running;
 
     expect(result.termination).toBe("timed_out");
     expect(result.exitCode).toBe(-1);
-    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(forbidden)).toBe(false);
   });
 
   it("cancels and terminates the Git process group", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "zentra-git-cancel-"));
     cleanup.push(directory);
-    const marker = path.join(directory, "marker");
+    const ready = path.join(directory, "ready");
+    const forbidden = path.join(directory, "forbidden");
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 25);
 
-    const result = await new GitClient().run(directory, delayedMarkerAlias(marker), {
+    const running = new GitClient().run(directory, readyChildAlias(ready, forbidden), {
       signal: controller.signal,
       timeoutMs: 5_000,
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitForFile(ready);
+    controller.abort();
+    const result = await running;
 
     expect(result.termination).toBe("cancelled");
     expect(result.exitCode).toBe(-1);
-    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(forbidden)).toBe(false);
   });
 });

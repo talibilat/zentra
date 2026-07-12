@@ -21,7 +21,10 @@ import {
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { IntegrationQueue } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
-import { RecoveryService } from "../../src/orchestration/recovery.js";
+import {
+  RecoveryService,
+  type RecoveryDecision,
+} from "../../src/orchestration/recovery.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ProjectRegistry } from "../../src/projects/project-registry.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
@@ -306,6 +309,12 @@ async function appendThroughIntegrationObserved(
     }),
     outcome: "completed",
   };
+  tasks.append(
+    "task-9",
+    "task.integration_prepared",
+    { receipt },
+    null,
+  );
   tasks.append(
     "task-9",
     "task.integration_observed",
@@ -655,6 +664,9 @@ describe("RecoveryService", () => {
       lease,
       review,
       signal: AbortSignal.timeout(10_000),
+      onPrepared(prepared) {
+        first.tasks.append("task-9", "task.integration_prepared", { receipt: prepared }, null);
+      },
     });
     expect(receipt.originalIntegrationCommit).toBe(baseB);
     first.tasks.append("task-9", "task.integration_observed", {
@@ -1094,7 +1106,7 @@ describe("RecoveryService", () => {
       } else if (type === "task.integration_observed") {
         appendRawDuplicate(journal, type);
       } else {
-        tasks.append("task-9", "task.completed", { receipt: evidence.receipt }, null);
+        await recovery.recordCompletion("task-9");
         appendRawDuplicate(journal, type);
       }
 
@@ -1212,10 +1224,13 @@ describe("RecoveryService", () => {
     const testFixture = await fixture();
     const { tasks, recovery } = openSystem(testFixture);
     createTask(tasks);
-    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
     expect((await recovery.inspect("task-9")).action).toBe("record_completion");
 
-    tasks.append("task-9", "task.completed", { receipt: evidence.receipt }, null);
+    await expect(recovery.recordCompletion("task-9")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
 
     await expect(recovery.inspect("task-9")).resolves.toMatchObject({
       action: "await_reconciliation",
@@ -1227,8 +1242,8 @@ describe("RecoveryService", () => {
     const testFixture = await fixture();
     const { journal, tasks, recovery } = openSystem(testFixture);
     createTask(tasks);
-    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
-    tasks.append("task-9", "task.completed", { receipt: evidence.receipt }, null);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    await recovery.recordCompletion("task-9");
     replaceEventPayload(journal, "task.completed", (payload) => ({
       ...payload,
       receipt: {
@@ -1243,11 +1258,24 @@ describe("RecoveryService", () => {
     });
   });
 
-  it("allows concurrent inspectors but optimistic append records completion exactly once", async () => {
-    const testFixture = await fixture();
+  it("allows only one concurrent completion applicator to record terminal completion", async () => {
+    const baseFixture = await fixture();
+    let cleanupCalls = 0;
+    class CountingWorktrees extends WorktreeManager {
+      override async cleanupCompleted(
+        ...args: Parameters<WorktreeManager["cleanupCompleted"]>
+      ): Promise<void> {
+        cleanupCalls += 1;
+        return super.cleanupCompleted(...args);
+      }
+    }
+    const testFixture: Fixture = {
+      ...baseFixture,
+      worktrees: new CountingWorktrees(),
+    };
     const { journal, tasks, recovery } = openSystem(testFixture);
     createTask(tasks);
-    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
 
     const [first, second] = await Promise.all([
       recovery.inspect("task-9"),
@@ -1256,21 +1284,205 @@ describe("RecoveryService", () => {
     expect(first.action).toBe("record_completion");
     expect(second.action).toBe("record_completion");
 
-    const expectedVersion = journal.readStream("task-9").at(-1)!.streamVersion;
-    const completion = {
-      streamId: "task-9",
-      type: "task.completed",
-      payload: { receipt: evidence.receipt },
-      causationId: null,
-      correlationId: "task-9",
-    } as const;
-    journal.append("task-9", expectedVersion, [completion]);
-    expect(() => journal.append("task-9", expectedVersion, [completion])).toThrow(/expected version/i);
+    const applications = await Promise.allSettled([
+      recovery.recordCompletion("task-9"),
+      recovery.recordCompletion("task-9"),
+    ]);
+    expect(applications.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(cleanupCalls).toBe(1);
     expect(journal.readStream("task-9").filter((event) => event.type === "task.completed")).toHaveLength(1);
     await expect(recovery.inspect("task-9")).resolves.toMatchObject({
       action: "await_reconciliation",
       reason: expect.stringMatching(/already.*completed|terminal/i),
     });
+  });
+
+  it("records cleanup completion after a crash left cleanup_started with both ticket states absent", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks, recovery } = openSystem(testFixture);
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    tasks.append("task-9", "task.cleanup_started", {
+      sourceCommit: evidence.sourceCommit,
+      resultCommit: evidence.resultCommit,
+      workspace: evidence.lease.path,
+      branch: evidence.lease.branch,
+    }, null);
+    await testFixture.worktrees.cleanupCompleted(
+      testFixture.project,
+      evidence.lease,
+      evidence.sourceCommit,
+      { timeoutMs: 10_000 },
+    );
+
+    await expect(recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "record_completion",
+    });
+    await expect(recovery.recordCompletion("task-9")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+    expect(journal.readStream("task-9").map((event) => event.type).slice(-2)).toEqual([
+      "task.cleanup_completed",
+      "task.completed",
+    ]);
+  });
+
+  it("does not complete from stale authorization while another applicator cleanup is blocked", async () => {
+    const baseFixture = await fixture();
+    let releaseCleanup!: () => void;
+    let reportCleanupStarted!: () => void;
+    const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve; });
+    const cleanupRelease = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    class GatedWorktrees extends WorktreeManager {
+      override async cleanupCompleted(
+        ...args: Parameters<WorktreeManager["cleanupCompleted"]>
+      ): Promise<void> {
+        reportCleanupStarted();
+        await cleanupRelease;
+        return super.cleanupCompleted(...args);
+      }
+    }
+    const testFixture: Fixture = { ...baseFixture, worktrees: new GatedWorktrees() };
+    const { journal, tasks, recovery: callerA } = openSystem(testFixture);
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    let releaseAuthorization!: () => void;
+    let reportAuthorized!: () => void;
+    const authorized = new Promise<void>((resolve) => { reportAuthorized = resolve; });
+    const authorizationRelease = new Promise<void>((resolve) => { releaseAuthorization = resolve; });
+    class PausedAfterAuthorizationRecovery extends RecoveryService {
+      override async inspect(taskId: string): Promise<RecoveryDecision> {
+        const result = await super.inspect(taskId);
+        if (result.action === "record_completion") {
+          reportAuthorized();
+          await authorizationRelease;
+        }
+        return result;
+      }
+    }
+    const callerB = new PausedAfterAuthorizationRecovery(
+      journal,
+      tasks,
+      testFixture.registry,
+      testFixture.worktrees,
+      new GitClient(),
+    );
+
+    const staleApplication = callerB.recordCompletion("task-9");
+    await authorized;
+    const activeApplication = callerA.recordCompletion("task-9");
+    await cleanupStarted;
+    releaseAuthorization();
+    try {
+      await expect(staleApplication).rejects.toThrow(/not authorized|reconciliation/i);
+      expect(journal.readStream("task-9").some((event) =>
+        event.type === "task.cleanup_completed" || event.type === "task.completed"),
+      ).toBe(false);
+    } finally {
+      releaseCleanup();
+    }
+    await expect(activeApplication).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+    expect(journal.readStream("task-9").filter((event) =>
+      event.type === "task.completed")).toHaveLength(1);
+  });
+
+  it("reconciles cleanup_observed from exact absent targets without retrying cleanup", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    const cleanup = {
+      sourceCommit: evidence.sourceCommit,
+      resultCommit: evidence.resultCommit,
+      workspace: evidence.lease.path,
+      branch: evidence.lease.branch,
+    };
+    const observation = {
+      phase: "ref_deletion",
+      uncertain: true,
+      evidence: { taskId: "task-9", sourceCommit: evidence.sourceCommit },
+      reason: "cleanup acknowledgement was lost",
+    };
+    tasks.append("task-9", "task.cleanup_started", cleanup, null);
+    tasks.append("task-9", "task.cleanup_observed", observation, null);
+    await testFixture.worktrees.cleanupCompleted(
+      testFixture.project,
+      evidence.lease,
+      evidence.sourceCommit,
+      { timeoutMs: 10_000 },
+    );
+    let cleanupRetries = 0;
+    class NoRetryWorktrees extends WorktreeManager {
+      override cleanupCompleted(): Promise<void> {
+        cleanupRetries += 1;
+        throw new Error("cleanup must not retry");
+      }
+    }
+    const recovery = new RecoveryService(
+      journal,
+      tasks,
+      testFixture.registry,
+      new NoRetryWorktrees(),
+      new GitClient(),
+    );
+
+    await expect(recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "record_completion",
+    });
+    await expect(recovery.recordCompletion("task-9")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+    expect(cleanupRetries).toBe(0);
+    expect(journal.readStream("task-9").map((event) => event.type).slice(-2)).toEqual([
+      "task.cleanup_reconciled",
+      "task.completed",
+    ]);
+  });
+
+  it("finishes exactly once after a crash following cleanup reconciliation", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks, recovery } = openSystem(testFixture);
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    const cleanup = {
+      sourceCommit: evidence.sourceCommit,
+      resultCommit: evidence.resultCommit,
+      workspace: evidence.lease.path,
+      branch: evidence.lease.branch,
+    };
+    const observation = {
+      phase: "ref_deletion",
+      uncertain: true,
+      evidence: {},
+      reason: "unknown",
+    };
+    tasks.append("task-9", "task.cleanup_started", cleanup, null);
+    tasks.append("task-9", "task.cleanup_observed", observation, null);
+    await testFixture.worktrees.cleanupCompleted(
+      testFixture.project,
+      evidence.lease,
+      evidence.sourceCommit,
+      { timeoutMs: 10_000 },
+    );
+    tasks.append("task-9", "task.cleanup_reconciled", { cleanup, observation }, null);
+
+    await expect(recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "record_completion",
+    });
+    const applications = await Promise.allSettled([
+      recovery.recordCompletion("task-9"),
+      recovery.recordCompletion("task-9"),
+    ]);
+    expect(applications.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(journal.readStream("task-9").filter((event) =>
+      event.type === "task.cleanup_reconciled")).toHaveLength(1);
+    expect(journal.readStream("task-9").filter((event) =>
+      event.type === "task.completed")).toHaveLength(1);
   });
 
   it("returns record_failure for a missing task because recovery cannot reconstruct it", async () => {
@@ -1282,5 +1494,17 @@ describe("RecoveryService", () => {
       action: "record_failure",
       reason: expect.stringMatching(/diagnostic.*not found|not found.*diagnostic/i),
     });
+  });
+
+  it("refuses completion application when a fresh inspection does not authorize it", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks, recovery } = openSystem(testFixture);
+    createTask(tasks);
+    const before = journal.readStream("task-9");
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(
+      /not authorized: resume_preparation/i,
+    );
+    expect(journal.readStream("task-9")).toEqual(before);
   });
 });

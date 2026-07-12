@@ -59,7 +59,12 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
     "task.timed_out",
   ],
   integrating: [
+    "task.integration_prepared",
     "task.integration_observed",
+    "task.cleanup_started",
+    "task.cleanup_completed",
+    "task.cleanup_observed",
+    "task.cleanup_reconciled",
     "task.completed",
     "task.cancelled",
     "task.failed",
@@ -77,7 +82,12 @@ const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> =
   "task.review_approved": "integration_ready",
   "task.commit_observed": "integration_ready",
   "task.integration_started": "integrating",
+  "task.integration_prepared": "integrating",
   "task.integration_observed": "integrating",
+  "task.cleanup_started": "integrating",
+  "task.cleanup_completed": "integrating",
+  "task.cleanup_observed": "integrating",
+  "task.cleanup_reconciled": "integrating",
   "task.completed": "completed",
   "task.cancelled": "cancelled",
   "task.failed": "failed",
@@ -110,6 +120,17 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     leaseOwner: null,
   };
   const singleOccurrenceEvents = new Set<string>();
+  let integrationPrepared = false;
+  let integrationObserved = false;
+  let integrationVerified = false;
+  let cleanupStarted = false;
+  let cleanupCompleted = false;
+  let cleanupObserved = false;
+  let cleanupReconciled = false;
+  let preparedReceiptSnapshot: string | null = null;
+  let observedReceiptSnapshot: string | null = null;
+  let cleanupStartedSnapshot: string | null = null;
+  let cleanupObservationSnapshot: string | null = null;
 
   for (let i = 1; i < events.length; i++) {
     const event = events[i]!;
@@ -128,13 +149,76 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
     if (
       event.type === "task.commit_observed" ||
+      event.type === "task.integration_prepared" ||
       event.type === "task.integration_observed" ||
+      event.type === "task.cleanup_started" ||
+      event.type === "task.cleanup_completed" ||
+      event.type === "task.cleanup_observed" ||
+      event.type === "task.cleanup_reconciled" ||
       event.type === "task.completed"
     ) {
       if (singleOccurrenceEvents.has(event.type)) {
         throw new Error(`duplicate ${event.type} event`);
       }
       singleOccurrenceEvents.add(event.type);
+    }
+
+    if (event.type === "task.integration_prepared") {
+      if (integrationObserved || cleanupStarted) {
+        throw new Error("task.integration_prepared is out of order");
+      }
+      integrationPrepared = true;
+      preparedReceiptSnapshot = canonicalSnapshot(payloadField(event, "receipt"));
+    } else if (event.type === "task.integration_observed") {
+      const verified = payloadField(event, "verification") === "verified";
+      if (verified && !integrationPrepared) {
+        throw new Error("verified integration observation requires prepared evidence");
+      }
+      const receiptSnapshot = canonicalSnapshot(payloadField(event, "receipt"));
+      if (verified && receiptSnapshot !== preparedReceiptSnapshot) {
+        throw new Error("verified integration receipt contradicts prepared receipt");
+      }
+      integrationObserved = true;
+      integrationVerified = verified;
+      if (verified) observedReceiptSnapshot = receiptSnapshot;
+    } else if (event.type === "task.cleanup_started") {
+      if (!integrationObserved || !integrationVerified || cleanupStarted) {
+        throw new Error("cleanup start requires one verified integration observation");
+      }
+      cleanupStarted = true;
+      cleanupStartedSnapshot = canonicalSnapshot(event.payload);
+    } else if (event.type === "task.cleanup_completed") {
+      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+        throw new Error("cleanup completion requires one cleanup start");
+      }
+      if (canonicalSnapshot(event.payload) !== cleanupStartedSnapshot) {
+        throw new Error("cleanup completion facts contradict cleanup start facts");
+      }
+      cleanupCompleted = true;
+    } else if (event.type === "task.cleanup_observed") {
+      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+        throw new Error("cleanup observation requires one cleanup start");
+      }
+      cleanupObserved = true;
+      cleanupObservationSnapshot = canonicalSnapshot(event.payload);
+    } else if (event.type === "task.cleanup_reconciled") {
+      if (!cleanupObserved || cleanupCompleted || cleanupReconciled) {
+        throw new Error("cleanup reconciliation requires one uncertain cleanup observation");
+      }
+      if (
+        canonicalSnapshot(payloadField(event, "cleanup")) !== cleanupStartedSnapshot ||
+        canonicalSnapshot(payloadField(event, "observation")) !== cleanupObservationSnapshot
+      ) {
+        throw new Error("cleanup reconciliation facts contradict cleanup target facts");
+      }
+      cleanupReconciled = true;
+    } else if (event.type === "task.completed") {
+      if (!cleanupCompleted && !cleanupReconciled) {
+        throw new Error("task completion requires durable cleanup completion or reconciliation");
+      }
+      if (canonicalSnapshot(payloadField(event, "receipt")) !== observedReceiptSnapshot) {
+        throw new Error("task completion receipt contradicts verified integration receipt");
+      }
     }
 
     const currentLifecycle = state.lifecycle;
@@ -164,6 +248,16 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
   }
 
   return state;
+}
+
+function payloadField(event: StoredEvent, field: string): unknown {
+  return typeof event.payload === "object" && event.payload !== null
+    ? (event.payload as Record<string, unknown>)[field]
+    : undefined;
+}
+
+function canonicalSnapshot(value: unknown): string {
+  return JSON.stringify(value) ?? "undefined";
 }
 
 function requirePayloadString(event: StoredEvent, field: string): string {

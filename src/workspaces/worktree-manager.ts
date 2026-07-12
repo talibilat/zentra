@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, lstatSync } from "node:fs";
 import path from "node:path";
 import type { ProjectConfig } from "../projects/project-config.js";
 import {
@@ -39,6 +39,19 @@ export class WorkspaceCommitUncertainError extends Error {
 
   constructor(reason: string) {
     super(`workspace commit result is uncertain: ${reason}`);
+  }
+}
+
+export class WorkspaceCleanupError extends Error {
+  override readonly name = "WorkspaceCleanupError";
+
+  constructor(
+    readonly phase: "verification" | "worktree_removal" | "ref_deletion",
+    readonly uncertain: boolean,
+    readonly evidence: Readonly<Record<string, unknown>>,
+    reason: string,
+  ) {
+    super(`workspace cleanup ${phase} ${uncertain ? "is uncertain" : "failed"}: ${reason}`);
   }
 }
 
@@ -231,6 +244,126 @@ export class WorktreeManager {
     ]);
   }
 
+  async cleanupCompleted(
+    project: ProjectConfig,
+    lease: WorkspaceLease,
+    expectedSourceCommit: string,
+    options: GitRunOptions = {},
+  ): Promise<void> {
+    const evidence = Object.freeze({
+      taskId: lease.taskId,
+      path: lease.path,
+      branch: lease.branch,
+      sourceCommit: expectedSourceCommit,
+    });
+    const expectedPath = path.join(project.worktreeRoot, lease.taskId);
+    const expectedBranch = `ticket/${lease.taskId}`;
+    try {
+      const leaseStat = lstatSync(lease.path);
+      if (
+        lease.path !== expectedPath ||
+        lease.branch !== expectedBranch ||
+        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(expectedSourceCommit) ||
+        !existsSync(lease.path) ||
+        leaseStat.isSymbolicLink() ||
+        !leaseStat.isDirectory()
+      ) {
+        throw new Error("lease identity is not exact");
+      }
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    try {
+      await this.assertSafeGitConfiguration(lease.path, options);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const registration = await this.cleanupRead(project.repositoryPath, [
+      "worktree",
+      "list",
+      "--porcelain",
+      "-z",
+    ], options, evidence);
+    const records = registration.stdout.split("\0\0").filter(Boolean);
+    let canonicalLeasePath: string;
+    try {
+      canonicalLeasePath = realpathSync(lease.path);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const exactRegistration = records.filter((record) => {
+      const fields = record.split("\0");
+      return (fields.includes(`worktree ${lease.path}`) ||
+          fields.includes(`worktree ${canonicalLeasePath}`)) &&
+        fields.includes(`branch refs/heads/${lease.branch}`);
+    });
+    if (exactRegistration.length !== 1) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        "ticket worktree registration is not exact",
+      );
+    }
+    const status = await this.cleanupRead(lease.path, [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ], options, evidence);
+    if (status.stdout !== "") {
+      throw new WorkspaceCleanupError("verification", false, evidence, "ticket worktree is dirty");
+    }
+    const head = await this.cleanupRead(
+      lease.path,
+      ["rev-parse", "--verify", "HEAD^{commit}"],
+      options,
+      evidence,
+    );
+    if (head.stdout.trim() !== expectedSourceCommit) {
+      throw new WorkspaceCleanupError("verification", false, evidence, "ticket HEAD changed");
+    }
+    const branchRef = `refs/heads/${lease.branch}`;
+    const branch = await this.cleanupRead(
+      project.repositoryPath,
+      ["rev-parse", "--verify", `${branchRef}^{commit}`],
+      options,
+      evidence,
+    );
+    if (branch.stdout.trim() !== expectedSourceCommit) {
+      throw new WorkspaceCleanupError("verification", false, evidence, "ticket ref changed");
+    }
+
+    await this.cleanupEffect(
+      project.repositoryPath,
+      ["worktree", "remove", "--", lease.path],
+      options,
+      "worktree_removal",
+      evidence,
+    );
+    await this.cleanupEffect(
+      project.repositoryPath,
+      ["update-ref", "-d", branchRef, expectedSourceCommit],
+      options,
+      "ref_deletion",
+      evidence,
+    );
+  }
+
   private async inspectPath(
     worktreePath: string,
     options: GitRunOptions = {},
@@ -279,6 +412,65 @@ export class WorktreeManager {
       );
     }
     return { dirty, diff: diff.stdout };
+  }
+
+  private async cleanupRead(
+    cwd: string,
+    args: readonly string[],
+    options: GitRunOptions,
+    evidence: Readonly<Record<string, unknown>>,
+  ): Promise<CommandResult> {
+    let result: CommandResult;
+    try {
+      result = await this.run(cwd, args, options);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (result.termination !== null || result.exitCode !== 0 || result.truncated) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        `bounded Git read failed for ${args[0] ?? "unknown"}`,
+      );
+    }
+    return result;
+  }
+
+  private async cleanupEffect(
+    cwd: string,
+    args: readonly string[],
+    options: GitRunOptions,
+    phase: "worktree_removal" | "ref_deletion",
+    evidence: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    let result: CommandResult;
+    try {
+      result = await this.run(cwd, args, options);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        phase,
+        true,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (result.termination !== null) {
+      throw new WorkspaceCleanupError(phase, true, evidence, `Git was ${result.termination}`);
+    }
+    if (result.exitCode !== 0 || result.truncated) {
+      throw new WorkspaceCleanupError(
+        phase,
+        true,
+        evidence,
+        result.truncated ? "Git output was truncated" : `Git exited ${result.exitCode}`,
+      );
+    }
   }
 
   private async reconcileCommit(

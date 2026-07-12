@@ -141,6 +141,61 @@ describe("projectTask", () => {
     expect(view?.streamVersion).toBe(8);
   });
 
+  it("keeps prepared and cleanup events integrating through durable cleanup", () => {
+    const receipt = { outcome: "completed" };
+    const events = [
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt }),
+      makeEvent("task.integration_observed", 9, {
+        receipt,
+        verification: "verified",
+      }),
+      makeEvent("task.cleanup_started", 10),
+      makeEvent("task.cleanup_completed", 11),
+      makeEvent("task.completed", 12, { receipt }),
+    ];
+
+    expect(projectTask(events.slice(0, -1))).toMatchObject({
+      lifecycle: "integrating",
+      terminalOutcome: null,
+      streamVersion: 11,
+    });
+    expect(projectTask(events)).toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+      streamVersion: 12,
+    });
+  });
+
+  it.each([
+    "task.integration_prepared",
+    "task.integration_observed",
+    "task.cleanup_started",
+    "task.cleanup_completed",
+    "task.cleanup_observed",
+  ])("rejects duplicate %s evidence", (type) => {
+    const prepared = makeEvent("task.integration_prepared", 8);
+    const observed = makeEvent("task.integration_observed", 9, { verification: "verified" });
+    const cleanupStarted = makeEvent("task.cleanup_started", 10);
+    const prefix = type === "task.integration_prepared"
+      ? [...happyPath(), prepared]
+      : type === "task.integration_observed"
+        ? [...happyPath(), prepared, observed]
+        : type === "task.cleanup_started"
+          ? [...happyPath(), prepared, observed, cleanupStarted]
+          : [
+              ...happyPath(),
+              prepared,
+              observed,
+              cleanupStarted,
+              makeEvent(type, 11),
+            ];
+    expect(() => projectTask([
+      ...prefix,
+      makeEvent(type, prefix.at(-1)!.streamVersion + 1),
+    ])).toThrow(`duplicate ${type}`);
+  });
+
   it("keeps task.commit_observed nonterminal and integration_ready", () => {
     const view = projectTask([
       ...happyPath().slice(0, 6),
@@ -152,10 +207,127 @@ describe("projectTask", () => {
   });
 
   it("projects task.completed into terminal with the completed outcome", () => {
-    const view = projectTask([...happyPath(), makeEvent("task.completed", 8)]);
+    const view = projectTask([
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8),
+      makeEvent("task.integration_observed", 9, { verification: "verified" }),
+      makeEvent("task.cleanup_started", 10),
+      makeEvent("task.cleanup_completed", 11),
+      makeEvent("task.completed", 12),
+    ]);
     expect(view?.lifecycle).toBe("terminal");
     expect(view?.terminalOutcome).toBe("completed");
-    expect(view?.streamVersion).toBe(8);
+    expect(view?.streamVersion).toBe(12);
+  });
+
+  it.each([
+    ["task.integration_observed", { verification: "verified" }],
+    ["task.cleanup_started", {}],
+    ["task.cleanup_completed", {}],
+    ["task.cleanup_observed", {}],
+    ["task.completed", {}],
+  ] as const)("rejects out-of-order %s", (type, payload) => {
+    expect(() => projectTask([...happyPath(), makeEvent(type, 8, payload)])).toThrow();
+  });
+
+  it("allows uncertain integration observation only as a nonterminal state", () => {
+    const uncertain = [
+      ...happyPath(),
+      makeEvent("task.integration_observed", 8, { reason: "uncertain" }),
+    ];
+    expect(projectTask(uncertain)).toMatchObject({
+      lifecycle: "integrating",
+      terminalOutcome: null,
+    });
+    expect(() =>
+      projectTask([...uncertain, makeEvent("task.cleanup_started", 9)]),
+    ).toThrow();
+    expect(() =>
+      projectTask([...uncertain, makeEvent("task.completed", 9)]),
+    ).toThrow();
+  });
+
+  it("rejects a verified observation whose receipt contradicts preparation", () => {
+    expect(() => projectTask([
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt: { resultCommit: "a" } }),
+      makeEvent("task.integration_observed", 9, {
+        receipt: { resultCommit: "b" },
+        verification: "verified",
+      }),
+    ])).toThrow(/receipt.*prepared|prepared.*receipt/i);
+  });
+
+  it("rejects cleanup completion facts that contradict cleanup start", () => {
+    const cleanup = { sourceCommit: "a", resultCommit: "b", workspace: "/work", branch: "ticket/1" };
+    expect(() => projectTask([
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt: { resultCommit: "b" } }),
+      makeEvent("task.integration_observed", 9, {
+        receipt: { resultCommit: "b" },
+        verification: "verified",
+      }),
+      makeEvent("task.cleanup_started", 10, cleanup),
+      makeEvent("task.cleanup_completed", 11, { ...cleanup, branch: "ticket/other" }),
+    ])).toThrow(/cleanup.*facts|facts.*cleanup/i);
+  });
+
+  it("completes from cleanup reconciliation bound to observed uncertainty and cleanup facts", () => {
+    const receipt = { resultCommit: "b" };
+    const cleanup = { sourceCommit: "a", resultCommit: "b", workspace: "/work", branch: "ticket/1" };
+    const observation = { phase: "ref_deletion", uncertain: true, evidence: {}, reason: "unknown" };
+    const events = [
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt }),
+      makeEvent("task.integration_observed", 9, { receipt, verification: "verified" }),
+      makeEvent("task.cleanup_started", 10, cleanup),
+      makeEvent("task.cleanup_observed", 11, observation),
+      makeEvent("task.cleanup_reconciled", 12, { cleanup, observation }),
+      makeEvent("task.completed", 13, { receipt }),
+    ];
+
+    expect(projectTask(events)).toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+      streamVersion: 13,
+    });
+  });
+
+  it("rejects cleanup reconciliation without matching uncertainty and target facts", () => {
+    const receipt = { resultCommit: "b" };
+    const cleanup = { sourceCommit: "a", resultCommit: "b", workspace: "/work", branch: "ticket/1" };
+    const throughCleanup = [
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt }),
+      makeEvent("task.integration_observed", 9, { receipt, verification: "verified" }),
+      makeEvent("task.cleanup_started", 10, cleanup),
+    ];
+    expect(() => projectTask([
+      ...throughCleanup,
+      makeEvent("task.cleanup_reconciled", 11, { cleanup, observation: {} }),
+    ])).toThrow();
+    const observation = { phase: "ref_deletion", uncertain: true, evidence: {}, reason: "unknown" };
+    expect(() => projectTask([
+      ...throughCleanup,
+      makeEvent("task.cleanup_observed", 11, observation),
+      makeEvent("task.cleanup_reconciled", 12, {
+        cleanup: { ...cleanup, workspace: "/other" },
+        observation,
+      }),
+    ])).toThrow(/cleanup.*facts|facts.*cleanup/i);
+  });
+
+  it("rejects terminal completion whose receipt contradicts verified observation", () => {
+    const receipt = { resultCommit: "b" };
+    const cleanup = { sourceCommit: "a", resultCommit: "b", workspace: "/work", branch: "ticket/1" };
+    expect(() => projectTask([
+      ...happyPath(),
+      makeEvent("task.integration_prepared", 8, { receipt }),
+      makeEvent("task.integration_observed", 9, { receipt, verification: "verified" }),
+      makeEvent("task.cleanup_started", 10, cleanup),
+      makeEvent("task.cleanup_completed", 11, cleanup),
+      makeEvent("task.completed", 12, { receipt: { resultCommit: "other" } }),
+    ])).toThrow(/completion.*receipt|receipt.*completion/i);
   });
 
   it("projects task.cancelled into terminal with the cancelled outcome", () => {
@@ -414,5 +586,42 @@ describe("TaskService", () => {
     const view = service.get("task-1");
     expect(view?.lifecycle).toBe("running");
     expect(view?.streamVersion).toBe(3);
+  });
+
+  it("rejects contradictory integration and cleanup facts before persistence", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+    service.append("task-1", "task.leased", { leaseOwner: "worker-1" }, null);
+    service.append("task-1", "task.started", {}, null);
+    service.append("task-1", "task.validation_started", {}, null);
+    service.append("task-1", "task.review_requested", {}, null);
+    service.append("task-1", "task.review_approved", {}, null);
+    service.append("task-1", "task.integration_started", {}, null);
+    const receipt = { resultCommit: "result" };
+    service.append("task-1", "task.integration_prepared", { receipt }, null);
+
+    expect(() => service.append("task-1", "task.integration_observed", {
+      receipt: { resultCommit: "other" },
+      verification: "verified",
+    }, null)).toThrow(/receipt.*prepared|prepared.*receipt/i);
+    expect(journal.readStream("task-1")).toHaveLength(8);
+
+    service.append("task-1", "task.integration_observed", {
+      receipt,
+      verification: "verified",
+    }, null);
+    const cleanup = { sourceCommit: "source", resultCommit: "result", workspace: "/work", branch: "ticket/task-1" };
+    service.append("task-1", "task.cleanup_started", cleanup, null);
+    expect(() => service.append("task-1", "task.cleanup_completed", {
+      ...cleanup,
+      workspace: "/other",
+    }, null)).toThrow(/cleanup.*facts|facts.*cleanup/i);
+    expect(journal.readStream("task-1")).toHaveLength(10);
+
+    service.append("task-1", "task.cleanup_completed", cleanup, null);
+    expect(() => service.append("task-1", "task.completed", {
+      receipt: { resultCommit: "other" },
+    }, null)).toThrow(/completion.*receipt|receipt.*completion/i);
+    expect(journal.readStream("task-1")).toHaveLength(11);
   });
 });

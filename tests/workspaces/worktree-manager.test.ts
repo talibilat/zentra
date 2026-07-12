@@ -625,4 +625,91 @@ describe("WorktreeManager", () => {
 
     expect(existsSync(lease.path)).toBe(false);
   });
+
+  it("cleans an exact completed ticket worktree and deletes its branch with CAS", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-cleanup-completed");
+    writeFileSync(path.join(lease.path, "done.txt"), "done\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    const sourceCommit = await manager.commit(
+      lease,
+      ["done.txt"],
+      "feat: done",
+      sha256(diff),
+    );
+
+    await manager.cleanupCompleted(project, lease, sourceCommit, { timeoutMs: 10_000 });
+
+    expect(existsSync(lease.path)).toBe(false);
+    const listed = await git.run(repoPath, ["worktree", "list", "--porcelain"]);
+    expect(listed.stdout).not.toContain(lease.path);
+    const branch = await git.run(repoPath, ["show-ref", "--verify", `refs/heads/${lease.branch}`]);
+    expect(branch.exitCode).not.toBe(0);
+  });
+
+  it("types cleanup configuration preflight failures with phase evidence", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-cleanup-preflight");
+    const sourceCommit = (await gitOk(lease.path, ["rev-parse", "HEAD"])).trim();
+    await gitOk(repoPath, ["config", "diff.external", "/untrusted/program"]);
+
+    await expect(
+      manager.cleanupCompleted(project, lease, sourceCommit, { timeoutMs: 10_000 }),
+    ).rejects.toMatchObject({
+      name: "WorkspaceCleanupError",
+      phase: "verification",
+      uncertain: false,
+      evidence: { taskId: lease.taskId, sourceCommit },
+    });
+    expect(existsSync(lease.path)).toBe(true);
+  });
+
+  it.each(["worktree_removal", "ref_deletion"] as const)(
+    "types a nonzero %s result as uncertain without retry",
+    async (failedPhase) => {
+      await manager.ensureIntegrationBranch(project);
+      const lease = await manager.create(project, `task-cleanup-${failedPhase}`);
+      const sourceCommit = (await gitOk(lease.path, ["rev-parse", "HEAD"])).trim();
+      let effectCalls = 0;
+      class NonzeroCleanupGitClient extends GitClient {
+        override run(
+          cwd: string,
+          args: readonly string[],
+          options: GitRunOptions = {},
+        ): Promise<CommandResult> {
+          const phase = args.includes("worktree") && args.includes("remove")
+            ? "worktree_removal"
+            : args.includes("update-ref") && args.includes("-d")
+              ? "ref_deletion"
+              : null;
+          if (phase === failedPhase) {
+            effectCalls += 1;
+            return Promise.resolve({
+              stdout: "",
+              stderr: "result unavailable",
+              exitCode: 1,
+              truncated: false,
+              termination: null,
+            });
+          }
+          return super.run(cwd, args, options);
+        }
+      }
+
+      await expect(
+        new WorktreeManager(new NonzeroCleanupGitClient()).cleanupCompleted(
+          project,
+          lease,
+          sourceCommit,
+          { timeoutMs: 10_000 },
+        ),
+      ).rejects.toMatchObject({
+        name: "WorkspaceCleanupError",
+        phase: failedPhase,
+        uncertain: true,
+        evidence: { taskId: lease.taskId, sourceCommit },
+      });
+      expect(effectCalls).toBe(1);
+    },
+  );
 });

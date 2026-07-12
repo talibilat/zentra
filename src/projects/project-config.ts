@@ -22,6 +22,30 @@ const FORBIDDEN_SHELLS = new Set([
 const COMBINED_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
 
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const INVALID_REF_CHARACTERS = /[\u0000-\u0020\u007f~^:?*[\\]/;
+
+function isSafeBranchName(branch: string): boolean {
+  if (
+    branch === "" ||
+    branch === "@" ||
+    branch.startsWith("-") ||
+    branch.startsWith("/") ||
+    branch.endsWith("/") ||
+    branch.startsWith("refs/") ||
+    branch.includes("..") ||
+    branch.includes("@{") ||
+    branch.includes("//") ||
+    INVALID_REF_CHARACTERS.test(branch)
+  ) {
+    return false;
+  }
+  return branch.split("/").every((component) =>
+    component !== "" &&
+    !component.startsWith(".") &&
+    !component.endsWith(".") &&
+    !component.toLowerCase().endsWith(".lock")
+  );
+}
 
 function stripEnvPrefix(command: readonly string[]): readonly string[] {
   const executable = command[0];
@@ -59,7 +83,9 @@ const CommandSchema = z
 export const ProjectConfigSchema = z.object({
   projectId: z.string().min(1),
   repositoryPath: z.string().refine(path.isAbsolute),
-  integrationBranch: z.string().min(1),
+  integrationBranch: z.string().refine(isSafeBranchName, {
+    message: "Integration branch must be a safe Git branch name",
+  }),
   worktreeRoot: z.string().refine(path.isAbsolute),
   validations: z.object({
     focused: CommandSchema,
