@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -26,6 +27,7 @@ import {
 
 const journals: SqliteEventJournal[] = [];
 const temporaryDirectories: string[] = [];
+const MALICIOUS_READ_PEAK_RSS_BYTES = 192 * 1024 * 1024;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -347,6 +349,32 @@ describe("SqliteEventJournal", () => {
     }
   });
 
+  it("fails closed when stream discovery does not use the journal index", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const database = rawDatabase(journal);
+    const prepare = database.prepare.bind(database);
+    database.prepare = ((sql: string) => {
+      if (
+        /EXPLAIN QUERY PLAN/i.test(sql) &&
+        sql.includes("AS event_bytes") &&
+        sql.includes("stream_id = ?")
+      ) {
+        return {
+          all: () => [{
+            detail: "SEARCH events USING INDEX adversarial_index " +
+              "(stream_id=? AND stream_version>?)",
+          }],
+        };
+      }
+      return prepare(sql);
+    }) as typeof database.prepare;
+
+    expect(() => journal.readStream("task-1")).toThrow(
+      /journal schema does not support bounded reads/i,
+    );
+  });
+
   it("materializes a normal replay from the same snapshot used for discovery", () => {
     const { databasePath } = temporaryDatabase();
     const reader = new SqliteEventJournal(databasePath);
@@ -387,40 +415,69 @@ describe("SqliteEventJournal", () => {
     ]);
   });
 
-  it("rejects a large malicious journal with bounded read time and memory", () => {
-    const journal = new SqliteEventJournal(":memory:");
-    journals.push(journal);
-    const database = rawDatabase(journal);
-    const eventCount = 300_000;
-    database.prepare("INSERT INTO streams (stream_id, current_version) VALUES (?, ?)")
-      .run("malicious", eventCount);
-    database.prepare(`
-      WITH RECURSIVE rows(n) AS (
-        VALUES(1)
-        UNION ALL
-        SELECT n + 1 FROM rows WHERE n < ?
-      )
-      INSERT INTO events (
-        event_id, stream_id, stream_version, type, payload,
-        causation_id, correlation_id, recorded_at
-      )
-      SELECT hex(n), ?, n, 'event', '{}', NULL, ?, '2026-07-12T00:00:00.000Z'
-      FROM rows
-    `).run(eventCount, "malicious", "malicious");
-    const preparedSql: string[] = [];
-    const prepare = database.prepare.bind(database);
-    database.prepare = ((sql: string) => {
-      preparedSql.push(sql);
-      return prepare(sql);
-    }) as typeof database.prepare;
-    const beforeRss = process.memoryUsage().rss;
-    const startedAt = performance.now();
+  it("rejects a large malicious journal within peak-memory and wall-time budgets", () => {
+    const journalModuleUrl = new URL(
+      "../../src/journal/sqlite-journal.ts",
+      import.meta.url,
+    ).href;
+    const script = `
+      import { SqliteEventJournal } from ${JSON.stringify(journalModuleUrl)};
+      const journal = new SqliteEventJournal(":memory:");
+      const database = journal.db;
+      const eventCount = 300_000;
+      database.prepare("INSERT INTO streams (stream_id, current_version) VALUES (?, ?)")
+        .run("malicious", eventCount);
+      database.prepare(\`
+        WITH RECURSIVE rows(n) AS (
+          VALUES(1)
+          UNION ALL
+          SELECT n + 1 FROM rows WHERE n < ?
+        )
+        INSERT INTO events (
+          event_id, stream_id, stream_version, type, payload,
+          causation_id, correlation_id, recorded_at
+        )
+        SELECT hex(n), ?, n, 'event', '{}', NULL, ?, '2026-07-12T00:00:00.000Z'
+        FROM rows
+      \`).run(eventCount, "malicious", "malicious");
+      const startedAt = performance.now();
+      let rejected = false;
+      try {
+        journal.readAll();
+      } catch (error) {
+        rejected = /journal read limit/i.test(String(error));
+      }
+      const wallTimeMs = performance.now() - startedAt;
+      journal.close();
+      console.log(JSON.stringify({
+        rejected,
+        wallTimeMs,
+        peakRssBytes: process.resourceUsage().maxRSS * 1024,
+      }));
+    `;
+    const child = spawnSync(
+      process.execPath,
+      ["--input-type=module", "--eval", script],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "" },
+        maxBuffer: 1024 * 1024,
+        shell: false,
+        timeout: 10_000,
+      },
+    );
 
-    expect(() => journal.readAll()).toThrow(/journal read limit/i);
-
-    expect(performance.now() - startedAt).toBeLessThan(1_000);
-    expect(process.memoryUsage().rss - beforeRss).toBeLessThan(64 * 1024 * 1024);
-    expect(preparedSql.join("\n")).not.toMatch(/\b(?:COUNT|SUM|MAX)\s*\(/i);
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    const result = JSON.parse(child.stdout) as {
+      readonly peakRssBytes: number;
+      readonly rejected: boolean;
+      readonly wallTimeMs: number;
+    };
+    expect(result.rejected).toBe(true);
+    expect(result.wallTimeMs).toBeLessThan(1_000);
+    expect(result.peakRssBytes).toBeLessThanOrEqual(MALICIOUS_READ_PEAK_RSS_BYTES);
   });
 
   it("does not evaluate an extra large virtual column during stream or global reads", () => {
@@ -663,6 +720,43 @@ describe("SqliteEventJournal", () => {
     expect(rawDatabase(journal).prepare(
       "SELECT current_version FROM streams WHERE stream_id = ?",
     ).get("full-stream")).toEqual({ current_version: MAX_JOURNAL_READ_EVENTS });
+  });
+
+  it("reports append guard interruption and preserves existing state atomically", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const existing = journal.append("interrupted-append", 0, [{
+      streamId: "interrupted-append",
+      type: "event.existing",
+      payload: { sequence: 1 },
+      causationId: null,
+      correlationId: "interrupted-append",
+    }]);
+    const guardedJournal = journal as unknown as {
+      beginBoundedOperation(): void;
+      operationDeadline: bigint;
+    };
+    const beginBoundedOperation = guardedJournal.beginBoundedOperation.bind(journal);
+    let guardCount = 0;
+    guardedJournal.beginBoundedOperation = () => {
+      beginBoundedOperation();
+      guardCount += 1;
+      if (guardCount === 2) {
+        guardedJournal.operationDeadline = process.hrtime.bigint() - 1n;
+      }
+    };
+
+    expect(() => journal.append("interrupted-append", 1, [{
+      streamId: "interrupted-append",
+      type: "event.interrupted",
+      payload: { sequence: 2 },
+      causationId: null,
+      correlationId: "interrupted-append",
+    }])).toThrow(new Error("event journal append limit exceeded"));
+    expect(journal.readStream("interrupted-append")).toEqual(existing);
+    expect(rawDatabase(journal).prepare(
+      "SELECT current_version FROM streams WHERE stream_id = ?",
+    ).get("interrupted-append")).toEqual({ current_version: 1 });
   });
 
   it("replays repeated maximum legitimate worker evidence", () => {

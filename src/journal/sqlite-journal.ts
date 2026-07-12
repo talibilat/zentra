@@ -273,7 +273,7 @@ export class SqliteEventJournal implements EventJournal {
         this.db.exec("ROLLBACK");
       }
       if (this.operationInterrupted) {
-        throw new Error("event journal read limit exceeded");
+        throw new Error("event journal append limit exceeded");
       }
       throw error;
     }
@@ -374,7 +374,7 @@ export class SqliteEventJournal implements EventJournal {
     );
     if (
       streamPlans.some((plan) =>
-        !/SEARCH events USING (?:COVERING )?INDEX .*\(stream_id=\? AND stream_version>\?\)/i
+        !/SEARCH events USING INDEX sqlite_autoindex_events_2 \(stream_id=\? AND stream_version>\?\)/i
           .test(plan.map((row) => row.detail).join(" "))
       ) ||
       globalPlans.some((plan) =>
