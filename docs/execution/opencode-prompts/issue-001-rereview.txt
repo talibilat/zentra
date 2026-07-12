@@ -1,0 +1,29 @@
+You are a fresh independent OpenCode reviewer performing the CONFIRMATION re-review of Zentra issue 001 after fixes. READ-ONLY engineering review of input-validation and documentation for a local developer CLI. Covers specification compliance and code quality.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+Branch: fix/predeploy-a-001
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/001-critical-contain-configured-validation-execution.md (Trusted-Project MVP Mode path only)
+- docs/execution/issue-001-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+OUT OF SCOPE - do NOT re-raise these as blockers (already dispositioned):
+- The residual replaced-executable TOCTOU is a NAMED-HUMAN ACCEPTED RISK (acceptor Md Talib, 2026-07-12): under Trusted-Project MVP Mode validation runs with host-user authority on owner-controlled projects; best-effort pre-spawn device/inode/size/content-hash re-verification is in place; atomic verified-object execution is intentionally out of MVP scope. Do NOT block on the TOCTOU window or demand atomic execution.
+- Packaged/tarball denied-executable canary testing is delegated to issue 016 and the final package gate. Do NOT block 001 on packaged-tarball verification.
+
+Confirm these were correctly done:
+1. Exact-executable allowlist with canonical-path resolution rejects relative, symlinked (real-path differs), env-prefixed, dot-segment, trailing-slash, case-variant, and non-approved absolute identities BEFORE process creation, for both focused and full validation.
+2. README/AGENTS wording is accurate and non-contradictory: distinguishes bundled worker/reviewer executables from configured validation commands; does not claim filesystem containment.
+3. The pre-spawn re-verification is labeled best-effort (not "completed strict rejection").
+4. The implementation report records the accepted risk correctly.
+
+Give a decisive verdict:
+- INTEGRATE (findings resolved or dispositioned/accepted, no new blocking defect in owned scope) or BLOCK (a specific new Critical/Important defect remains that is NOT one of the out-of-scope items above).
+- List any remaining blocking findings with exact file:line.
+
+Return your verdict and findings as your final text output.

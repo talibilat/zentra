@@ -1,0 +1,19 @@
+You are the OpenCode fix agent for Zentra issue 011, round 3, addressing the two remaining Important review findings.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+Fix these two Important findings:
+1. The supervisor can report `completed` for protocol output that downstream consumers later reject (e.g. the reviewer adapter rejects invalid calendar dates). Make the supervisor's "valid protocol output" gate for reporting `completed` apply the SAME strict validation the downstream consumers apply, so the supervisor never reports completed for output that a consumer would reject. Reuse the shared protocol schema/decoder if one exists; do NOT edit reviewer-adapter.ts (owned by another issue) - if the strict validation lives there, factor the reuse so process-supervisor imports/uses the shared validator without modifying the reviewer adapter's file, or replicate the exact strict validation within your owned code. Add a test proving a protocol payload with an invalid calendar date (or otherwise consumer-rejectable output) does NOT yield a completed result.
+2. The inherited-stream regression test currently measures elapsed time from before process startup, so its lower-bound assertion can pass due to spawn/fixture startup latency rather than proving termination waits for the bounded stream grace. Rewrite it to deterministically prove termination follows the configured stream grace AFTER leader exit: capture a timestamp at observed leader exit (via a synchronization signal from the fixture), and assert the descendant is terminated no earlier than the configured stream-grace interval after that point, and within the forced-termination bound.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and focused worker supervision tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-a-011
+- Update docs/execution/issue-011-implementation-report.md with these fixes and new commit ids.
+
+Owned files only: src/workers/process-supervisor.ts and worker supervision test files/fixtures, plus the report. If reuse requires a shared validator that does not yet exist in a shared location, prefer replicating the exact strict validation inside process-supervisor.ts rather than editing files owned by other issues.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

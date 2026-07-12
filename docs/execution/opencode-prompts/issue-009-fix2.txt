@@ -1,0 +1,20 @@
+You are the OpenCode fix agent for Zentra issue 009, round 2, addressing the remaining IN-SCOPE independent review finding. Engineering work on code-review process wiring for a local developer CLI.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+Branch: fix/predeploy-b-review-artifacts
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+Address ONLY these remaining in-scope findings (other findings about the packaged tarball `files` allowlist and packed-artifact enumeration are owned by issues 019/016 and are intentionally out of scope for this branch):
+1. Fail closed on INCOMPLETE reviewer output: approval must be accepted ONLY when the reviewer produced complete, schema-valid, single-decision output AND consumed/allowed the full request. Treat truncated output, a reviewer that did not consume the full stdin request, a stdin write that did not complete successfully, or any partial/streaming-incomplete result as DENY, never approve.
+2. Ensure the stdin write to the reviewer must complete successfully before exit code zero and stdout are accepted; a stdin `error` is a reviewer failure (deny).
+3. Add regression tests: a reviewer that emits a valid-looking decision but truncated/incomplete output (assert deny); a reviewer that does not read its full stdin (assert deny or bounded settlement without approval).
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and focused reviewer/CLI tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-b-review-artifacts
+- Update docs/execution/issue-009-implementation-report.md: record these fixes and add an explicit disposition paragraph stating that packaged-tarball exclusion of test-only reviewer artifacts and the packed-artifact enumeration test are owned by issue 019 (files allowlist) and issue 016 (packaged CLI test), to be verified at the final package gate; issue 009 guarantees the identity-only reviewer is not resolvable or selectable by production source code.
+
+Owned files only: src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring only), reviewer test files, tests/fixtures/content-aware-reviewer.mjs, and the report. Do NOT edit package.json, README.md, AGENTS.md, or other src files.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

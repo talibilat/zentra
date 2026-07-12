@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import {
+  access,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ValidationRunner,
   ValidationReportSchema,
@@ -11,6 +19,7 @@ import {
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
+import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
 
 const cleanup: string[] = [];
 
@@ -42,7 +51,147 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function withDotSegment(executable: string): string {
+  const directory = path.dirname(executable);
+  return `${directory}${path.sep}.${path.sep}${path.basename(executable)}`;
+}
+
+function withCaseVariant(executable: string): string {
+  return executable.replace(/[A-Za-z]/, (character) =>
+    character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase(),
+  );
+}
+
+async function withTemporaryApprovedExecutable(
+  test: (approvedExecutable: string, replacement: string) => Promise<void>,
+): Promise<void> {
+  const directory = await workspace();
+  const approvedExecutable = path.join(directory, "approved-node");
+  const replacement = path.join(directory, "replacement-node");
+  await writeFile(approvedExecutable, "approved", { mode: 0o755 });
+  await writeFile(replacement, "replaced", { mode: 0o755 });
+  const canonicalApprovedExecutable = await realpath(approvedExecutable);
+  const originalExecPath = process.execPath;
+
+  try {
+    process.execPath = canonicalApprovedExecutable;
+    vi.resetModules();
+    await test(canonicalApprovedExecutable, replacement);
+  } finally {
+    process.execPath = originalExecPath;
+    vi.resetModules();
+  }
+}
+
+class CountingSupervisor extends ProcessSupervisor {
+  readonly requests: WorkerRequest[] = [];
+
+  override execute(request: WorkerRequest, _signal: AbortSignal): Promise<WorkerResult> {
+    this.requests.push(request);
+    return Promise.resolve({
+      outcome: "completed",
+      exitCode: 0,
+      events: [],
+      stdout: "",
+      rawStdout: "",
+      stderr: "",
+    });
+  }
+}
+
 describe("ValidationRunner", () => {
+  it("rejects unintended executable identities before process creation", async () => {
+    const cwd = await workspace();
+    const executableLink = path.join(cwd, "node-link");
+    await symlink(process.execPath, executableLink);
+    const deniedCommands = [
+      ["/bin/echo", "unapproved"],
+      ["node", "--version"],
+      [withDotSegment(process.execPath), "--version"],
+      [`${process.execPath}${path.sep}`, "--version"],
+      [withCaseVariant(process.execPath), "--version"],
+      [executableLink, "--version"],
+      ["/usr/bin/env", process.execPath, "--version"],
+    ] as const;
+
+    for (const command of deniedCommands) {
+      const supervisor = new CountingSupervisor();
+      await expect(
+        new ValidationRunner(supervisor).run(
+          project(command),
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).rejects.toThrow(/approved canonical absolute path/);
+      expect(supervisor.requests).toHaveLength(0);
+    }
+  });
+
+  it("rejects an approved executable replaced at the same pathname", async () => {
+    await withTemporaryApprovedExecutable(async (approvedExecutable) => {
+      const { ValidationRunner: IsolatedValidationRunner } = await import(
+        "../../src/capabilities/validation-runner.js"
+      );
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      await writeFile(approvedExecutable, "replaced", { mode: 0o755 });
+
+      await expect(
+        new IsolatedValidationRunner(supervisor).run(
+          project([approvedExecutable, "--version"]),
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).rejects.toThrow(/identity changed/);
+      expect(supervisor.requests).toHaveLength(0);
+    });
+  });
+
+  it("performs best-effort pre-spawn re-verification before supervisor dispatch", async () => {
+    await withTemporaryApprovedExecutable(async (approvedExecutable, replacement) => {
+      const { ValidationRunner: IsolatedValidationRunner } = await import(
+        "../../src/capabilities/validation-runner.js"
+      );
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      const pending = new IsolatedValidationRunner(supervisor).run(
+        project([approvedExecutable, "--version"]),
+        "focused",
+        cwd,
+        AbortSignal.timeout(5_000),
+      );
+      renameSync(replacement, approvedExecutable);
+
+      await expect(pending).rejects.toThrow(/identity changed/);
+      expect(supervisor.requests).toHaveLength(0);
+    });
+  });
+
+  it.each(["focused", "full"] as const)(
+    "runs approved %s validation through the executable policy",
+    async (name) => {
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      const configured = project([process.execPath, "--version"]);
+      configured.validations.full = [process.execPath, "--version"];
+
+      await expect(
+        new ValidationRunner(supervisor).run(
+          configured,
+          name,
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).resolves.toMatchObject({ name, outcome: "completed", exitCode: 0 });
+      expect(supervisor.requests).toHaveLength(1);
+      expect(supervisor.requests[0]?.executable).toBe(process.execPath);
+    },
+  );
+
   it("reports named command identity, exact argv digest, timing, outcome, and exit code", async () => {
     const cwd = await workspace();
     const command = [process.execPath, "-e", 'process.stdout.write("ok")'] as const;

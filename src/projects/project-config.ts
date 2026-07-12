@@ -1,10 +1,119 @@
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
-// Best-effort guard against configuring shell "-c" wrappers as validation
-// commands. This is NOT a security boundary: the real boundary is that only
-// named project commands run and they are spawned with shell: false. This
-// check merely catches obvious misconfiguration.
+export const APPROVED_VALIDATION_EXECUTABLE = realpathSync(process.execPath);
+
+interface ExecutableIdentity {
+  readonly device: number;
+  readonly inode: number;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+const approvedValidationExecutableIdentity = executableIdentitySync(
+  APPROVED_VALIDATION_EXECUTABLE,
+);
+
+function executableIdentitySync(executable: string): ExecutableIdentity {
+  const before = statSync(executable);
+  const content = readFileSync(executable);
+  const after = statSync(executable);
+  if (!sameFileVersion(before, after)) {
+    throw new Error("Validation executable identity changed during approval");
+  }
+  return {
+    device: after.dev,
+    inode: after.ino,
+    size: after.size,
+    sha256: createHash("sha256").update(content).digest("hex"),
+  };
+}
+
+function sameFileVersion(
+  left: Awaited<ReturnType<typeof stat>>,
+  right: Awaited<ReturnType<typeof stat>>,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function sameExecutableIdentity(
+  left: ExecutableIdentity,
+  right: ExecutableIdentity,
+): boolean {
+  return (
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.size === right.size &&
+    left.sha256 === right.sha256
+  );
+}
+
+export function assertApprovedValidationExecutable(executable: string): void {
+  if (!path.isAbsolute(executable)) {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+
+  let canonicalExecutable: string;
+  try {
+    canonicalExecutable = realpathSync(executable);
+  } catch {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+
+  if (
+    executable !== canonicalExecutable ||
+    canonicalExecutable !== APPROVED_VALIDATION_EXECUTABLE
+  ) {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+}
+
+export async function assertApprovedValidationExecutableIdentity(
+  executable: string,
+): Promise<void> {
+  assertApprovedValidationExecutable(executable);
+
+  try {
+    const canonicalExecutable = await realpath(executable);
+    const before = await stat(canonicalExecutable);
+    const content = await readFile(canonicalExecutable);
+    const after = await stat(canonicalExecutable);
+    const currentIdentity: ExecutableIdentity = {
+      device: after.dev,
+      inode: after.ino,
+      size: after.size,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    };
+
+    if (
+      canonicalExecutable !== APPROVED_VALIDATION_EXECUTABLE ||
+      !sameFileVersion(before, after) ||
+      !sameExecutableIdentity(
+        currentIdentity,
+        approvedValidationExecutableIdentity,
+      )
+    ) {
+      throw new Error("Validation executable identity changed after approval");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("identity changed")) {
+      throw error;
+    }
+    throw new Error("Validation executable identity changed after approval");
+  }
+}
+
+// This catches obvious shell-wrapper misconfiguration before the stricter
+// executable identity check reports the generic allowlist error.
 const FORBIDDEN_SHELLS = new Set([
   "sh",
   "bash",
@@ -78,6 +187,16 @@ const CommandSchema = z
   .refine((command) => !isShellWrapperCommand(command), {
     message:
       "Validation commands must be direct executable invocations, not shell -c wrappers",
+  })
+  .superRefine((command, context) => {
+    try {
+      assertApprovedValidationExecutable(command[0]);
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid validation executable",
+      });
+    }
   });
 
 export const ProjectConfigSchema = z.object({

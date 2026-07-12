@@ -18,10 +18,7 @@ import {
   type BundledFixtureName,
 } from "../../src/fixtures/bundled-fixtures.js";
 
-const fixtureNames = [
-  "deterministic-worker.mjs",
-  "deterministic-reviewer.mjs",
-] as const;
+const fixtureNames = ["deterministic-worker.mjs"] as const;
 const temporaryDirectories: string[] = [];
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 
@@ -64,7 +61,7 @@ function copiedLayout(
 
 describe("resolveBundledFixture", () => {
   it.each(["source", "built"] as const)(
-    "returns canonical attested worker and reviewer paths from the exact %s layout",
+    "returns the canonical attested worker path from the exact %s layout",
     (layout) => {
       const copied = copiedLayout(layout);
 
@@ -83,13 +80,13 @@ describe("resolveBundledFixture", () => {
 
   it("rejects an expected-path symlink even when its target has valid bytes", () => {
     const copied = copiedLayout("source");
-    const expected = copied.fixtures["deterministic-reviewer.mjs"];
-    const external = path.join(copied.root, "external-reviewer.mjs");
+    const expected = copied.fixtures["deterministic-worker.mjs"];
+    const external = path.join(copied.root, "external-worker.mjs");
     copyFileSync(expected, external);
     rmSync(expected);
     symlinkSync(external, expected);
 
-    expect(() => resolveBundledFixture("deterministic-reviewer.mjs", copied.anchor))
+    expect(() => resolveBundledFixture("deterministic-worker.mjs", copied.anchor))
       .toThrow(/regular non-symlink|symbolic/i);
   });
 
@@ -99,6 +96,10 @@ describe("resolveBundledFixture", () => {
 
     expect(() => resolveBundledFixture("other.mjs" as BundledFixtureName, copied.anchor))
       .toThrow(/fixture name/i);
+    expect(() => resolveBundledFixture(
+      "deterministic-reviewer.mjs" as BundledFixtureName,
+      copied.anchor,
+    )).toThrow(/fixture name/i);
     expect(() => resolveBundledFixture("deterministic-worker.mjs", wrongAnchor))
       .toThrow(/layout/i);
   });

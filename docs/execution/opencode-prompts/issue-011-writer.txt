@@ -1,0 +1,49 @@
+You are the OpenCode implementation agent for Zentra issue 011.
+
+Repository worktree:
+/Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+
+Branch:
+fix/predeploy-a-011
+
+Read first:
+- AGENTS.md
+- docs/design/orchestrator.md
+- docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+
+Exclusive ownership:
+- src/workers/process-supervisor.ts
+- Test files and fixtures you add that cover process-group descendant termination (for example tests/workers/*.ts and any new supervision fixtures).
+
+Forbidden ownership:
+- src/projects/project-config.ts, src/capabilities/validation-runner.ts (owned by issue 001).
+- src/reviews/reviewer-adapter.ts, src/cli/main.ts, fixtures/deterministic-reviewer.mjs (owned by issue 009).
+- src/journal/sqlite-journal.ts (owned by issue 013).
+- The integration worktree at /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-integration.
+- docs/issues/ briefs. package.json, pnpm-lock.yaml, tsconfig.json, workflow files.
+
+Requirements:
+1. Reproduce the failure sequence first: a successful leader exit that leaves a same-group descendant alive is currently reported as completed. Write a failing end-to-end fixture that proves it before fixing.
+2. Follow test-driven development.
+3. Implement only issue 011.
+4. Satisfy every acceptance criterion: after a leader exits, allow only a bounded stream-flush grace then terminate the owned process group even on successful exit; confirm group termination before reporting completed; report failure when an owned same-group descendant survives bounded termination; define and document the platform boundary (macOS) for descendants that deliberately escape the process group; successful completion means leader succeeded AND protocol output valid AND no owned descendant remains.
+5. Add every required test: successful-parent-leaves-child fixture asserting the child is terminated before completion; inherited-open-streams, descendant-ignoring-graceful-termination, and bounded-forced-termination fixtures; an escaped-session descendant test verifying the documented fail-closed or unsupported boundary on macOS; re-run worker, reviewer, validation, cancellation, timeout, and output-limit tests. Capture descendant PIDs and assert they no longer exist before the supervisor promise resolves.
+6. Final verification: run pnpm test, pnpm check, and pnpm build on macOS.
+7. Run pnpm check.
+8. Run focused tests covering worker supervision, cancellation, timeout, and output limits.
+9-16 (control rules): Do not merge branches. Do not modify main or fix/pre-deployment. Do not force-push or amend. Do not create issues or pull requests. Do not answer human-decision blockers. Preserve exact evidence for any uncertain effect. Commit only after verification passes with a concise issue-specific message and no co-author trailer. Push fix/predeploy-a-011 with upstream tracking.
+
+Do not claim containment of privileged processes or descendants that escape every supported OS ownership mechanism. Do not add Linux or Windows support without platform conformance tests. Do not remove bounded output or timeout behavior.
+
+Create docs/execution/issue-011-implementation-report.md in your worktree with:
+- Status
+- Root cause
+- Files changed
+- Tests added
+- Commands and results
+- Acceptance criteria evidence
+- Security boundary
+- Remaining concerns
+- Commit identity
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.

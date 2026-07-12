@@ -1,0 +1,18 @@
+You are the independent OpenCode CODE-QUALITY and SECURITY reviewer for Zentra issue 011. READ-ONLY review of process-supervision descendant-termination code. You are a DIFFERENT reviewer than the specification reviewer.
+
+Worktree to review: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- AGENTS.md
+- docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+- docs/execution/issue-011-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Review code quality and correctness ONLY: correctness of process-group signaling (killpg/process.kill negative pid), race between leader exit and group termination, whether the bounded grace and forced-escalation deadlines are enforced with a monotonic clock, whether "no owned descendant remains" is actually verified (not merely assumed), signal handling and EPERM/ESRCH edge cases, resource/timer cleanup, deadlock or hang risk if a descendant keeps pipes open, and regression risk to cancellation/timeout/output-limit behavior. Flag any path that can report completed while a descendant survives, or any unbounded wait.
+
+Return: Quality verdict (PASS or ISSUES_FOUND), Strengths, Critical findings, Important findings, Minor findings, Required fixes, Final quality verdict. Cite exact file:line for every finding. Return the review as your final text output.

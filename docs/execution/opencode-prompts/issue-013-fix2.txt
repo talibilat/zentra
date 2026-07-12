@@ -1,0 +1,22 @@
+You are the OpenCode fix agent for Zentra issue 013 (LOW severity), round 2, addressing remaining review findings within realistic scope.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-d-persistence
+Branch: fix/predeploy-d-persistence
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+Address these findings:
+1. Improve the malicious-read memory test to measure PEAK memory in an isolated subprocess using supported-platform resource accounting (for example spawn a node subprocess performing the malicious read and read its peak RSS via process resource usage), rather than comparing two point-in-time RSS samples in-process. Assert peak memory stays within the documented budget.
+2. Translate operation-guard/append-guard interruptions into an operation-specific failure and add a rollback/atomicity test for the append path so an interrupted guard does not leave partial state.
+3. For the concern that a schema-controlled query plan (e.g. a SCAN instead of SEARCH, or an expensive generated column) could do work beyond the row limit: enforce/assert in the production read path that the discovery query plan uses the expected index (SEARCH ... USING INDEX), and fail closed if the plan is not the expected bounded plan.
+
+RESIDUAL DISPOSITION (record, do not attempt to defeat a library limitation): better-sqlite3 exposes no asynchronous statement interrupt / progress handler, so a hard mid-statement time interrupt is not available. The bounded-work guarantee is therefore STRUCTURAL: database/WAL/shared-memory size admission limits bound total scannable data, and indexed limit-plus-one discovery bounds returned rows. Document this explicitly in the implementation report as the predictable-failure mechanism for adversarial query work, and note it is acceptable for this LOW-severity issue.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and focused journal tests; capture results and the malicious-read wall-time and peak-memory numbers.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-d-persistence
+- Update docs/execution/issue-013-implementation-report.md with fixes, benchmark numbers, and the residual disposition.
+
+Owned files only: src/journal/sqlite-journal.ts and journal test files, plus the report.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed, the branch is pushed, and the recorded peak-memory/wall-time numbers.

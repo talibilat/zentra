@@ -1,0 +1,53 @@
+You are the OpenCode implementation agent for Zentra issue 013.
+
+Repository worktree:
+/Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-d-persistence
+
+Branch:
+fix/predeploy-d-persistence
+
+Read first:
+- AGENTS.md
+- docs/design/orchestrator.md
+- docs/issues/013-low-bound-sqlite-read-work-before-aggregate-scan.md
+
+Exclusive ownership:
+- src/journal/sqlite-journal.ts
+- Test files you add that cover the SQLite journal (for example tests/journal/*.ts)
+
+Forbidden ownership:
+- Every other src/ file, including files owned by other active writers.
+- The integration worktree at /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-integration.
+- docs/issues/ briefs.
+- package.json, pnpm-lock.yaml, tsconfig.json, and any workflow files.
+
+Requirements:
+1. Reproduce the issue's failure sequence before implementation: demonstrate that a large or malicious database drives an unbounded aggregate scan before limits are enforced.
+2. Follow test-driven development: write failing tests first.
+3. Implement only issue 013. Do not add unrelated scope.
+4. Satisfy every acceptance criterion in the issue file: reject oversized db/WAL/shared-memory before expensive reads; bound event discovery with limit-plus-one queries and incremental byte accounting instead of an unbounded full aggregate; ensure indexes support stream-version and global-position bounded reads; apply SQLite progress/operation interruption limits; preserve transactional consistency and existing event-count, per-event, and total-materialized-byte guarantees.
+5. Add every required test: large malicious database test bounded in time and memory; oversized db and WAL admission tests; query-plan or index assertions for stream and global reads; boundary tests at exactly each configured limit and one unit over it.
+6. Run the issue's final verification commands: pnpm test, pnpm check, pnpm build.
+7. Run pnpm check.
+8. Run focused tests covering the SQLite journal subsystem.
+9. Do not merge branches.
+10. Do not modify main or fix/pre-deployment.
+11. Do not force-push or amend.
+12. Do not create issues or pull requests.
+13. Do not answer any human-decision blockers.
+14. Preserve exact evidence for any uncertain Git or external effect.
+15. Commit only after verification passes, using a concise issue-specific commit message. Do not add any co-author trailer.
+16. Push the writer branch fix/predeploy-d-persistence with upstream tracking (git push -u origin fix/predeploy-d-persistence).
+
+Create docs/execution/issue-013-implementation-report.md in your worktree with:
+- Status
+- Root cause
+- Files changed
+- Tests added
+- Commands and results
+- Acceptance criteria evidence
+- Security boundary
+- Remaining concerns
+- Commit identity
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.

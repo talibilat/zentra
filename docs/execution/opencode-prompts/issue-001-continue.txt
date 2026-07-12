@@ -1,0 +1,18 @@
+You are the OpenCode implementation agent continuing Zentra issue 001 in this worktree.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+Branch: fix/predeploy-a-001
+
+IMPORTANT: The implementation is ALREADY COMMITTED as commit 2e91baf ("fix: enforce canonical validation executables"). Do NOT re-implement, do NOT restart, do NOT reproduce again. Do NOT run `no-mistakes`, `code-review`, or any interactive skill or plugin command.
+
+Your only remaining tasks:
+1. Ensure dependencies are installed: pnpm install --frozen-lockfile (lockfile must stay unchanged).
+2. Run verification and capture exact results: pnpm test, pnpm check, pnpm build.
+3. Run focused tests: the project-config and validation-runner test files.
+4. If everything passes: update docs/execution/issue-001-implementation-report.md so its "Commands and results" section reflects the actual verification output and the commit identity 2e91baf, then commit that report update if it changed (concise message, no co-author trailer).
+5. Push the branch with upstream tracking: git push -u origin fix/predeploy-a-001
+6. If any test or check FAILS: make the minimal fix within the already-owned files (src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md, and the related tests), commit with a concise message, and push. Do NOT amend or force-push; add a new commit.
+
+Owned files (only these): src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md, docs/execution/issue-001-implementation-report.md, and the project-config / validation-runner test files. Do not touch anything else.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED with a concise summary that states whether pnpm test/check/build passed and confirms the branch is pushed.
