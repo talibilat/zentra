@@ -2,11 +2,11 @@
 
 ## Current State
 
-- Current phase: Task 9 is complete and Task 10 is active.
-- Active task: Task 10, local CLI and MVP documentation.
-- Last verified integration commit: `e4185bf` on `feature/zentra-mvp`.
+- Current phase: MVP implementation and completion gate are complete.
+- Active task: none.
+- Last verified implementation commit: `5060c2f` on `feature/zentra-mvp`.
 - Blocking issue: none.
-- Next action: implement Task 10 CLI composition, stable JSON commands, signal handling, and README.
+- Next action: keep `feature/zentra-mvp` available for human review without merging it to `main`.
 
 ## Task Ledger
 
@@ -22,7 +22,8 @@
 | Task 7 integration queue | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `ccec845` | 44/44 pass | spec and quality approved; all Critical and Important findings fixed | yes |
 | Task 8 tracer bullet | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `2e553e8` | 59/59 pass | spec and quality approved; all Critical and Important findings fixed | yes |
 | Task 9 recovery | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `e4185bf` | 51/51 pass | spec and quality approved; all Critical and Important findings fixed | yes |
-| Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | in progress | - | - | - | - |
+| Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `1081bc0` | 52/52 pass before final hardening | spec and quality approved; all Important findings fixed | yes |
+| Final completion hardening | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `5060c2f` | 478/478 full suite | two independent whole-MVP audits approved with no Critical or Important findings | yes |
 
 ## Decisions
 
@@ -39,6 +40,8 @@
 - 2026-07-12: Task 8 records `task.commit_observed` and uncertain `task.integration_observed` events without terminalizing effects that Task 9 must reconcile.
 - 2026-07-12: Task 9 classifies recovery through bounded read-only journal, workspace, ref, commit, diff, and evidence inspection and never automatically repeats an uncertain effect.
 - 2026-07-12: Task 9 persists validation subject/workspace provenance and the original integration base so a restarted process can strictly prove completed candidate integration without runtime WeakSet state.
+- 2026-07-12: Task 10 exposes only the bundled attested worker and reviewer, keeps status and recovery SQLite access read-only, and emits one bounded stable JSON object per operational invocation.
+- 2026-07-12: Final hardening journals prepared integration before CAS, makes successful ticket cleanup durable and recoverable, bounds journal append and replay symmetrically, and rejects invalid integration branch names.
 
 ## Deferred Minor Findings
 
@@ -50,12 +53,13 @@
 - Task 3 does not include a synthetic optimistic-concurrency race test and uses placeholder storage metadata for prospective projection events.
 - The reviewer protocol permits non-JSON stdout around its one strict JSON event and runs with `/tmp` as its working directory.
 - The process supervisor does not explicitly ignore late `decide` calls after settlement, although they cannot change the returned result.
-- Task 7 cleanup and reconciliation records are process-local and unbounded until Task 9 supplies durable recovery decisions.
-- Task 7 conservatively preserves some empty private candidate roots after uncertain creation, and complete same-UID filesystem isolation remains outside the local MVP.
+- Task 7 conservatively preserves private candidate roots after uncertain creation or cleanup so a later reconciler can inspect them.
 - Git process-group termination cannot kill a descendant that deliberately escapes into another process group.
 - Validation and review provenance is process-local and fails closed after restart; Task 9 reconciles durable Git and journal facts rather than attempting to reuse runtime provenance.
 - The deterministic fixture intentionally supports only one root-level target file in the MVP.
 - Recovery trusts the durable event journal as the source of truth and detects malformed or contradictory evidence; cryptographic resistance to a privileged actor coherently rewriting both SQLite and Git is outside the approved MVP threat model.
+- The projection's defense-in-depth canonical snapshot maps a missing compared field to the string `undefined`; strict recovery schemas reject such malformed streams before authorizing effects.
+- Trusted project validation executables retain the local user's host filesystem authority and are not a hostile-code sandbox.
 
 ## Blockers
 
@@ -80,3 +84,7 @@ None.
 - 2026-07-12: `feature/zentra-mvp` was pushed through `2e553e8` without merging to `main`.
 - 2026-07-12: Task 9 at `e4185bf` passed 51 focused recovery tests, 351/351 full tests, `pnpm check`, and `pnpm build`; final independent spec and quality reviews reported no in-scope Critical or Important findings.
 - 2026-07-12: `feature/zentra-mvp` was pushed through `e4185bf` without merging to `main`.
+- 2026-07-12: Task 10 at `1081bc0` passed its focused CLI gate, full suite, `pnpm check`, `pnpm build`, and built CLI help; final independent task reviews reported no Critical or Important findings.
+- 2026-07-12: Final completion hardening at `5060c2f` passed 478/478 tests, `pnpm check`, `pnpm build`, `pnpm start -- --help`, and `pnpm audit --prod` with no known vulnerabilities.
+- 2026-07-12: Two independent whole-MVP audits reported zero Critical and zero Important findings.
+- 2026-07-12: Final evidence is recorded in `docs/execution/mvp-final-report.md`.
