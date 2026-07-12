@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { z } from "zod";
-import type { ProcessSupervisor } from "../workers/process-supervisor.js";
 import type { ValidationReport } from "../capabilities/validation-runner.js";
 
 export interface ReviewInput {
@@ -61,6 +60,7 @@ const REVIEWER_ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as c
 const DEFAULT_REVIEWER_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_REVIEW_INPUT_BYTES = 2 * 1_024 * 1_024;
 const DEFAULT_MAX_REVIEW_OUTPUT_BYTES = 16 * 1_024;
+const STREAM_FLUSH_GRACE_MS = 100;
 
 export interface ProcessReviewerOptions {
   readonly executable: string;
@@ -213,6 +213,12 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
       let outcome: "cancelled" | "timed_out" | "failed" | undefined;
       let reason = "";
       let settled = false;
+      let exitObserved = false;
+      let exitCode: number | null = null;
+      let stdinCompleted = false;
+      let stdoutEnded = false;
+      let stderrEnded = false;
+      let settlementTimer: NodeJS.Timeout | undefined;
 
       const kill = (): void => {
         if (child.pid === undefined) return;
@@ -222,6 +228,39 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
           child.kill("SIGKILL");
         }
       };
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (settlementTimer !== undefined) clearTimeout(settlementTimer);
+        signal.removeEventListener("abort", onAbort);
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        kill();
+
+        const stderrText = Buffer.concat(stderr).toString("utf8");
+        if (outcome !== undefined) {
+          reject(new ReviewerExecutionError(outcome, reason || stderrText));
+          return;
+        }
+        if (!exitObserved || exitCode !== 0) {
+          reject(new ReviewerExecutionError("failed", stderrText));
+          return;
+        }
+        if (!stdinCompleted) {
+          reject(new ReviewerExecutionError("failed", "reviewer stdin did not accept the complete request"));
+          return;
+        }
+        resolve(Buffer.concat(stdout).toString("utf8"));
+      };
+      const scheduleSettlementDeadline = (): void => {
+        settlementTimer ??= setTimeout(finish, STREAM_FLUSH_GRACE_MS);
+      };
+      const finishIfFlushed = (): void => {
+        if (!exitObserved || !stdoutEnded || !stderrEnded) return;
+        if (outcome !== undefined || exitCode !== 0 || stdinCompleted) finish();
+      };
       const stop = (
         nextOutcome: "cancelled" | "timed_out" | "failed",
         nextReason: string,
@@ -230,6 +269,7 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
         outcome = nextOutcome;
         reason = nextReason;
         kill();
+        scheduleSettlementDeadline();
       };
       const timer = setTimeout(
         () => stop("timed_out", "reviewer timeout exceeded"),
@@ -247,85 +287,33 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
       };
       child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
       child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
+      child.stdout.on("end", () => {
+        stdoutEnded = true;
+        finishIfFlushed();
+      });
+      child.stderr.on("end", () => {
+        stderrEnded = true;
+        finishIfFlushed();
+      });
+      child.stdout.on("error", (error) => stop("failed", `reviewer stdout failed: ${error.message}`));
+      child.stderr.on("error", (error) => stop("failed", `reviewer stderr failed: ${error.message}`));
       child.on("error", (error) => stop("failed", `reviewer spawn failed: ${error.message}`));
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        const stderrText = Buffer.concat(stderr).toString("utf8");
-        if (outcome !== undefined) {
-          reject(new ReviewerExecutionError(outcome, reason || stderrText));
-          return;
-        }
-        if (code !== 0) {
-          reject(new ReviewerExecutionError("failed", stderrText));
-          return;
-        }
-        resolve(Buffer.concat(stdout).toString("utf8"));
+      child.on("exit", (code) => {
+        exitObserved = true;
+        exitCode = code;
+        scheduleSettlementDeadline();
+        finishIfFlushed();
       });
-      child.stdin.on("error", () => {
-        // The close event reports the authoritative process outcome.
+      child.stdin.on("error", (error) => {
+        stop("failed", `reviewer stdin failed: ${error.message}`);
       });
-      child.stdin.end(request);
+      child.stdin.on("close", () => {
+        if (!stdinCompleted) stop("failed", "reviewer stdin closed before the request completed");
+      });
+      child.stdin.end(request, "utf8", () => {
+        stdinCompleted = true;
+        finishIfFlushed();
+      });
     });
-  }
-}
-
-export class DeterministicReviewerAdapter implements ReviewerAdapter {
-  constructor(
-    private readonly supervisor: ProcessSupervisor,
-    private readonly executable: string
-  ) {}
-
-  async review(input: ReviewInput, signal: AbortSignal): Promise<ReviewDecision> {
-    // Reject matching worker and reviewer identities before spawning
-    if (input.workerId === input.reviewerId) {
-      throw new Error(
-        `reviewer identity must differ from worker identity: ${input.workerId}`
-      );
-    }
-
-    const diffSha256 = createHash("sha256")
-      .update(input.diff, "utf8")
-      .digest("hex");
-
-    const validationSha256 = canonicalValidationDigest(input.validation);
-
-    const result = await this.supervisor.execute(
-      {
-        taskId: "review",
-        executable: process.execPath,
-        args: [
-          this.executable,
-          "--diff-sha256",
-          diffSha256,
-          "--validation-sha256",
-          validationSha256,
-          "--worker-id",
-          input.workerId,
-          "--reviewer-id",
-          input.reviewerId,
-        ],
-        cwd: "/tmp",
-        timeoutMs: 30_000,
-      },
-      signal
-    );
-
-    if (result.outcome !== "completed") {
-      throw new ReviewerExecutionError(result.outcome, result.stderr);
-    }
-    if (result.events.length !== 1) {
-      throw new Error(
-        `reviewer protocol requires exactly one event, received ${result.events.length}`,
-      );
-    }
-
-    const parsed = ReviewDecisionSchema.safeParse(result.events[0]);
-    if (!parsed.success) {
-      throw new Error(`reviewer protocol returned invalid decision: ${parsed.error.message}`);
-    }
-    return parsed.data;
   }
 }

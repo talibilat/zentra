@@ -170,7 +170,6 @@ function databaseSchema(databasePath: string): unknown[] {
 
 function copiedSourceFixtureLayout(): {
   readonly anchor: URL;
-  readonly reviewer: string;
   readonly worker: string;
 } {
   const baseDirectory = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-fixture-layout-")));
@@ -182,11 +181,9 @@ function copiedSourceFixtureLayout(): {
   const root = path.resolve(import.meta.dirname, "../..");
   const worker = path.join(fixtureDirectory, "deterministic-worker.mjs");
   copyFileSync(path.join(root, "fixtures", "deterministic-worker.mjs"), worker);
-  const reviewer = path.join(fixtureDirectory, "deterministic-reviewer.mjs");
-  copyFileSync(path.join(root, "fixtures", "deterministic-reviewer.mjs"), reviewer);
   const anchorPath = path.join(moduleDirectory, "bundled-fixtures.ts");
   writeFileSync(anchorPath, "// isolated resolver anchor\n", "utf8");
-  return { anchor: pathToFileURL(anchorPath), reviewer, worker };
+  return { anchor: pathToFileURL(anchorPath), worker };
 }
 
 describe("Zentra CLI", () => {
@@ -903,7 +900,7 @@ describe("Zentra CLI", () => {
       "--database", testFixture.databasePath,
       "--task-id", "task-status-no-fixtures",
     ], process, invalidAnchor);
-    rmSync(path.dirname(layout.reviewer), { recursive: true, force: true });
+    rmSync(path.dirname(layout.worker), { recursive: true, force: true });
 
     const result = await invoke([
       "task", "status",
@@ -926,7 +923,7 @@ describe("Zentra CLI", () => {
     const testFixture = await fixture();
     await invoke(runArguments(testFixture, "task-recover-modified-fixtures"));
     const layout = copiedSourceFixtureLayout();
-    writeFileSync(layout.reviewer, "modified reviewer\n", "utf8");
+    writeFileSync(layout.worker, "modified worker\n", "utf8");
     const invalidAnchor = pathToFileURL(path.join(testFixture.baseDirectory, "wrong-layout.ts"));
     const invalidLayout = await invoke([
       "recover",
@@ -960,7 +957,7 @@ describe("Zentra CLI", () => {
       const layout = copiedSourceFixtureLayout();
       let anchor = layout.anchor;
       if (failure === "invalid layout") {
-        anchor = pathToFileURL(path.join(path.dirname(layout.reviewer), "bundled-fixtures.ts"));
+        anchor = pathToFileURL(path.join(path.dirname(layout.worker), "bundled-fixtures.ts"));
       } else if (failure === "missing worker") {
         rmSync(layout.worker);
       } else {

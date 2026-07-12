@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import {
-  DeterministicReviewerAdapter,
+  canonicalValidationDigest,
   ProcessReviewerAdapter,
   ReviewerExecutionError,
 } from "../../src/reviews/reviewer-adapter.js";
+import { DeterministicReviewerAdapter } from "../support/deterministic-reviewer-adapter.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
 import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -34,7 +35,7 @@ function makeTempDir(): string {
 function getFixturePath(): string {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
-  return path.join(__dirname, "../../fixtures/deterministic-reviewer.mjs");
+  return path.join(__dirname, "../fixtures/deterministic-reviewer.mjs");
 }
 
 function getContentAwareFixturePath(): string {
@@ -372,13 +373,94 @@ describe("ProcessReviewerAdapter", () => {
       .rejects.toThrow(/diff.*digest.*mismatch|evidence.*mismatch/i);
   });
 
+  it("fails closed when the reviewer returns the right diff digest but wrong validation digest", async () => {
+    const fixture = reviewerScript(`
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      console.log(JSON.stringify({
+        reviewerId: request.reviewerId,
+        decision: "approve",
+        diffSha256: request.diffSha256,
+        validationSha256: "0".repeat(64),
+        decidedAt: new Date().toISOString(),
+        reason: "reviewed"
+      }));
+    `);
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toThrow(/validation.*digest.*mismatch|evidence.*mismatch/i);
+  });
+
+  it("fails closed when the reviewer closes stdin early", async () => {
+    const fixture = reviewerScript("process.stdin.destroy(); process.exit(0);");
+
+    await expect(processReviewer(fixture).review(
+      { ...input, diff: "x".repeat(1_800_000) },
+      AbortSignal.timeout(5_000),
+    )).rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
+  });
+
+  it("does not accept a zero exit from a reviewer that does not consume the full request", async () => {
+    const diff = "x".repeat(1_800_000);
+    const fixture = reviewerScript(`
+      process.stdin.destroy();
+      console.log(${JSON.stringify(JSON.stringify({
+        reviewerId: input.reviewerId,
+        decision: "approve",
+        diffSha256: createHash("sha256").update(diff).digest("hex"),
+        validationSha256: canonicalValidationDigest(validationReport),
+        decidedAt: "2026-01-01T00:00:02.000Z",
+        reason: "did not read request",
+      }))});
+    `);
+
+    await expect(processReviewer(fixture).review(
+      { ...input, diff },
+      AbortSignal.timeout(5_000),
+    )).rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
+  });
+
+  it("settles after reviewer exit when a detached descendant retains stdio", async () => {
+    const fixture = reviewerScript(`
+      import { spawn } from "node:child_process";
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1_000)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "inherit"]
+      });
+      descendant.unref();
+      console.log(JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "reviewed" }));
+    `);
+    const startedAt = performance.now();
+
+    const decision = await processReviewer(fixture).review(input, AbortSignal.timeout(5_000));
+
+    expect(decision.approved).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(750);
+  });
+
   it("fails closed when the reviewer times out", async () => {
-    const fixture = reviewerScript("setInterval(() => {}, 1_000);");
+    const fixture = reviewerScript(`
+      import { spawn } from "node:child_process";
+      const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1_000)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "inherit"]
+      });
+      descendant.unref();
+      setInterval(() => {}, 1_000);
+    `);
+    const startedAt = performance.now();
 
     await expect(processReviewer(fixture, { timeoutMs: 20 }).review(
       input,
       AbortSignal.timeout(5_000),
     )).rejects.toEqual(expect.objectContaining({ outcome: "timed_out" }));
+    expect(performance.now() - startedAt).toBeLessThan(750);
   });
 
   it("fails closed on malformed reviewer output", async () => {

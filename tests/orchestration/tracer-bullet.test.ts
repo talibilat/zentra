@@ -33,12 +33,12 @@ import { ProjectRegistry } from "../../src/projects/project-registry.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
 import {
   canonicalValidationDigest,
-  DeterministicReviewerAdapter,
   ReviewerExecutionError,
   type ReviewDecision,
   type ReviewerAdapter,
   type ReviewInput,
 } from "../../src/reviews/reviewer-adapter.js";
+import { DeterministicReviewerAdapter } from "../support/deterministic-reviewer-adapter.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import type {
@@ -70,7 +70,7 @@ const fixturePath = (name: string): string => {
   return candidate;
 };
 const workerFixture = fixturePath("deterministic-worker.mjs");
-const reviewerFixture = fixturePath("deterministic-reviewer.mjs");
+const reviewerFixture = path.resolve(here, "../fixtures/deterministic-reviewer.mjs");
 const temporaryDirectories: string[] = [];
 const journals: SqliteEventJournal[] = [];
 
