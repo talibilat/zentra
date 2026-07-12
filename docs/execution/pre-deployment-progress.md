@@ -133,7 +133,14 @@ OpenCode's plugin/built-in skills (superpowers TDD, code-review, requesting-code
 
 ## Accepted Risks
 
-(none recorded)
+- **001 residual replaced-executable TOCTOU** - Named acceptor: Md Talib (repository owner). Date 2026-07-12. Under Trusted-Project MVP Mode, configured validation executables run with host-user authority on owner-controlled projects. The implementation adds best-effort pre-spawn device/inode/size/content-hash re-verification, which shrinks but does not eliminate the non-atomic verify-to-exec window. Atomic verified-object execution is intentionally out of MVP scope. The swap requires local write access to the approved toolchain, already within the accepted host-user-authority envelope. Accepted as residual; 001 may integrate.
+
+## Cross-Issue Review Dispositions (recorded, not waived)
+
+- **009 packaged-tarball exclusion** of test-only reviewer artifacts and the packed-artifact enumeration test are owned by **issue 019** (files allowlist) and **issue 016** (packaged CLI test); verified at the final package gate. Issue 009 guarantees the identity-only reviewer is not resolvable/selectable by production source (`src`/`dist` confirmed clean).
+- **009 reviewer process-tree containment** on unsupported platforms overlaps **issue 011** (process-group termination) and **issue 016/020** (platform support); the macOS boundary is the supported target.
+- **001 packaged denied-executable canary** test is delegated to **issue 016** packaged CLI testing + final package gate.
+- **013 hard statement interrupt**: better-sqlite3 exposes no async statement interrupt/progress handler; bounded-work guarantee is STRUCTURAL (db/WAL/shm size admission + indexed limit-plus-one). Documented residual; acceptable for this LOW issue.
 
 ## Blockers
 
