@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import {
   MAX_JOURNAL_EVENT_BYTES,
@@ -28,6 +28,7 @@ const journals: SqliteEventJournal[] = [];
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const journal of journals) journal.close();
   journals.length = 0;
   for (const directory of temporaryDirectories.splice(0)) {
@@ -280,10 +281,29 @@ describe("SqliteEventJournal", () => {
     journals.push(journal);
     const database = rawDatabase(journal);
     const preparedSql: string[] = [];
+    const discoveryBindings: Array<{
+      readonly sql: string;
+      readonly parameters: readonly unknown[];
+    }> = [];
     const prepare = database.prepare.bind(database);
     database.prepare = ((sql: string) => {
       preparedSql.push(sql);
-      return prepare(sql);
+      const statement = prepare(sql);
+      if (!/EXPLAIN QUERY PLAN/i.test(sql) && sql.includes("AS event_bytes")) {
+        return new Proxy(statement, {
+          get(target, property) {
+            if (property === "iterate") {
+              return (...parameters: readonly unknown[]) => {
+                discoveryBindings.push({ sql, parameters });
+                return target.iterate(...parameters);
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      }
+      return statement;
     }) as typeof database.prepare;
 
     journal.readStream("task-1");
@@ -301,6 +321,11 @@ describe("SqliteEventJournal", () => {
     const globalSql = operationalSql.filter((sql) => sql.includes("global_position > ?"));
     expect(streamSql).toHaveLength(2);
     expect(globalSql).toHaveLength(2);
+    expect(discoveryBindings).toHaveLength(2);
+    expect(discoveryBindings.find(({ sql }) => sql.includes("stream_id = ?"))?.parameters)
+      .toEqual(["task-1", 0, MAX_JOURNAL_READ_EVENTS + 1]);
+    expect(discoveryBindings.find(({ sql }) => sql.includes("global_position > ?"))?.parameters)
+      .toEqual([0, MAX_JOURNAL_READ_EVENTS + 1]);
     for (const sql of streamSql) {
       const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(
         "task-1",
@@ -341,7 +366,7 @@ describe("SqliteEventJournal", () => {
       if (
         !appendedDuringRead &&
         !/EXPLAIN QUERY PLAN/.test(sql) &&
-        /SELECT \* FROM events/.test(sql)
+        /SELECT\s+event_id, stream_id, stream_version, global_position/.test(sql)
       ) {
         appendedDuringRead = true;
         writer.append("snapshot", 1, [{
@@ -396,6 +421,85 @@ describe("SqliteEventJournal", () => {
     expect(performance.now() - startedAt).toBeLessThan(1_000);
     expect(process.memoryUsage().rss - beforeRss).toBeLessThan(64 * 1024 * 1024);
     expect(preparedSql.join("\n")).not.toMatch(/\b(?:COUNT|SUM|MAX)\s*\(/i);
+  });
+
+  it("does not evaluate an extra large virtual column during stream or global reads", () => {
+    const { databasePath } = temporaryDatabase();
+    const database = new Database(databasePath);
+    database.function("adversarial_large_value", { deterministic: true }, () =>
+      "x".repeat(128 * 1024 * 1024)
+    );
+    database.exec(`
+      CREATE TABLE streams (
+        stream_id TEXT PRIMARY KEY,
+        current_version INTEGER NOT NULL
+      );
+      CREATE TABLE events (
+        global_position INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        stream_id TEXT NOT NULL REFERENCES streams (stream_id),
+        stream_version INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        causation_id TEXT,
+        correlation_id TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        UNIQUE (stream_id, stream_version)
+      );
+      INSERT INTO streams VALUES ('generated', 1);
+      INSERT INTO events (
+        event_id, stream_id, stream_version, type, payload,
+        causation_id, correlation_id, recorded_at
+      ) VALUES (
+        'event-1', 'generated', 1, 'event', '{}',
+        NULL, 'generated', '2026-07-12T00:00:00.000Z'
+      );
+      ALTER TABLE events ADD COLUMN adversarial_materialization TEXT
+        GENERATED ALWAYS AS (adversarial_large_value()) VIRTUAL;
+    `);
+    database.close();
+    const journal = SqliteEventJournal.openReadOnly(databasePath);
+    journals.push(journal);
+    const beforeRss = process.memoryUsage().rss;
+    const startedAt = performance.now();
+
+    expect(journal.readStream("generated")).toHaveLength(1);
+    expect(journal.readAll()).toHaveLength(1);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(process.memoryUsage().rss - beforeRss).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it("uses a monotonic clock for operation deadlines", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const wallClock = vi.spyOn(Date, "now").mockImplementation(() => {
+      throw new Error("wall clock must not guard SQLite operations");
+    });
+
+    expect(journal.readAll()).toEqual([]);
+    expect(wallClock).not.toHaveBeenCalled();
+  });
+
+  it("interrupts expired SQLite execution and reports the public read-limit error", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    injectEvents(journal, "expired", ["{}"]);
+    const guardedJournal = journal as unknown as {
+      beginBoundedOperation(): void;
+      operationDeadline: bigint;
+      operationInterrupted: boolean;
+    };
+    const beginBoundedOperation = guardedJournal.beginBoundedOperation.bind(journal);
+    guardedJournal.beginBoundedOperation = () => {
+      beginBoundedOperation();
+      guardedJournal.operationDeadline = process.hrtime.bigint() - 1n;
+    };
+
+    expect(() => journal.readStream("expired")).toThrow(
+      new Error("event journal read limit exceeded"),
+    );
+    expect(guardedJournal.operationInterrupted).toBe(true);
   });
 
   it("rejects an adversarial schema that could bypass bounded query work", () => {

@@ -37,6 +37,7 @@ export const MAX_JOURNAL_SHARED_MEMORY_BYTES = 8 * 1024 * 1024;
 const SQLITE_BUSY_TIMEOUT_MS = 1_000;
 const SQLITE_OPERATION_TIMEOUT_MS = 1_000;
 const BOUNDED_READ_LIMIT = MAX_JOURNAL_READ_EVENTS + 1;
+const SQLITE_OPERATION_TIMEOUT_NS = BigInt(SQLITE_OPERATION_TIMEOUT_MS) * 1_000_000n;
 
 const EVENT_BYTES_SQL = `
   length(CAST(event_id AS BLOB)) +
@@ -56,7 +57,10 @@ const STREAM_READ_SIZE_SQL = `
   LIMIT ?
 `;
 const STREAM_READ_ROWS_SQL = `
-  SELECT * FROM events
+  SELECT
+    event_id, stream_id, stream_version, global_position, type, payload,
+    causation_id, correlation_id, recorded_at
+  FROM events
   WHERE stream_id = ? AND stream_version > ?
     AND zentra_operation_guard()
   ORDER BY stream_version ASC
@@ -70,7 +74,10 @@ const GLOBAL_READ_SIZE_SQL = `
   LIMIT ?
 `;
 const GLOBAL_READ_ROWS_SQL = `
-  SELECT * FROM events
+  SELECT
+    event_id, stream_id, stream_version, global_position, type, payload,
+    causation_id, correlation_id, recorded_at
+  FROM events
   WHERE global_position > ?
     AND zentra_operation_guard()
   ORDER BY global_position ASC
@@ -95,7 +102,7 @@ export class SqliteEventJournal implements EventJournal {
   private readonly db: Database.Database;
   private readonly databasePath: string;
   private readonly readOnly: boolean;
-  private operationDeadline = 0;
+  private operationDeadline = 0n;
   private operationInterrupted = false;
   private operationRowsRemaining = 0;
 
@@ -122,7 +129,7 @@ export class SqliteEventJournal implements EventJournal {
       this.db.function("zentra_operation_guard", { directOnly: true }, () => {
         if (
           this.operationRowsRemaining <= 0 ||
-          Date.now() > this.operationDeadline
+          process.hrtime.bigint() > this.operationDeadline
         ) {
           this.operationInterrupted = true;
           throw new Error("event journal SQLite operation limit exceeded");
@@ -346,7 +353,7 @@ export class SqliteEventJournal implements EventJournal {
   }
 
   private beginBoundedOperation(): void {
-    this.operationDeadline = Date.now() + SQLITE_OPERATION_TIMEOUT_MS;
+    this.operationDeadline = process.hrtime.bigint() + SQLITE_OPERATION_TIMEOUT_NS;
     this.operationInterrupted = false;
     this.operationRowsRemaining = BOUNDED_READ_LIMIT;
   }
