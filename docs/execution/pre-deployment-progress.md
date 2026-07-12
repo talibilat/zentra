@@ -114,11 +114,15 @@ Writer count: 4 concurrent (013, 011, 009, 001) - at cap. 008 is a read-only rep
 
 | Branch | Worktree | Issue(s) | Owned paths | Session title | Writer status | Review | Integration |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| fix/predeploy-d-persistence | predeploy-d-persistence | 013 | src/journal/sqlite-journal.ts (+journal tests) | zentra-issue-013-writer | RUNNING | pending | pending |
-| fix/predeploy-a-011 | predeploy-a-011 | 011 | src/workers/process-supervisor.ts (+supervision tests) | zentra-issue-011-writer | RUNNING | pending | pending |
-| fix/predeploy-b-review-artifacts | predeploy-b-review-artifacts | 009 | src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring), fixtures/deterministic-reviewer.mjs (+reviewer tests) | zentra-issue-009-writer | RUNNING | pending | pending |
-| fix/predeploy-a-001 | predeploy-a-001 | 001 | src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md (+policy tests) | zentra-issue-001-writer-retry1 | RUNNING | pending | pending |
-| fix/predeploy-c0-deprecation | predeploy-c0-deprecation | 008 | docs/execution/issue-008-reproduction-report.md (evidence only) | zentra-issue-008-reproducer | DONE | pending spec review | pending |
+| fix/predeploy-d-persistence | predeploy-d-persistence | 013 | src/journal/sqlite-journal.ts (+journal tests) | zentra-issue-013-writer | DONE (40e1666,4dc57c1; test 494, 29 focused) pushed | spec+quality reviewers RUNNING | pending |
+| fix/predeploy-a-011 | predeploy-a-011 | 011 | src/workers/process-supervisor.ts (+supervision tests) | zentra-issue-011-continue-retry2 | RUNNING (retry2, --pure, no-skill) | pending | pending |
+| fix/predeploy-b-review-artifacts | predeploy-b-review-artifacts | 009 | src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring), fixtures/deterministic-reviewer.mjs (+reviewer tests) | zentra-issue-009-continue | DONE_WITH_CONCERNS (e034742,0efdc61; test 490, 110 focused) pushed | spec+quality reviewers RUNNING | pending |
+| fix/predeploy-a-001 | predeploy-a-001 | 001 | src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md (+policy tests) | zentra-issue-001-continue | DONE (2e91baf,165c154; test 486, 61 focused) pushed | spec+quality reviewers RUNNING | pending |
+| fix/predeploy-c0-deprecation | predeploy-c0-deprecation | 008 | docs/execution/issue-008-reproduction-report.md (evidence only) | zentra-issue-008-reproducer | DONE (719a2e6) NOT_REPRODUCED pushed | pending spec review | pending |
+
+### Known environment constraint (recorded)
+
+OpenCode's plugin/built-in skills (superpowers TDD, code-review, requesting-code-review, no-mistakes) HANG under headless `opencode run`. Mitigation adopted for all subsequent launches: run with `--pure` AND explicitly forbid the `skill` tool in the prompt. Writers 011/009/001 hit this after doing real work; recovered via continuation prompts. 009 concern (deterministic reviewer fixture still in broad package contents) is deferred to issues 016/019 package allowlist; production CLI cannot select it.
 
 ## Accepted Risks
 

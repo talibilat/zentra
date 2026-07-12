@@ -1,0 +1,28 @@
+You are the independent OpenCode SPECIFICATION reviewer for Zentra issue 013. This is READ-ONLY review work.
+
+Worktree to review: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-d-persistence
+Branch: fix/predeploy-d-persistence
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, merge, or run any destructive or state-changing command. No edits of any kind.
+
+Read:
+- AGENTS.md
+- docs/issues/013-low-bound-sqlite-read-work-before-aggregate-scan.md
+- docs/execution/issue-013-implementation-report.md
+- The complete diff from the branch base to HEAD:
+  git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Review ONLY specification compliance: verify EVERY acceptance criterion, every required test, every final-verification requirement, all dependencies, non-goals, and whether the original failure sequence (unbounded aggregate scan before limits) is now impossible. Confirm the required tests actually exist and assert what the issue demands (oversized db/WAL/shm admission, limit-plus-one discovery, incremental byte accounting, index/query-plan assertions, boundary at each limit and one over, bounded time/memory for malicious db).
+
+Return a structured verdict:
+- Spec verdict: COMPLIANT or ISSUES_FOUND
+- Strengths
+- Critical findings (missing/violated acceptance criteria, missing required tests, failure sequence still possible)
+- Important findings
+- Minor findings
+- Required fixes
+- Final spec verdict
+
+Every finding must cite exact file and line evidence. Return your review as your final text output.
