@@ -164,29 +164,47 @@ describe("ProcessSupervisor", () => {
 
   it("bounds stream flushing before terminating a descendant with inherited streams", async () => {
     const pidFile = path.join(workspace, "inherited-stream-descendant.pid");
-    const startedAt = process.hrtime.bigint();
+    const leaderExitFile = path.join(workspace, "inherited-stream-leader-exit.txt");
+    const descendantTerminationFile = path.join(
+      workspace,
+      "inherited-stream-descendant-termination.txt",
+    );
+    const streamGraceMs = 150;
+    const terminationGraceMs = 100;
+    const forcedTerminationMs = 1_000;
     let settled = false;
     const pending = new ProcessSupervisor({
-      streamGraceMs: 75,
-      terminationGraceMs: 100,
-      forcedTerminationMs: 500,
+      streamGraceMs,
+      terminationGraceMs,
+      forcedTerminationMs,
     }).execute(
-      request({ args: [successWithInheritedStreamsFixture, pidFile] }),
+      request({
+        args: [
+          successWithInheritedStreamsFixture,
+          pidFile,
+          leaderExitFile,
+          descendantTerminationFile,
+        ],
+      }),
       new AbortController().signal,
     );
     void pending.finally(() => {
       settled = true;
     });
     const descendantPid = Number(await waitForFile(pidFile));
+    const leaderExitedAt = BigInt(await waitForFile(leaderExitFile));
 
     expect(processExists(descendantPid)).toBe(true);
     expect(settled).toBe(false);
     const result = await pending;
-    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    const descendantTerminatedAt = BigInt(await waitForFile(descendantTerminationFile));
+    const elapsedAfterLeaderExitMs = Number(descendantTerminatedAt - leaderExitedAt) / 1_000_000;
 
     expect(result.outcome).toBe("completed");
-    expect(elapsedMs).toBeGreaterThanOrEqual(50);
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedAfterLeaderExitMs).toBeGreaterThanOrEqual(streamGraceMs);
+    expect(elapsedAfterLeaderExitMs).toBeLessThan(
+      streamGraceMs + terminationGraceMs + forcedTerminationMs,
+    );
     expect(processExists(descendantPid)).toBe(false);
   });
 
@@ -439,6 +457,26 @@ describe("ProcessSupervisor", () => {
     expect(result.stderr).toContain("worker protocol");
   });
 
+  it("maps exit zero with a consumer-invalid review date to failed", async () => {
+    const invalidDecision = JSON.stringify({
+      reviewerId: "reviewer-1",
+      approved: true,
+      diffSha256: "0".repeat(64),
+      validationSha256: "1".repeat(64),
+      decidedAt: "2025-02-30T12:00:00Z",
+      reason: "invalid calendar date",
+    });
+    const result = await new ProcessSupervisor().execute(
+      request({ taskId: "review", args: ["-e", `console.log(${JSON.stringify(invalidDecision)})`] }),
+      new AbortController().signal,
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.exitCode).toBe(0);
+    expect(result.events).toEqual([]);
+    expect(result.stderr).toContain("reviewer protocol");
+  });
+
   it("accepts exit zero without worker events for validation invocations", async () => {
     const result = await new ProcessSupervisor().execute(
       request({ taskId: "validation", args: ["-e", 'console.log("validation passed")'] }),
@@ -535,7 +573,14 @@ describe("ProcessSupervisor", () => {
       terminationGraceMs: 2_000,
       forcedTerminationMs: 500,
     }).execute(
-      request({ args: [successWithInheritedStreamsFixture, pidFile] }),
+      request({
+        args: [
+          successWithInheritedStreamsFixture,
+          pidFile,
+          path.join(workspace, "post-exit-cancel-leader-exit.txt"),
+          path.join(workspace, "post-exit-cancel-descendant-termination.txt"),
+        ],
+      }),
       controller.signal,
     );
     const descendantPid = Number(await waitForFile(pidFile));
@@ -558,7 +603,15 @@ describe("ProcessSupervisor", () => {
       terminationGraceMs: 2_000,
       forcedTerminationMs: 500,
     }).execute(
-      request({ args: [successWithInheritedStreamsFixture, pidFile], timeoutMs: 100 }),
+      request({
+        args: [
+          successWithInheritedStreamsFixture,
+          pidFile,
+          path.join(workspace, "post-exit-timeout-leader-exit.txt"),
+          path.join(workspace, "post-exit-timeout-descendant-termination.txt"),
+        ],
+        timeoutMs: 100,
+      }),
       new AbortController().signal,
     );
     const descendantPid = Number(await waitForFile(pidFile));

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { ReviewDecisionSchema } from "../reviews/reviewer-adapter.js";
 import type { WorkerAdapter, WorkerRequest, WorkerResult } from "./worker-adapter.js";
 
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
@@ -10,9 +11,6 @@ const DEFAULT_FORCED_TERMINATION_MS = 1_000;
 const GROUP_EXIT_POLL_MS = 10;
 const MAX_TIMER_MS = 2_147_483_647;
 const NS_PER_MS = 1_000_000n;
-const DATE_TIME_WITH_OFFSET =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
 type Decision =
   | { readonly kind: "exit"; readonly code: number | null }
   | { readonly kind: "timed_out" }
@@ -423,25 +421,7 @@ function isArtifactReady(events: readonly unknown[]): boolean {
 }
 
 function isReviewDecision(events: readonly unknown[]): boolean {
-  if (events.length !== 1 || !isRecord(events[0])) {
-    return false;
-  }
-  const event = events[0];
-  return (
-    Object.keys(event).length === 6 &&
-    typeof event["reviewerId"] === "string" &&
-    event["reviewerId"].length > 0 &&
-    typeof event["approved"] === "boolean" &&
-    typeof event["diffSha256"] === "string" &&
-    /^[a-f0-9]{64}$/.test(event["diffSha256"]) &&
-    typeof event["validationSha256"] === "string" &&
-    /^[a-f0-9]{64}$/.test(event["validationSha256"]) &&
-    typeof event["decidedAt"] === "string" &&
-    DATE_TIME_WITH_OFFSET.test(event["decidedAt"]) &&
-    Number.isFinite(Date.parse(event["decidedAt"])) &&
-    typeof event["reason"] === "string" &&
-    event["reason"].length > 0
-  );
+  return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
