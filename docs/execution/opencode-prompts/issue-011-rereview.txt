@@ -1,0 +1,28 @@
+You are a fresh independent OpenCode reviewer performing the CONFIRMATION re-review of Zentra issue 011 after fixes. READ-ONLY. This covers both specification compliance and code-quality/security.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+- docs/execution/issue-011-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Prior review rounds required these fixes; confirm each is correctly implemented:
+1. Reporting `completed` requires valid protocol output (not just process-exit success), with invocation-specific decoding for worker vs validation vs reviewer.
+2. Monotonic clock for stream-grace and forced-termination deadlines; guards against invalid/negative/NaN durations.
+3. No unbounded wait when group/leader signaling is denied (EPERM); settles within a fixed bound; ESRCH treated as absence proof.
+4. Cancellation/timeout precedence during post-exit cleanup (abort/timeout forces immediate termination).
+5. Tests: descendant PID captured while execute() pending and promise proven not to resolve while PID exists; inherited-stream test proves termination follows bounded grace; success fixtures emit protocol-valid output; EPERM/denied-signaling regression with bounded settlement and ESRCH-only absence checks.
+
+Scope note: the macOS-only platform boundary is the supported target; do not block on other-platform support.
+
+Give a decisive verdict:
+- INTEGRATE (all prior findings resolved, no new blocking defect) or BLOCK (a specific Critical/Important defect remains in owned scope).
+- List any remaining Critical/Important findings with exact file:line. Ignore trivial nits.
+
+Return your verdict and findings as your final text output.
