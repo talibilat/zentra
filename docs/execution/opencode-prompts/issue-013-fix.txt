@@ -1,0 +1,27 @@
+You are the OpenCode fix agent for Zentra issue 013, addressing independent review findings in this worktree.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-d-persistence
+Branch: fix/predeploy-d-persistence
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart from scratch; the implementation is already committed. Add fixes on top with new commits (no amend, no force-push).
+
+Independent review found these REQUIRED FIXES. Address all of them:
+
+Code-quality/security (release-blocking):
+1. Replace both `SELECT *` materialization statements in the production stream and global read paths with an explicit projection of exactly these columns: event_id, stream_id, stream_version, global_position, type, payload, causation_id, correlation_id, recorded_at. This prevents an adversarial schema with an extra large/generated column from being materialized and bypassing the byte budget.
+2. Use a monotonic time source (process.hrtime.bigint() or performance.now()) for operation/deadline guards instead of wall-clock time.
+3. Add a malicious-schema regression test: a database with all required indexes PLUS an extra large virtual/generated column; assert reads neither evaluate nor materialize that column and remain within existing memory and duration budgets.
+
+Specification (test-evidence gaps):
+4. Add an assertion that observes the ACTUAL bound arguments used by the production discovery statements and verifies the limit argument equals MAX_JOURNAL_READ_EVENTS + 1 for BOTH stream and global reads (not just SQL text inspection).
+5. Add a deterministic behavioral test that exhausts or expires the operation guard, verifies SQLite execution is actually interrupted, and verifies the public journal operation returns the documented read-limit error (not an internal SQLite or user-function error).
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and the focused journal tests; capture results.
+- Commit with a concise message referencing the review fixes (no co-author trailer).
+- Push: git push origin fix/predeploy-d-persistence
+- Update docs/execution/issue-013-implementation-report.md with the fixes and new commit ids.
+
+Owned files only: src/journal/sqlite-journal.ts and journal test files, plus the report. Do not touch other files.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.
