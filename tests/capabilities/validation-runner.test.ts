@@ -151,7 +151,7 @@ describe("ValidationRunner", () => {
     });
   });
 
-  it("rejects replacement between initial validation and process creation", async () => {
+  it("performs best-effort pre-spawn re-verification before supervisor dispatch", async () => {
     await withTemporaryApprovedExecutable(async (approvedExecutable, replacement) => {
       const { ValidationRunner: IsolatedValidationRunner } = await import(
         "../../src/capabilities/validation-runner.js"

@@ -115,9 +115,11 @@ Task identities are also validated as safe single path and ref components before
 
 ## Security Boundary
 
-The CLI chooses the current Node.js executable and Zentra's bundled deterministic worker and reviewer internally.
+The CLI chooses Zentra's bundled deterministic worker and reviewer executables internally; CLI callers cannot select or replace those executables.
 
-Callers cannot provide an executable, command, working directory, workspace, worker fixture, or reviewer fixture through the CLI.
+Configured validations are different: trusted project configuration supplies their argument arrays, while each validation executable must exactly match the approved canonical absolute path of the Node.js executable running Zentra.
+
+CLI callers cannot provide a working directory, workspace, worker fixture, or reviewer fixture.
 
 Workers, reviewers, and validations receive explicit minimal environments and do not inherit arbitrary parent secrets.
 
