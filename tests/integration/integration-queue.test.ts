@@ -364,6 +364,7 @@ describe("IntegrationQueue", () => {
     expect(receipt).toMatchObject({
       outcome: "cancelled",
       sourceCommit: reviewed.sourceCommit,
+      originalIntegrationCommit: null,
       resultCommit: null,
       validation: { name: "full", outcome: "cancelled", exitCode: null },
     });
@@ -476,6 +477,7 @@ describe("IntegrationQueue", () => {
 
     expect(receipt).toMatchObject({
       outcome: "failed",
+      originalIntegrationCommit: originalIntegrationHead,
       resultCommit: null,
       sourceCommit: reviewed.sourceCommit,
       validation: {
@@ -699,6 +701,7 @@ describe("IntegrationQueue", () => {
 
     expect(receipt).toMatchObject({
       outcome: "failed",
+      originalIntegrationCommit: competingCommit,
       resultCommit: null,
       validation: { name: "full", outcome: "failed", exitCode: null },
     });
@@ -1098,6 +1101,7 @@ describe("IntegrationQueue", () => {
       taskId: reviewed.lease.taskId,
       projectId: project.projectId,
       sourceCommit: reviewed.sourceCommit,
+      originalIntegrationCommit: originalIntegrationHead,
       resultCommit: await integrationHead(),
       review: reviewed.review,
       outcome: "completed",
@@ -1118,12 +1122,41 @@ describe("IntegrationQueue", () => {
         JSON.stringify({ stdout: "full validation passed", stderr: "" }),
       ),
     );
+    expect(receipt.validation.provenance).toMatchObject({
+      subjectSha256: receipt.resultCommit,
+    });
+    expect(receipt.validation.provenance.invocationId).not.toBe("");
+    expect(path.dirname(path.dirname(receipt.validation.provenance.canonicalCwd))).toBe(
+      realpathSync(worktreeRoot),
+    );
+    expect(path.basename(path.dirname(receipt.validation.provenance.canonicalCwd))).toMatch(
+      /^\.zentra-integration-[A-Za-z0-9_-]{6}$/,
+    );
+    expect(Object.isFrozen(receipt.validation.provenance)).toBe(true);
     expect(Date.parse(receipt.validation.finishedAt)).toBeGreaterThanOrEqual(
       Date.parse(receipt.validation.startedAt),
     );
     expect(readFileSync(reviewed.lease.path + "/evidence.txt", "utf8")).toBe(
       "evidence\n",
     );
+  });
+
+  it("records the advanced integration base used for a stale ticket source", async () => {
+    const reviewed = await ticket("task-stale-base", "stale.txt", "ticket from A\n");
+    await gitOk(repositoryPath, ["switch", project.integrationBranch]);
+    writeFileSync(path.join(repositoryPath, "base-b.txt"), "integration advanced\n", "utf8");
+    await gitOk(repositoryPath, ["add", "--", "base-b.txt"]);
+    await gitOk(repositoryPath, ["commit", "-m", "advance integration to B"]);
+    const baseB = await integrationHead();
+
+    const receipt = await integrate(reviewed);
+
+    expect(receipt.outcome).toBe("completed");
+    expect(receipt.originalIntegrationCommit).toBe(baseB);
+    const parents = (
+      await gitOk(repositoryPath, ["rev-list", "--parents", "--max-count=1", receipt.resultCommit!])
+    ).split(" ");
+    expect(parents).toEqual([receipt.resultCommit, baseB, reviewed.sourceCommit]);
   });
 
   it("uses a contained UUID-only candidate path even when taskId traverses", async () => {

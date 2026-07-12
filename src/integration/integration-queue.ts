@@ -27,6 +27,7 @@ export interface IntegrationReceipt {
   readonly taskId: string;
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly originalIntegrationCommit: string | null;
   readonly resultCommit: string | null;
   readonly review: ReviewDecision;
   readonly validation: ValidationReport;
@@ -105,6 +106,7 @@ export class IntegrationQueue {
     let candidateRoot: string | null = null;
     let candidateRootCreated = false;
     let preserveCandidate = false;
+    let originalIntegrationCommit: string | null = null;
 
     let source: CommandResult;
     try {
@@ -135,6 +137,7 @@ export class IntegrationQueue {
       taskId: lease.taskId,
       projectId: project.projectId,
       sourceCommit,
+      originalIntegrationCommit,
       resultCommit,
       review,
       validation,
@@ -213,7 +216,7 @@ export class IntegrationQueue {
           ),
         );
       }
-      const originalIntegrationCommit = original.stdout.trim();
+      originalIntegrationCommit = original.stdout.trim();
 
       const mergeBase = await this.git.run(
         project.repositoryPath,
@@ -514,6 +517,7 @@ export class IntegrationQueue {
         taskId: lease.taskId,
         projectId: project.projectId,
         sourceCommit,
+        originalIntegrationCommit,
         resultCommit,
         review,
         validation,
@@ -710,6 +714,7 @@ function prepareCompletedReceipt(input: {
   readonly taskId: string;
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly originalIntegrationCommit: string;
   readonly resultCommit: string;
   readonly review: ReviewDecision;
   readonly validation: ValidationReport;
@@ -719,6 +724,7 @@ function prepareCompletedReceipt(input: {
   }
   if (
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.sourceCommit) ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.originalIntegrationCommit) ||
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.resultCommit)
   ) {
     throw new Error("completed receipt commit identities are invalid");
@@ -734,6 +740,7 @@ function prepareCompletedReceipt(input: {
     taskId: input.taskId,
     projectId: input.projectId,
     sourceCommit: input.sourceCommit,
+    originalIntegrationCommit: input.originalIntegrationCommit,
     resultCommit: input.resultCommit,
     review: input.review,
     validation,
@@ -815,7 +822,16 @@ function unavailableValidation(
     command,
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout: "", stderr: reason })),
+    provenance: Object.freeze({
+      invocationId: `unavailable-${safeEvidenceName(project.projectId)}-${outcome}`,
+      canonicalCwd: project.repositoryPath,
+      subjectSha256: null,
+    }),
   };
+}
+
+function safeEvidenceName(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_") || "unknown";
 }
 
 function sha256(value: string): string {

@@ -109,6 +109,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     streamVersion: firstEvent.streamVersion,
     leaseOwner: null,
   };
+  const singleOccurrenceEvents = new Set<string>();
 
   for (let i = 1; i < events.length; i++) {
     const event = events[i]!;
@@ -124,6 +125,16 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
 
     if (event.type === "task.created") {
       throw new Error("duplicate task.created event");
+    }
+    if (
+      event.type === "task.commit_observed" ||
+      event.type === "task.integration_observed" ||
+      event.type === "task.completed"
+    ) {
+      if (singleOccurrenceEvents.has(event.type)) {
+        throw new Error(`duplicate ${event.type} event`);
+      }
+      singleOccurrenceEvents.add(event.type);
     }
 
     const currentLifecycle = state.lifecycle;

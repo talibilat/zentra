@@ -17,6 +17,13 @@ export interface ValidationReport {
   readonly command: readonly string[];
   readonly argvSha256: string;
   readonly outputSha256: string;
+  readonly provenance: DurableValidationProvenance;
+}
+
+export interface DurableValidationProvenance {
+  readonly invocationId: string;
+  readonly canonicalCwd: string;
+  readonly subjectSha256: string | null;
 }
 
 export interface ValidationRunContext {
@@ -27,6 +34,12 @@ export interface ValidationRunContext {
 export interface ExpectedValidationProvenance extends ValidationRunContext {
   readonly canonicalCwd: string;
 }
+
+const ValidationProvenanceSchema = z.strictObject({
+  invocationId: z.string().min(1),
+  canonicalCwd: z.string().min(1),
+  subjectSha256: z.string().min(1).nullable(),
+});
 
 export const ValidationReportSchema = z.strictObject({
   name: z.string().min(1),
@@ -39,6 +52,7 @@ export const ValidationReportSchema = z.strictObject({
   command: z.array(z.string()).min(1),
   argvSha256: z.string().regex(/^[a-f0-9]{64}$/),
   outputSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  provenance: ValidationProvenanceSchema,
 }).superRefine((report, context) => {
   if (report.outcome === "completed" && report.exitCode !== 0) {
     context.addIssue({ code: "custom", message: "completed validation requires exitCode 0" });
@@ -57,13 +71,7 @@ export const ValidationReportSchema = z.strictObject({
   }
 });
 
-interface ValidationProvenance {
-  readonly invocationId: string;
-  readonly canonicalCwd: string;
-  readonly subjectSha256: string | null;
-}
-
-const verifiedValidationReports = new WeakMap<ValidationReport, ValidationProvenance>();
+const verifiedValidationReports = new WeakMap<ValidationReport, DurableValidationProvenance>();
 const usedInvocationIds = new Set<string>();
 
 export function isVerifiedValidationReport(
@@ -146,6 +154,11 @@ export class ValidationRunner {
     const outputSha256 = createHash("sha256")
       .update(outputContent, "utf8")
       .digest("hex");
+    const provenance: DurableValidationProvenance = Object.freeze({
+      invocationId,
+      canonicalCwd,
+      subjectSha256: context?.subjectSha256 ?? null,
+    });
 
     const parsed = ValidationReportSchema.parse({
       name,
@@ -158,16 +171,14 @@ export class ValidationRunner {
       command,
       argvSha256,
       outputSha256,
+      provenance,
     });
     const frozen: ValidationReport = Object.freeze({
       ...parsed,
       command: Object.freeze([...parsed.command]),
+      provenance: Object.freeze({ ...parsed.provenance }),
     });
-    verifiedValidationReports.set(frozen, Object.freeze({
-      invocationId,
-      canonicalCwd,
-      subjectSha256: context?.subjectSha256 ?? null,
-    }));
+    verifiedValidationReports.set(frozen, frozen.provenance);
     return frozen;
   }
 }

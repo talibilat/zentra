@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,48 @@ function delayedMarkerAlias(marker: string): readonly string[] {
 }
 
 describe("GitClient bounded execution", () => {
+  it("ignores ambient global Git configuration while retaining repository-local config", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-git-config-"));
+    const repository = path.join(directory, "repository");
+    cleanup.push(directory);
+    writeFileSync(path.join(directory, ".gitconfig"), "[zentra]\n\tcanary = inherited\n", "utf8");
+    mkdirSync(path.join(directory, ".config", "git"), { recursive: true });
+    writeFileSync(
+      path.join(directory, ".config", "git", "attributes"),
+      "*.txt diff=ambient\n",
+      "utf8",
+    );
+    const originalHome = process.env["HOME"];
+    process.env["HOME"] = directory;
+    try {
+      const git = new GitClient();
+      expect(await git.run(directory, ["config", "--global", "--get", "zentra.canary"])).toMatchObject({
+        exitCode: 1,
+        stdout: "",
+      });
+      expect((await git.run(directory, ["init", repository])).exitCode).toBe(0);
+      expect((await git.run(repository, ["config", "zentra.local", "visible"])).exitCode).toBe(0);
+      writeFileSync(path.join(repository, ".gitattributes"), "local.txt diff=local\n", "utf8");
+      writeFileSync(path.join(repository, "local.txt"), "local\n", "utf8");
+      writeFileSync(path.join(repository, "ambient.txt"), "ambient\n", "utf8");
+      expect(await git.run(repository, ["config", "--local", "--get", "zentra.local"])).toMatchObject({
+        exitCode: 0,
+        stdout: "visible\n",
+      });
+      expect(await git.run(repository, ["check-attr", "diff", "--", "ambient.txt"])).toMatchObject({
+        exitCode: 0,
+        stdout: "ambient.txt: diff: unspecified\n",
+      });
+      expect(await git.run(repository, ["check-attr", "diff", "--", "local.txt"])).toMatchObject({
+        exitCode: 0,
+        stdout: "local.txt: diff: local\n",
+      });
+    } finally {
+      if (originalHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = originalHome;
+    }
+  });
+
   it("times out and terminates the Git process group", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "zentra-git-timeout-"));
     cleanup.push(directory);

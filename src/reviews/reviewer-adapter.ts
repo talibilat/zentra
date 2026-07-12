@@ -73,6 +73,7 @@ export function canonicalValidationDigest(validation: ValidationReport): string 
     stderr: validation.stderr,
     argvSha256,
     outputSha256,
+    provenance: validation.provenance,
   });
   return sha256(canonical);
 }

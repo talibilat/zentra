@@ -50,6 +50,11 @@ describe("DeterministicReviewerAdapter", () => {
     outputSha256: createHash("sha256")
       .update(JSON.stringify({ stdout: "test output", stderr: "" }))
       .digest("hex"),
+    provenance: {
+      invocationId: "reviewer-test-validation",
+      canonicalCwd: "/tmp",
+      subjectSha256: "reviewer-test-subject",
+    },
   };
 
   it("executes the reviewer fixture successfully", async () => {

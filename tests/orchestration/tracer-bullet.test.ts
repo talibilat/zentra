@@ -25,6 +25,7 @@ import {
   type IntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { RecoveryService } from "../../src/orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../../src/orchestration/tracer-bullet.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ProjectRegistry } from "../../src/projects/project-registry.js";
@@ -185,6 +186,11 @@ function validationReport(
     command,
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout, stderr })),
+    provenance: {
+      invocationId: `tracer-fixture-${name}`,
+      canonicalCwd: project.repositoryPath,
+      subjectSha256: null,
+    },
   };
 }
 
@@ -284,6 +290,96 @@ describe("TracerBulletOrchestrator", () => {
         "refs/heads/zentra/integration",
       ]),
     );
+  });
+
+  it("completes when integration advances after the ticket source was created", async () => {
+    const fixture = await fixtureRepository();
+    const validations = new ValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new GitClient(), validations);
+    let baseB = "";
+    class AdvancingIntegration extends IntegrationQueue {
+      override async integrate(input: {
+        project: ProjectConfig;
+        lease: WorkspaceLease;
+        review: ReviewDecision;
+        signal: AbortSignal;
+      }): Promise<IntegrationReceipt> {
+        await gitOk(input.project.repositoryPath, ["switch", input.project.integrationBranch]);
+        writeFileSync(path.join(input.project.repositoryPath, "base-b.txt"), "base B\n", "utf8");
+        await gitOk(input.project.repositoryPath, ["add", "--", "base-b.txt"]);
+        await gitOk(input.project.repositoryPath, ["commit", "-m", "advance integration to B"]);
+        baseB = await gitOk(input.project.repositoryPath, ["rev-parse", "HEAD"]);
+        return delegate.integrate(input);
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      validations,
+      integrations: new AdvancingIntegration(new GitClient(), validations),
+    });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-stale-base",
+      signal: runSignal(),
+    });
+
+    expect(result.terminalOutcome).toBe("completed");
+    expect(journal.readStream(result.taskId).at(-2)?.payload).toMatchObject({
+      receipt: { originalIntegrationCommit: baseB, outcome: "completed" },
+      verification: "verified",
+    });
+  });
+
+  it("recovers real supervised evidence when completion append crashes after integration observation", async () => {
+    const fixture = await fixtureRepository();
+    const databasePath = path.join(fixture.baseDirectory, "restart.sqlite");
+    const firstJournal = new SqliteEventJournal(databasePath);
+    journals.push(firstJournal);
+    class CompletionCrashTaskService extends TaskService {
+      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
+        if (args[1] === "task.completed") throw new Error("simulated completion append crash");
+        return super.append(...args);
+      }
+    }
+    const tasks = new CompletionCrashTaskService(firstJournal);
+    const projects = ProjectRegistry.fromFile(fixture.configPath);
+    const worktrees = new WorktreeManager();
+    const supervisor = new ProcessSupervisor();
+    const validations = new ValidationRunner(supervisor);
+    const orchestrator = new TracerBulletOrchestrator(
+      tasks,
+      projects,
+      worktrees,
+      supervisor,
+      validations,
+      new DeterministicReviewerAdapter(supervisor, reviewerFixture),
+      new ReviewGate(),
+      new IntegrationQueue(new GitClient(), validations),
+    );
+
+    await expect(orchestrator.run({
+      ...runInput,
+      taskId: "task-restart-real-evidence",
+      signal: runSignal(),
+    })).rejects.toThrow("simulated completion append crash");
+    expect(firstJournal.readStream("task-restart-real-evidence").at(-1)?.type).toBe(
+      "task.integration_observed",
+    );
+    firstJournal.close();
+    journals.splice(journals.indexOf(firstJournal), 1);
+
+    const restartedJournal = new SqliteEventJournal(databasePath);
+    journals.push(restartedJournal);
+    const recovery = new RecoveryService(
+      restartedJournal,
+      new TaskService(restartedJournal),
+      projects,
+      worktrees,
+      new GitClient(),
+    );
+    await expect(recovery.inspect("task-restart-real-evidence")).resolves.toMatchObject({
+      action: "record_completion",
+    });
   });
 
   it("injects the new workspace argument and ignores stale events on cancellation", async () => {
@@ -875,6 +971,7 @@ describe("TracerBulletOrchestrator", () => {
             taskId: input.lease.taskId,
             projectId: input.project.projectId,
             sourceCommit,
+            originalIntegrationCommit: null,
             resultCommit: null,
             review: input.review,
             validation: validationReport(input.project, "full", outcome),
@@ -924,6 +1021,10 @@ describe("TracerBulletOrchestrator", () => {
     ["task identity", (receipt: IntegrationReceipt) => ({ ...receipt, taskId: "substituted-task" })],
     ["project identity", (receipt: IntegrationReceipt) => ({ ...receipt, projectId: "substituted-project" })],
     ["source commit", (receipt: IntegrationReceipt) => ({ ...receipt, sourceCommit: "0".repeat(40) })],
+    ["integration base", (receipt: IntegrationReceipt) => ({
+      ...receipt,
+      originalIntegrationCommit: "0".repeat(40),
+    })],
     ["review provenance", (receipt: IntegrationReceipt) => ({ ...receipt, review: { ...receipt.review } })],
     ["validation outcome", (receipt: IntegrationReceipt) => ({
       ...receipt,
@@ -1017,6 +1118,44 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
+  });
+
+  it("rejects completed receipt verification when replacement refs exist", async () => {
+    const fixture = await fixtureRepository();
+    const validations = new ValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new GitClient(), validations);
+    class ReplacingIntegration extends IntegrationQueue {
+      override async integrate(input: {
+        project: ProjectConfig;
+        lease: WorkspaceLease;
+        review: ReviewDecision;
+        signal: AbortSignal;
+      }): Promise<IntegrationReceipt> {
+        const receipt = await delegate.integrate(input);
+        await gitOk(input.project.repositoryPath, [
+          "replace",
+          receipt.resultCommit!,
+          receipt.sourceCommit,
+        ]);
+        return receipt;
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      validations,
+      integrations: new ReplacingIntegration(new GitClient(), validations),
+    });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-replacement-receipt",
+      signal: runSignal(),
+    });
+
+    expect(result.lifecycle).toBe("integrating");
+    expect(journal.readStream(result.taskId).at(-1)?.payload).toMatchObject({
+      verification: "failed",
+      reason: expect.stringMatching(/replace/i),
+    });
   });
 
   it("rejects a result commit that does not descend from the reviewed source", async () => {

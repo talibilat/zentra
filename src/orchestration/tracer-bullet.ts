@@ -37,7 +37,11 @@ import type {
   WorkerRequest,
   WorkerResult,
 } from "../workers/worker-adapter.js";
-import { GitClient, type GitRunOptions } from "../workspaces/git-client.js";
+import {
+  assertNoGitObjectSubstitution,
+  GitClient,
+  type GitRunOptions,
+} from "../workspaces/git-client.js";
 import type {
   WorkspaceLease,
   WorktreeManager,
@@ -71,7 +75,8 @@ type Stage =
   | "validation"
   | "review"
   | "commit"
-  | "integration";
+  | "integration"
+  | "completion";
 
 export class TracerBulletOrchestrator {
   private readonly git = new GitClient();
@@ -346,6 +351,7 @@ export class TracerBulletOrchestrator {
         { receipt, verification: "verified" },
         null,
       );
+      stage = "completion";
       return this.tasks.append(
         input.taskId,
         "task.completed",
@@ -353,6 +359,7 @@ export class TracerBulletOrchestrator {
         null,
       );
     } catch (error) {
+      if (stage === "completion") throw error;
       if (error instanceof WorkspaceCommitUncertainError) {
         return this.tasks.append(
           input.taskId,
@@ -649,6 +656,7 @@ async function validateIntegrationReceipt(input: {
   readonly git: GitClient;
 }): Promise<void> {
   const { project, taskId, sourceCommit, review, receipt, git } = input;
+  await assertNoGitObjectSubstitution(git, project.repositoryPath, GIT_OPERATION_TIMEOUT_MS);
   if (!isVerifiedIntegrationReceipt(receipt)) {
     throw new Error("completed integration receipt lacks queue provenance");
   }
@@ -666,8 +674,13 @@ async function validateIntegrationReceipt(input: {
   ) {
     throw new Error("completed integration receipt does not retain verified review provenance");
   }
-  if (receipt.resultCommit === null || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(receipt.resultCommit)) {
-    throw new Error("completed integration receipt has no result commit");
+  if (
+    receipt.originalIntegrationCommit === null ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(receipt.originalIntegrationCommit) ||
+    receipt.resultCommit === null ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(receipt.resultCommit)
+  ) {
+    throw new Error("completed integration receipt has no valid integration base or result commit");
   }
   if (
     receipt.validation.name !== "full" ||
@@ -683,7 +696,7 @@ async function validateIntegrationReceipt(input: {
   const integrationRef = `refs/heads/${project.integrationBranch}`;
   const symbolic = await git.run(
     project.repositoryPath,
-    ["symbolic-ref", "--quiet", integrationRef],
+    ["--no-replace-objects", "symbolic-ref", "--quiet", integrationRef],
     { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
   );
   if (
@@ -694,6 +707,7 @@ async function validateIntegrationReceipt(input: {
     throw new Error("integration ref must be an exact nonsymbolic ref");
   }
   const head = await git.run(project.repositoryPath, [
+    "--no-replace-objects",
     "rev-parse",
     "--verify",
     `${integrationRef}^{commit}`,
@@ -706,17 +720,26 @@ async function validateIntegrationReceipt(input: {
   ) {
     throw new Error("integration ref does not match the completed receipt");
   }
-  const ancestor = await git.run(
+  const parents = await git.run(
     project.repositoryPath,
-    ["merge-base", "--is-ancestor", sourceCommit, receipt.resultCommit],
+    ["--no-replace-objects", "rev-list", "--parents", "--max-count=1", receipt.resultCommit],
     { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
   );
   if (
-    ancestor.termination !== null ||
-    ancestor.truncated ||
-    ancestor.exitCode !== 0
+    parents.termination !== null ||
+    parents.truncated ||
+    parents.exitCode !== 0
   ) {
-    throw new Error("receipt source commit is not an ancestor of its result commit");
+    throw new Error("receipt result merge parents could not be inspected");
+  }
+  const resultShape = parents.stdout.trim().split(/\s+/);
+  if (
+    resultShape.length !== 3 ||
+    resultShape[0] !== receipt.resultCommit ||
+    resultShape[1] !== receipt.originalIntegrationCommit ||
+    resultShape[2] !== sourceCommit
+  ) {
+    throw new Error("receipt result does not have the exact integration-base/source merge shape");
   }
 }
 

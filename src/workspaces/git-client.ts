@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
 
@@ -31,6 +33,16 @@ function minimalEnvironment(): Record<string, string> {
   env["GIT_MERGE_AUTOEDIT"] = "no";
   env["GIT_EDITOR"] = "false";
   env["GIT_SEQUENCE_EDITOR"] = "false";
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  env["GIT_CONFIG_GLOBAL"] = nullDevice;
+  env["GIT_ATTR_NOSYSTEM"] = "1";
+  env["GIT_NO_REPLACE_OBJECTS"] = "1";
+  // Git has no dedicated environment switch for its per-user attributes
+  // file, so inject only that config key while repository attributes remain active.
+  env["GIT_CONFIG_COUNT"] = "1";
+  env["GIT_CONFIG_KEY_0"] = "core.attributesFile";
+  env["GIT_CONFIG_VALUE_0"] = nullDevice;
   return env;
 }
 
@@ -146,5 +158,51 @@ export class GitClient {
         });
       });
     });
+  }
+}
+
+export async function assertNoGitObjectSubstitution(
+  git: GitClient,
+  cwd: string,
+  timeoutMs: number,
+): Promise<void> {
+  const replacements = await git.run(cwd, [
+    "--no-optional-locks",
+    "--no-replace-objects",
+    "for-each-ref",
+    "--format=%(refname)",
+    "--count=1",
+    "--",
+    "refs/replace/",
+  ], { timeoutMs });
+  assertCompleteGitRead(replacements, "replacement ref inspection");
+  if (replacements.stdout !== "") {
+    throw new Error("Git replacement refs are not allowed for object evidence");
+  }
+
+  const commonDirectory = await git.run(cwd, [
+    "--no-optional-locks",
+    "--no-replace-objects",
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ], { timeoutMs });
+  assertCompleteGitRead(commonDirectory, "Git common directory inspection");
+  const lines = commonDirectory.stdout.split(/\r?\n/).filter(Boolean);
+  if (lines.length !== 1 || !path.isAbsolute(lines[0]!)) {
+    throw new Error("Git common directory evidence is malformed");
+  }
+  try {
+    if ((await readFile(path.join(lines[0]!, "info", "grafts"))).byteLength > 0) {
+      throw new Error("nonempty Git graft evidence is not allowed");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function assertCompleteGitRead(result: CommandResult, operation: string): void {
+  if (result.termination !== null || result.truncated || result.exitCode !== 0) {
+    throw new Error(`${operation} failed closed`);
   }
 }

@@ -9,6 +9,7 @@ import {
   isVerifiedValidationReport,
 } from "../../src/capabilities/validation-runner.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
+import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 
 const cleanup: string[] = [];
@@ -75,6 +76,8 @@ describe("ValidationRunner", () => {
     );
     const canonicalCwd = await realpath(cwd);
 
+    expect(report.provenance).toEqual({ ...context, canonicalCwd });
+    expect(Object.isFrozen(report.provenance)).toBe(true);
     expect(isVerifiedValidationReport(report, {
       ...context,
       canonicalCwd,
@@ -93,6 +96,23 @@ describe("ValidationRunner", () => {
       subjectSha256: "subject-2",
       canonicalCwd,
     })).toBe(false);
+  });
+
+  it("includes durable provenance in the canonical validation digest", async () => {
+    const cwd = await workspace();
+    const report = await new ValidationRunner(new ProcessSupervisor()).run(
+      project([process.execPath, "-e", "process.exit(0)"]),
+      "focused",
+      cwd,
+      AbortSignal.timeout(5_000),
+      { invocationId: "digest-provenance", subjectSha256: "subject-1" },
+    );
+
+    const digest = canonicalValidationDigest(report);
+    expect(canonicalValidationDigest({
+      ...report,
+      provenance: { ...report.provenance, subjectSha256: "subject-2" },
+    })).not.toBe(digest);
   });
 
   it("brands standalone reports without allowing a fabricated context match", async () => {
@@ -131,6 +151,11 @@ describe("ValidationRunner", () => {
       command: [process.execPath],
       argvSha256: "0".repeat(64),
       outputSha256: "1".repeat(64),
+      provenance: {
+        invocationId: "schema-test",
+        canonicalCwd: "/tmp/schema-test",
+        subjectSha256: "subject",
+      },
       ...change,
     })).toThrow();
   });
