@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   isVerifiedReviewDecision,
   ReviewGate,
@@ -10,6 +10,8 @@ import {
   type ReviewDecision,
 } from "../../src/reviews/reviewer-adapter.js";
 import { createHash } from "node:crypto";
+import { ValidationRunner } from "../../src/capabilities/validation-runner.js";
+import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 
 function hashInput(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
@@ -18,38 +20,44 @@ function hashInput(input: string): string {
 describe("ReviewGate", () => {
   const gate = new ReviewGate();
 
-  const validationReport: ValidationReport = {
-    name: "focused",
-    outcome: "completed",
-    exitCode: 0,
-    stdout: "test output",
-    stderr: "",
-    startedAt: new Date().toISOString(),
-    finishedAt: new Date().toISOString(),
-    command: ["echo", "test"],
-    argvSha256: hashInput(JSON.stringify(["echo", "test"])),
-    outputSha256: hashInput(JSON.stringify({ stdout: "test output", stderr: "" })),
-  };
-
   const diff = "diff content";
   const diffSha256 = hashInput(diff);
-  const validationSha256 = canonicalValidationDigest(validationReport);
+  let validationReport!: ValidationReport;
+  let validationSha256!: string;
+  let input!: ReviewInput;
+  let decision!: ReviewDecision;
 
-  const input: ReviewInput = {
-    workerId: "worker-1",
-    reviewerId: "reviewer-1",
-    diff,
-    validation: validationReport,
-  };
-
-  const decision: ReviewDecision = {
-    reviewerId: "reviewer-1",
-    approved: true,
-    diffSha256,
-    validationSha256,
-    decidedAt: new Date().toISOString(),
-    reason: "looks good",
-  };
+  beforeAll(async () => {
+    const command = [process.execPath, "-e", 'process.stdout.write("test output")'] as const;
+    validationReport = await new ValidationRunner(new ProcessSupervisor()).run(
+      {
+        projectId: "review-gate",
+        repositoryPath: "/tmp",
+        integrationBranch: "integration",
+        worktreeRoot: "/tmp",
+        validations: { focused: [...command], full: [...command] },
+      },
+      "focused",
+      "/tmp",
+      AbortSignal.timeout(5_000),
+      { invocationId: "review-gate-current-diff", subjectSha256: diffSha256 },
+    );
+    validationSha256 = canonicalValidationDigest(validationReport);
+    input = {
+      workerId: "worker-1",
+      reviewerId: "reviewer-1",
+      diff,
+      validation: validationReport,
+    };
+    decision = {
+      reviewerId: "reviewer-1",
+      approved: true,
+      diffSha256,
+      validationSha256,
+      decidedAt: new Date().toISOString(),
+      reason: "looks good",
+    };
+  });
 
   it("approves when all conditions pass", () => {
     const verified = gate.verify(input, decision);
@@ -134,8 +142,41 @@ describe("ReviewGate", () => {
     };
 
     expect(() => gate.verify(failedInput, decision)).toThrow(
-      /validation.*completed/i
+      /validation.*provenance/i
     );
+  });
+
+  it("rejects an otherwise valid decision over a fabricated validation report", () => {
+    const fabricated = { ...validationReport };
+    expect(() => gate.verifyEvidence({ ...input, validation: fabricated }, decision)).toThrow(
+      /provenance|validation/i,
+    );
+  });
+
+  it("rejects a branded validation report bound to an old diff", async () => {
+    const oldDiff = "old diff content";
+    const command = [process.execPath, "-e", 'process.stdout.write("test output")'] as const;
+    const oldValidation = await new ValidationRunner(new ProcessSupervisor()).run(
+      {
+        projectId: "review-gate-old",
+        repositoryPath: "/tmp",
+        integrationBranch: "integration",
+        worktreeRoot: "/tmp",
+        validations: { focused: [...command], full: [...command] },
+      },
+      "focused",
+      "/tmp",
+      AbortSignal.timeout(5_000),
+      { invocationId: "review-gate-old-diff", subjectSha256: hashInput(oldDiff) },
+    );
+    const newInput = { ...input, validation: oldValidation };
+    const newDecision = {
+      ...decision,
+      validationSha256: canonicalValidationDigest(oldValidation),
+    };
+
+    expect(() => gate.verify(newInput, newDecision)).toThrow(/subject|diff|provenance/i);
+    expect(isVerifiedReviewDecision(newDecision)).toBe(false);
   });
 
   it("rejects when validation exit code is not 0", () => {
@@ -149,7 +190,7 @@ describe("ReviewGate", () => {
     };
 
     expect(() => gate.verify(badExitInput, decision)).toThrow(
-      /exit.*0/i
+      /validation.*provenance/i
     );
   });
 
@@ -167,7 +208,7 @@ describe("ReviewGate", () => {
 
   it("rejects a validation other than focused", () => {
     const fullInput = { ...input, validation: { ...validationReport, name: "full" } };
-    expect(() => gate.verify(fullInput, decision)).toThrow(/focused/i);
+    expect(() => gate.verify(fullInput, decision)).toThrow(/validation.*provenance/i);
   });
 
   it("rejects when the decision reviewer differs from the requested reviewer", () => {
@@ -204,6 +245,40 @@ describe("ReviewGate", () => {
     };
 
     expect(() => gate.verify(input, deniedDecision)).toThrow(/not approved/i);
+  });
+
+  it("verifies and freezes valid denial evidence without integration provenance", () => {
+    const denied = { ...decision, approved: false, reason: "policy rejected" };
+
+    const evidence = gate.verifyEvidence(input, denied);
+
+    expect(evidence).toEqual(denied);
+    expect(evidence).not.toBe(denied);
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(isVerifiedReviewDecision(evidence)).toBe(false);
+  });
+
+  it.each([
+    ["stale diff", { diffSha256: "0".repeat(64) }],
+    ["wrong reviewer", { reviewerId: "reviewer-2" }],
+  ])("rejects %s denial evidence", (_case, change) => {
+    const denied = {
+      ...decision,
+      approved: false,
+      reason: "policy rejected",
+      ...change,
+    };
+
+    expect(() => gate.verifyEvidence(input, denied)).toThrow();
+  });
+
+  it.each([
+    ["extra field", { ...decision, extra: true }],
+    ["non-boolean approval", { ...decision, approved: "yes" }],
+    ["invalid timestamp", { ...decision, decidedAt: "yesterday" }],
+    ["empty reason", { ...decision, reason: "" }],
+  ])("strictly rejects a runtime decision with %s", (_case, malformed) => {
+    expect(() => gate.verifyEvidence(input, malformed as never)).toThrow(/decision|invalid/i);
   });
 
   it("rejects cancelled validation", () => {

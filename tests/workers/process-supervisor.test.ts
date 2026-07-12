@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,6 +93,51 @@ describe("ProcessSupervisor", () => {
     expect(event.type).toBe("artifact.ready");
     expect(event.path).toBe("out.txt");
     await expect(readFile(path.join(workspace, "out.txt"), "utf8")).resolves.toBe("hello");
+  });
+
+  it("refuses to follow a symlink target outside the workspace", async () => {
+    const marker = path.join(tmpdir(), `zentra-worker-marker-${process.pid}-${Date.now()}`);
+    await writeFile(marker, "unchanged", "utf8");
+    await symlink(marker, path.join(workspace, "out.txt"));
+    try {
+      const result = await new ProcessSupervisor().execute(
+        request({ args: workerArgs("out.txt", "changed") }),
+        new AbortController().signal,
+      );
+
+      expect(result.outcome).toBe("failed");
+      expect(await readFile(marker, "utf8")).toBe("unchanged");
+    } finally {
+      await rm(marker, { force: true });
+    }
+  });
+
+  it("refuses to traverse a symlink parent outside the workspace", async () => {
+    const external = await mkdtemp(path.join(tmpdir(), "zentra-worker-external-"));
+    const marker = path.join(external, "out.txt");
+    await writeFile(marker, "unchanged", "utf8");
+    await symlink(external, path.join(workspace, "linked"));
+    try {
+      const result = await new ProcessSupervisor().execute(
+        request({ args: workerArgs("linked/out.txt", "changed") }),
+        new AbortController().signal,
+      );
+
+      expect(result.outcome).toBe("failed");
+      expect(await readFile(marker, "utf8")).toBe("unchanged");
+    } finally {
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects nested target paths as outside the root-file MVP contract", async () => {
+    const result = await new ProcessSupervisor().execute(
+      request({ args: workerArgs("nested/out.txt", "changed") }),
+      new AbortController().signal,
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.stderr).toMatch(/root|slash|filename/i);
   });
 
   it("spawns workers with a minimal environment allowlist", async () => {

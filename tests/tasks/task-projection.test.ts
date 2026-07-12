@@ -131,6 +131,26 @@ describe("projectTask", () => {
     expect(projectTask(happyPath())?.lifecycle).toBe("integrating");
   });
 
+  it("keeps task.integration_observed nonterminal and integrating", () => {
+    const view = projectTask([
+      ...happyPath(),
+      makeEvent("task.integration_observed", 8, { receipt: { outcome: "completed" } }),
+    ]);
+    expect(view?.lifecycle).toBe("integrating");
+    expect(view?.terminalOutcome).toBeNull();
+    expect(view?.streamVersion).toBe(8);
+  });
+
+  it("keeps task.commit_observed nonterminal and integration_ready", () => {
+    const view = projectTask([
+      ...happyPath().slice(0, 6),
+      makeEvent("task.commit_observed", 7, { reason: "commit uncertain" }),
+    ]);
+    expect(view?.lifecycle).toBe("integration_ready");
+    expect(view?.terminalOutcome).toBeNull();
+    expect(view?.streamVersion).toBe(7);
+  });
+
   it("projects task.completed into terminal with the completed outcome", () => {
     const view = projectTask([...happyPath(), makeEvent("task.completed", 8)]);
     expect(view?.lifecycle).toBe("terminal");
@@ -165,6 +185,15 @@ describe("projectTask", () => {
     const view = projectTask([
       ...happyPath().slice(0, 5),
       makeEvent("task.timed_out", 6),
+    ]);
+    expect(view?.lifecycle).toBe("terminal");
+    expect(view?.terminalOutcome).toBe("timed_out");
+  });
+
+  it("permits a bounded commit to time out after review approval", () => {
+    const view = projectTask([
+      ...happyPath().slice(0, 6),
+      makeEvent("task.timed_out", 7),
     ]);
     expect(view?.lifecycle).toBe("terminal");
     expect(view?.terminalOutcome).toBe("timed_out");

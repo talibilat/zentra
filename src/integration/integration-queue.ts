@@ -5,14 +5,23 @@ import type {
   ValidationReport,
   ValidationRunner,
 } from "../capabilities/validation-runner.js";
+import {
+  isVerifiedValidationReport,
+  ValidationReportSchema,
+} from "../capabilities/validation-runner.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { ReviewDecision } from "../reviews/reviewer-adapter.js";
+import {
+  canonicalValidationDigest,
+  ReviewDecisionSchema,
+} from "../reviews/reviewer-adapter.js";
 import { isVerifiedReviewDecision } from "../reviews/review-gate.js";
 import type { CommandResult, GitClient } from "../workspaces/git-client.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
 
 const projectTails = new Map<string, Promise<void>>();
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
+const verifiedIntegrationReceipts = new WeakSet<IntegrationReceipt>();
 
 export interface IntegrationReceipt {
   readonly taskId: string;
@@ -22,6 +31,34 @@ export interface IntegrationReceipt {
   readonly review: ReviewDecision;
   readonly validation: ValidationReport;
   readonly outcome: "completed" | "cancelled" | "timed_out" | "failed";
+}
+
+export function isVerifiedIntegrationReceipt(
+  receipt: IntegrationReceipt,
+): boolean {
+  return verifiedIntegrationReceipts.has(receipt);
+}
+
+export class IntegrationExecutionError extends Error {
+  override readonly name = "IntegrationExecutionError";
+
+  constructor(
+    readonly outcome: "cancelled" | "timed_out" | "failed",
+    operation: string,
+  ) {
+    super(`integration ${operation} was ${outcome}`);
+  }
+}
+
+export class IntegrationUncertainError extends Error {
+  override readonly name = "IntegrationUncertainError";
+
+  constructor(
+    reason: string,
+    readonly evidence: Readonly<Record<string, unknown>>,
+  ) {
+    super(reason);
+  }
 }
 
 export interface CleanupFailure {
@@ -69,17 +106,25 @@ export class IntegrationQueue {
     let candidateRootCreated = false;
     let preserveCandidate = false;
 
-    const source = await this.git.run(
-      project.repositoryPath,
-      ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
-      { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
-    );
+    let source: CommandResult;
+    try {
+      source = await this.git.run(
+        project.repositoryPath,
+        ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
+        { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+      );
+    } catch (error) {
+      throw new IntegrationExecutionError("failed", `source identity read: ${errorMessage(error)}`);
+    }
+    if (source.termination !== null) {
+      throw new IntegrationExecutionError(source.termination, "source identity read");
+    }
     if (source.exitCode !== 0 || source.truncated) {
-      throw new Error(gitFailure("read source commit", source));
+      throw new IntegrationExecutionError("failed", gitFailure("read source commit", source));
     }
     const sourceCommit = source.stdout.trim();
     if (sourceCommit === "") {
-      throw new Error("read source commit returned an empty identity");
+      throw new IntegrationExecutionError("failed", "source identity read returned empty identity");
     }
 
     const receipt = (
@@ -388,8 +433,16 @@ export class IntegrationQueue {
       const resultCommit = candidateHead.stdout.trim();
 
       let validation: ValidationReport;
+      const validationInvocationId = randomUUID();
+      const canonicalCandidatePath = await realpath(candidatePath);
       try {
-        validation = await this.validations.run(project, "full", candidatePath, signal);
+        validation = await this.validations.run(
+          project,
+          "full",
+          candidatePath,
+          signal,
+          { invocationId: validationInvocationId, subjectSha256: resultCommit },
+        );
       } catch (error) {
         return receipt(
           signal.aborted ? "cancelled" : "failed",
@@ -446,6 +499,25 @@ export class IntegrationQueue {
       if (signal.aborted) {
         return receipt("cancelled", validation);
       }
+
+      if (!validCompletedFullValidation(project, validation, {
+        invocationId: validationInvocationId,
+        canonicalCwd: canonicalCandidatePath,
+        subjectSha256: resultCommit,
+      })) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "full validation lacks verified provenance"),
+        );
+      }
+      const preparedReceipt = prepareCompletedReceipt({
+        taskId: lease.taskId,
+        projectId: project.projectId,
+        sourceCommit,
+        resultCommit,
+        review,
+        validation,
+      });
 
       let update: CommandResult;
       let uncertainUpdateReason: string | null = null;
@@ -529,7 +601,7 @@ export class IntegrationQueue {
           reconciliationIssue = gitFailure("read integration ref metadata", reconciled);
         }
         if (reconciledHead === resultCommit) {
-          return receipt("completed", validation, resultCommit);
+          return registerCompletedReceipt(preparedReceipt);
         }
         const uncertainOutcome = update.termination ?? "failed";
         if (reconciledHead === originalIntegrationCommit) {
@@ -549,17 +621,31 @@ export class IntegrationQueue {
               : `found competing commit ${reconciledHead}`
           }`,
         );
-        return receipt(
-          uncertainOutcome,
-          validation,
+        throw new IntegrationUncertainError(
+          `${uncertainUpdateReason}; update-ref reconciliation unresolved`,
+          Object.freeze({
+            taskId: lease.taskId,
+            projectId: project.projectId,
+            sourceCommit,
+            resultCommit,
+            reconciledHead,
+            reconciliationIssue,
+            candidatePath,
+          }),
         );
       }
       if (update.exitCode !== 0) {
         return receipt("failed", validation);
       }
 
-      return receipt("completed", validation, resultCommit);
+      return registerCompletedReceipt(preparedReceipt);
     } catch (error) {
+      if (
+        error instanceof IntegrationExecutionError ||
+        error instanceof IntegrationUncertainError
+      ) {
+        throw error;
+      }
       return receipt(
         signal.aborted ? "cancelled" : "failed",
         unavailableValidation(
@@ -617,6 +703,74 @@ export class IntegrationQueue {
       reason,
       timestamp: new Date().toISOString(),
     });
+  }
+}
+
+function prepareCompletedReceipt(input: {
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly sourceCommit: string;
+  readonly resultCommit: string;
+  readonly review: ReviewDecision;
+  readonly validation: ValidationReport;
+}): IntegrationReceipt {
+  if (input.taskId === "" || input.projectId === "") {
+    throw new Error("completed receipt identities must be nonempty");
+  }
+  if (
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.sourceCommit) ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.resultCommit)
+  ) {
+    throw new Error("completed receipt commit identities are invalid");
+  }
+  ReviewDecisionSchema.parse(input.review);
+  if (!isVerifiedReviewDecision(input.review)) {
+    throw new Error("completed receipt review lacks provenance");
+  }
+  ValidationReportSchema.parse(input.validation);
+  const command = Object.freeze([...input.validation.command]);
+  const validation = Object.freeze({ ...input.validation, command });
+  const receipt: IntegrationReceipt = Object.freeze({
+    taskId: input.taskId,
+    projectId: input.projectId,
+    sourceCommit: input.sourceCommit,
+    resultCommit: input.resultCommit,
+    review: input.review,
+    validation,
+    outcome: "completed",
+  });
+  return receipt;
+}
+
+function registerCompletedReceipt(receipt: IntegrationReceipt): IntegrationReceipt {
+  verifiedIntegrationReceipts.add(receipt);
+  return receipt;
+}
+
+function validCompletedFullValidation(
+  project: ProjectConfig,
+  validation: ValidationReport,
+  expected: {
+    readonly invocationId: string;
+    readonly canonicalCwd: string;
+    readonly subjectSha256: string;
+  },
+): boolean {
+  if (!isVerifiedValidationReport(validation, expected)) return false;
+  if (!ValidationReportSchema.safeParse(validation).success) return false;
+  if (
+    validation.name !== "full" ||
+    validation.outcome !== "completed" ||
+    validation.exitCode !== 0 ||
+    JSON.stringify(validation.command) !== JSON.stringify(project.validations.full)
+  ) {
+    return false;
+  }
+  try {
+    canonicalValidationDigest(validation);
+    return true;
+  } catch {
+    return false;
   }
 }
 

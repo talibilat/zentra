@@ -23,7 +23,22 @@ export interface ReviewerAdapter {
   review(input: ReviewInput, signal: AbortSignal): Promise<ReviewDecision>;
 }
 
-const ReviewDecisionSchema = z.strictObject({
+export class ReviewerExecutionError extends Error {
+  override readonly name = "ReviewerExecutionError";
+
+  constructor(
+    readonly outcome: "cancelled" | "timed_out" | "failed",
+    stderr: string,
+  ) {
+    super(
+      `reviewer fixture failed: outcome=${outcome}${
+        stderr === "" ? "" : `, stderr=${stderr}`
+      }`,
+    );
+  }
+}
+
+export const ReviewDecisionSchema = z.strictObject({
   reviewerId: z.string().min(1),
   approved: z.boolean(),
   diffSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -104,9 +119,7 @@ export class DeterministicReviewerAdapter implements ReviewerAdapter {
     );
 
     if (result.outcome !== "completed") {
-      throw new Error(
-        `reviewer fixture failed: outcome=${result.outcome}, stderr=${result.stderr}`
-      );
+      throw new ReviewerExecutionError(result.outcome, result.stderr);
     }
     if (result.events.length !== 1) {
       throw new Error(

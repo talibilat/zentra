@@ -51,12 +51,20 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
     "task.timed_out",
   ],
   integration_ready: [
+    "task.commit_observed",
     "task.integration_started",
     "task.denied",
     "task.cancelled",
     "task.failed",
+    "task.timed_out",
   ],
-  integrating: ["task.completed", "task.cancelled", "task.failed", "task.timed_out"],
+  integrating: [
+    "task.integration_observed",
+    "task.completed",
+    "task.cancelled",
+    "task.failed",
+    "task.timed_out",
+  ],
   terminal: [],
 };
 
@@ -67,7 +75,9 @@ const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> =
   "task.validation_started": "validating",
   "task.review_requested": "awaiting_review",
   "task.review_approved": "integration_ready",
+  "task.commit_observed": "integration_ready",
   "task.integration_started": "integrating",
+  "task.integration_observed": "integrating",
   "task.completed": "completed",
   "task.cancelled": "cancelled",
   "task.failed": "failed",

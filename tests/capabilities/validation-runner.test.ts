@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ValidationRunner } from "../../src/capabilities/validation-runner.js";
+import {
+  ValidationRunner,
+  ValidationReportSchema,
+  isVerifiedValidationReport,
+} from "../../src/capabilities/validation-runner.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 
@@ -47,10 +51,88 @@ describe("ValidationRunner", () => {
       cwd,
       AbortSignal.timeout(5_000),
     );
+    const canonicalCwd = await realpath(cwd);
 
     expect(report).toMatchObject({ name: "focused", command, outcome: "completed", exitCode: 0 });
     expect(report.argvSha256).toBe(sha256(JSON.stringify(command)));
     expect(Date.parse(report.finishedAt)).toBeGreaterThanOrEqual(Date.parse(report.startedAt));
+    expect(isVerifiedValidationReport(report)).toBe(true);
+    expect(Object.isFrozen(report)).toBe(true);
+    expect(Object.isFrozen(report.command)).toBe(true);
+    expect(isVerifiedValidationReport({ ...report })).toBe(false);
+  });
+
+  it("binds hidden provenance to invocation, canonical cwd, and subject", async () => {
+    const cwd = await workspace();
+    const command = [process.execPath, "-e", "process.exit(0)"] as const;
+    const context = { invocationId: "validation-invocation-1", subjectSha256: "subject-1" };
+    const report = await new ValidationRunner(new ProcessSupervisor()).run(
+      project(command),
+      "focused",
+      cwd,
+      AbortSignal.timeout(5_000),
+      context,
+    );
+    const canonicalCwd = await realpath(cwd);
+
+    expect(isVerifiedValidationReport(report, {
+      ...context,
+      canonicalCwd,
+    })).toBe(true);
+    expect(isVerifiedValidationReport(report, {
+      ...context,
+      invocationId: "validation-invocation-2",
+      canonicalCwd,
+    })).toBe(false);
+    expect(isVerifiedValidationReport(report, {
+      ...context,
+      canonicalCwd: `${cwd}-other`,
+    })).toBe(false);
+    expect(isVerifiedValidationReport(report, {
+      ...context,
+      subjectSha256: "subject-2",
+      canonicalCwd,
+    })).toBe(false);
+  });
+
+  it("brands standalone reports without allowing a fabricated context match", async () => {
+    const cwd = await workspace();
+    const report = await new ValidationRunner(new ProcessSupervisor()).run(
+      project([process.execPath, "-e", "process.exit(0)"]),
+      "focused",
+      cwd,
+      AbortSignal.timeout(5_000),
+    );
+    const canonicalCwd = await realpath(cwd);
+
+    expect(isVerifiedValidationReport(report)).toBe(true);
+    expect(isVerifiedValidationReport(report, {
+      invocationId: "unknown",
+      canonicalCwd,
+      subjectSha256: "unknown",
+    })).toBe(false);
+  });
+
+  it.each([
+    ["completed nonzero", { outcome: "completed", exitCode: 1 }],
+    ["failed zero", { outcome: "failed", exitCode: 0 }],
+    ["cancelled exit", { outcome: "cancelled", exitCode: 0 }],
+    ["timed_out exit", { outcome: "timed_out", exitCode: 1 }],
+    ["backwards time", { startedAt: "2026-01-02T00:00:00.000Z", finishedAt: "2026-01-01T00:00:00.000Z" }],
+  ])("rejects report invariant %s", (_case, change) => {
+    expect(() => ValidationReportSchema.parse({
+      name: "focused",
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:01.000Z",
+      command: [process.execPath],
+      argvSha256: "0".repeat(64),
+      outputSha256: "1".repeat(64),
+      ...change,
+    })).toThrow();
   });
 
   it("reports the exact command snapshot that was executed", async () => {

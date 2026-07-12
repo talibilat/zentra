@@ -1,11 +1,26 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
-import { GitClient } from "../../src/workspaces/git-client.js";
-import { WorktreeManager } from "../../src/workspaces/worktree-manager.js";
+import {
+  GitClient,
+  type CommandResult,
+  type GitRunOptions,
+} from "../../src/workspaces/git-client.js";
+import {
+  WorkspaceCommitUncertainError,
+  WorkspaceGitTerminationError,
+  WorktreeManager,
+} from "../../src/workspaces/worktree-manager.js";
 
 const git = new GitClient();
 
@@ -19,6 +34,18 @@ async function gitOk(cwd: string, args: readonly string[]): Promise<string> {
 
 function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
+}
+
+function terminatedGitResult(
+  termination: "cancelled" | "timed_out",
+): CommandResult {
+  return {
+    stdout: "",
+    stderr: `Git ${termination}`,
+    exitCode: -1,
+    truncated: false,
+    termination,
+  };
 }
 
 describe("WorktreeManager", () => {
@@ -122,7 +149,7 @@ describe("WorktreeManager", () => {
     expect(dirty.diff).toContain("feature.txt");
   });
 
-  it("does not execute a configured external diff program", async () => {
+  it("fails closed for a configured external diff program", async () => {
     await manager.ensureIntegrationBranch(project);
     const lease = await manager.create(project, "task-no-external-diff");
     const marker = path.join(baseDir, "external-diff-ran");
@@ -135,9 +162,57 @@ describe("WorktreeManager", () => {
     await gitOk(repoPath, ["config", "diff.external", executable]);
     writeFileSync(path.join(lease.path, "README.md"), "changed\n", "utf8");
 
-    const inspected = await manager.inspect(lease);
+    await expect(manager.inspect(lease)).rejects.toThrow(/external|program|config/i);
+    expect(existsSync(marker)).toBe(false);
+  });
 
-    expect(inspected.diff).toContain("changed");
+  it("disables post-checkout hooks during worktree creation", async () => {
+    const marker = path.join(baseDir, "post-checkout-ran");
+    const hook = path.join(repoPath, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, "utf8");
+    chmodSync(hook, 0o755);
+    await manager.ensureIntegrationBranch(project);
+
+    await manager.create(project, "task-no-checkout-hook");
+
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each(["clean", "smudge", "process"])(
+    "fails closed for a configured %s filter before worktree creation",
+    async (operation) => {
+      const marker = path.join(baseDir, `filter-${operation}-ran`);
+      const executable = path.join(baseDir, `filter-${operation}.js`);
+      writeFileSync(
+        executable,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")\n`,
+      );
+      chmodSync(executable, 0o755);
+      await gitOk(repoPath, ["config", `filter.evil.${operation}`, executable]);
+
+      await expect(manager.create(project, `task-filter-${operation}`)).rejects.toThrow(
+        /external|program|config/i,
+      );
+      expect(existsSync(worktreeRoot)).toBe(false);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  it("disables configured fsmonitor on setup, status, diff, and add", async () => {
+    const marker = path.join(baseDir, "fsmonitor-ran");
+    const executable = path.join(baseDir, "fsmonitor.js");
+    writeFileSync(
+      executable,
+      `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")\n`,
+    );
+    chmodSync(executable, 0o755);
+    await gitOk(repoPath, ["config", "core.fsmonitor", executable]);
+
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-no-fsmonitor");
+    writeFileSync(path.join(lease.path, "README.md"), "changed\n");
+    await manager.inspect(lease);
+
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -168,6 +243,233 @@ describe("WorktreeManager", () => {
     const status = await gitOk(lease.path, ["status", "--porcelain"]);
     expect(status).toContain("rejected.txt");
     expect(status).not.toContain("approved.txt");
+  });
+
+  it("rejects a pre-existing staged diff before inspection", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-staged-inspect");
+    writeFileSync(path.join(lease.path, "staged.txt"), "staged\n", "utf8");
+    await gitOk(lease.path, ["add", "--", "staged.txt"]);
+
+    await expect(manager.inspect(lease)).rejects.toThrow(/staged/i);
+  });
+
+  it("cannot include an unrelated staged path in a reviewed commit", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-staged-commit");
+    const originalHead = (await gitOk(lease.path, ["rev-parse", "HEAD"])).trim();
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    writeFileSync(path.join(lease.path, "unreviewed.txt"), "unreviewed\n", "utf8");
+    await gitOk(lease.path, ["add", "--", "unreviewed.txt"]);
+
+    await expect(
+      manager.commit(lease, ["approved.txt"], "feat: approved", sha256(diff)),
+    ).rejects.toThrow(/staged/i);
+    expect((await gitOk(lease.path, ["rev-parse", "HEAD"])).trim()).toBe(originalHead);
+  });
+
+  it("disables commit hooks while committing reviewed paths", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-no-commit-hook");
+    const hookPath = path.join(lease.path, ".git-hooks", "pre-commit");
+    const marker = path.join(baseDir, "commit-hook-ran");
+    mkdirSync(path.dirname(hookPath), { recursive: true });
+    writeFileSync(hookPath, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, "utf8");
+    chmodSync(hookPath, 0o755);
+    await gitOk(lease.path, ["config", "core.hooksPath", ".git-hooks"]);
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+
+    await expect(
+      manager.commit(lease, ["approved.txt"], "feat: approved", sha256(diff)),
+    ).resolves.toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("maps a pre-aborted bounded commit to a typed cancellation without committing", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-aborted-commit");
+    const originalHead = (await gitOk(lease.path, ["rev-parse", "HEAD"])).trim();
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      manager.commit(
+        lease,
+        ["approved.txt"],
+        "feat: approved",
+        sha256(diff),
+        { signal: controller.signal, timeoutMs: 5_000 },
+      ),
+    ).rejects.toEqual(expect.objectContaining<Partial<WorkspaceGitTerminationError>>({
+      name: "WorkspaceGitTerminationError",
+      outcome: "cancelled",
+    }));
+    expect((await gitOk(lease.path, ["rev-parse", "HEAD"])).trim()).toBe(originalHead);
+  });
+
+  it("maps a bounded Git timeout to a typed timeout without retrying", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-timeout-commit");
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    let calls = 0;
+    let receivedTimeout: number | undefined;
+    class TimingOutGitClient extends GitClient {
+      override run(
+        _cwd: string,
+        _args: readonly string[],
+        options: GitRunOptions = {},
+      ): Promise<CommandResult> {
+        calls += 1;
+        receivedTimeout = options.timeoutMs;
+        return Promise.resolve({
+          stdout: "",
+          stderr: "timed out",
+          exitCode: -1,
+          truncated: false,
+          termination: "timed_out",
+        });
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new TimingOutGitClient()).commit(
+        lease,
+        ["approved.txt"],
+        "feat: approved",
+        sha256(diff),
+        { timeoutMs: 25 },
+      ),
+    ).rejects.toEqual(expect.objectContaining<Partial<WorkspaceGitTerminationError>>({
+      outcome: "timed_out",
+    }));
+    expect(calls).toBe(1);
+    expect(receivedTimeout).toBe(25);
+  });
+
+  it.each(["before", "after", "post-revparse"] as const)(
+    "reconciles a final commit timeout %s the acknowledgement",
+    async (timing) => {
+      await manager.ensureIntegrationBranch(project);
+      const lease = await manager.create(project, `task-commit-${timing}`);
+      writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+      const { diff } = await manager.inspect(lease);
+      let commitSeen = false;
+      let timedPostRead = false;
+      let commitSignal: AbortSignal | undefined;
+      class AmbiguousGitClient extends GitClient {
+        override async run(
+          cwd: string,
+          args: readonly string[],
+          options: GitRunOptions = {},
+        ): Promise<CommandResult> {
+          if (args.includes("commit")) {
+            commitSignal = options.signal;
+            commitSeen = true;
+            if (timing === "before") return terminatedGitResult("timed_out");
+            const completed = await super.run(cwd, args, options);
+            if (timing === "after") {
+              return { ...completed, exitCode: -1, termination: "timed_out" };
+            }
+            return completed;
+          }
+          if (
+            timing === "post-revparse" &&
+            commitSeen &&
+            !timedPostRead &&
+            args[0] === "rev-parse" &&
+            args[1] === "HEAD"
+          ) {
+            timedPostRead = true;
+            return terminatedGitResult("timed_out");
+          }
+          return super.run(cwd, args, options);
+        }
+      }
+      const bounded = new WorktreeManager(new AmbiguousGitClient());
+
+      const pending = bounded.commit(
+        lease,
+        ["approved.txt"],
+        "feat: approved",
+        sha256(diff),
+        { signal: new AbortController().signal, timeoutMs: 5_000 },
+      );
+
+      if (timing === "before") {
+        await expect(pending).rejects.toEqual(
+          expect.objectContaining<Partial<WorkspaceGitTerminationError>>({
+            outcome: "timed_out",
+          }),
+        );
+      } else {
+        await expect(pending).resolves.toMatch(/^[0-9a-f]{40}$/);
+      }
+      expect(commitSignal).toBeUndefined();
+    },
+  );
+
+  it("reports an uncertain commit when reconciliation finds an unexpected tree", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-commit-uncertain");
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    class UnexpectedCommitGitClient extends GitClient {
+      override async run(
+        cwd: string,
+        args: readonly string[],
+        options: GitRunOptions = {},
+      ): Promise<CommandResult> {
+        if (args.includes("commit")) {
+          const completed = await super.run(cwd, args, options);
+          writeFileSync(path.join(cwd, "unexpected.txt"), "unexpected\n");
+          await super.run(cwd, ["add", "--", "unexpected.txt"]);
+          await super.run(cwd, ["-c", "core.hooksPath=/dev/null", "commit", "-m", "unexpected"]);
+          return { ...completed, exitCode: -1, termination: "timed_out" };
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new UnexpectedCommitGitClient()).commit(
+        lease,
+        ["approved.txt"],
+        "feat: approved",
+        sha256(diff),
+        { timeoutMs: 5_000 },
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceCommitUncertainError);
+  });
+
+  it("rejects truncated changed-path evidence before commit", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-truncated-paths");
+    writeFileSync(path.join(lease.path, "approved.txt"), "approved\n", "utf8");
+    const { diff } = await manager.inspect(lease);
+    class TruncatedPathsGitClient extends GitClient {
+      override async run(
+        cwd: string,
+        args: readonly string[],
+        options: GitRunOptions = {},
+      ): Promise<CommandResult> {
+        const result = await super.run(cwd, args, options);
+        return args.includes("--name-only") ? { ...result, truncated: true } : result;
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new TruncatedPathsGitClient()).commit(
+        lease,
+        ["approved.txt"],
+        "feat: approved",
+        sha256(diff),
+      ),
+    ).rejects.toThrow(/truncat/i);
   });
 
   it("rejects an empty path list", async () => {

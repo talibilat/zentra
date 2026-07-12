@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -19,7 +19,12 @@ import {
   ValidationRunner,
   type ValidationReport,
 } from "../../src/capabilities/validation-runner.js";
-import { IntegrationQueue } from "../../src/integration/integration-queue.js";
+import {
+  IntegrationExecutionError,
+  IntegrationUncertainError,
+  IntegrationQueue,
+  isVerifiedIntegrationReceipt,
+} from "../../src/integration/integration-queue.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
 import {
@@ -148,19 +153,16 @@ describe("IntegrationQueue", () => {
       `feat: ${taskId}`,
       sha256(diff),
     );
-    const command = [...project.validations.focused] as readonly [string, ...string[]];
-    const focusedValidation: ValidationReport = {
-      name: "focused",
-      outcome: "completed",
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-      startedAt: new Date().toISOString(),
-      finishedAt: new Date().toISOString(),
-      command,
-      argvSha256: sha256(JSON.stringify(command)),
-      outputSha256: sha256(JSON.stringify({ stdout: "", stderr: "" })),
-    };
+    const focusedValidation = await new ValidationRunner(new ProcessSupervisor()).run(
+      project,
+      "focused",
+      lease.path,
+      AbortSignal.timeout(10_000),
+      {
+        invocationId: `focused-review-${taskId}-${randomUUID()}`,
+        subjectSha256: sha256(diff),
+      },
+    );
     const decision: ReviewDecision = {
       reviewerId: "reviewer-1",
       approved: true,
@@ -204,6 +206,11 @@ describe("IntegrationQueue", () => {
     expect(receipt.outcome).toBe("completed");
     expect(receipt.resultCommit).toBe(await integrationHead());
     expect(receipt.resultCommit).not.toBe(originalIntegrationHead);
+    expect(isVerifiedIntegrationReceipt(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.validation)).toBe(true);
+    expect(Object.isFrozen(receipt.validation.command)).toBe(true);
+    expect(isVerifiedIntegrationReceipt({ ...receipt })).toBe(false);
     expect(
       await gitOk(repositoryPath, [
         "show",
@@ -211,6 +218,70 @@ describe("IntegrationQueue", () => {
       ]),
     ).toBe("integrated");
   });
+
+  it("throws a typed timed_out error when source identity lookup times out", async () => {
+    const reviewed = await ticket("task-source-timeout", "source-timeout.txt", "changed\n");
+    class SourceTimeoutGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (args[0] === "rev-parse" && args.at(-1)?.includes(reviewed.lease.branch)) {
+          return Promise.resolve(terminatedGitResult("timed_out"));
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+    const integrationQueue = new IntegrationQueue(
+      new SourceTimeoutGitClient(),
+      new ValidationRunner(new ProcessSupervisor()),
+    );
+
+    await expect(integrate(reviewed, integrationQueue)).rejects.toEqual(
+      expect.objectContaining<Partial<IntegrationExecutionError>>({
+        name: "IntegrationExecutionError",
+        outcome: "timed_out",
+      }),
+    );
+  });
+
+  it.each(["nonzero", "truncated", "empty", "throw"] as const)(
+    "types source identity %s as failed before effects",
+    async (mode) => {
+      const reviewed = await ticket(`task-source-${mode}`, `source-${mode}.txt`, "changed\n");
+      class SourceFailureGitClient extends GitClient {
+        override run(
+          cwd: string,
+          args: readonly string[],
+          options?: GitRunOptions,
+        ): Promise<CommandResult> {
+          if (args[0] === "rev-parse" && args.at(-1)?.includes(reviewed.lease.branch)) {
+            if (mode === "throw") throw new Error("source unavailable");
+            return Promise.resolve({
+              stdout: mode === "empty" ? "" : "not-a-commit",
+              stderr: mode === "nonzero" ? "missing" : "",
+              exitCode: mode === "nonzero" ? 1 : 0,
+              truncated: mode === "truncated",
+              termination: null,
+            });
+          }
+          return super.run(cwd, args, options);
+        }
+      }
+      const integrationQueue = new IntegrationQueue(
+        new SourceFailureGitClient(),
+        new ValidationRunner(new ProcessSupervisor()),
+      );
+
+      await expect(integrate(reviewed, integrationQueue)).rejects.toEqual(
+        expect.objectContaining<Partial<IntegrationExecutionError>>({
+          name: "IntegrationExecutionError",
+          outcome: "failed",
+        }),
+      );
+    },
+  );
 
   it("rejects a stale review digest before creating candidate effects", async () => {
     const reviewed = await ticket("task-002", "stale.txt", "changed\n");
@@ -782,12 +853,9 @@ describe("IntegrationQueue", () => {
       }
 
       override async run(
-        configuredProject: ProjectConfig,
-        name: "focused" | "full",
-        cwd: string,
-        signal: AbortSignal,
+        ...args: Parameters<ValidationRunner["run"]>
       ): Promise<ValidationReport> {
-        const report = await super.run(configuredProject, name, cwd, signal);
+        const report = await super.run(...args);
         await gitOk(repositoryPath, [
           "update-ref",
           `refs/heads/${project.integrationBranch}`,
@@ -822,10 +890,10 @@ describe("IntegrationQueue", () => {
   it.each([
     ["before-effect", "timed_out"],
     ["after-effect", "completed"],
-    ["competing-head", "timed_out"],
-    ["inspection-failure", "timed_out"],
-    ["symbolic-after-effect", "timed_out"],
-    ["descendant-only", "timed_out"],
+    ["competing-head", "uncertain"],
+    ["inspection-failure", "uncertain"],
+    ["symbolic-after-effect", "uncertain"],
+    ["descendant-only", "uncertain"],
   ] as const)(
     "reconciles update-ref timeout %s",
     async (mode, expectedOutcome) => {
@@ -938,14 +1006,18 @@ describe("IntegrationQueue", () => {
         new ValidationRunner(new ProcessSupervisor()),
       );
 
-      const receipt = await integrate(reviewed, integrationQueue);
-
-      expect(receipt.outcome).toBe(expectedOutcome);
-      expect(receipt.validation).toMatchObject({ outcome: "completed", exitCode: 0 });
+      const pending = integrate(reviewed, integrationQueue);
+      const receipt = expectedOutcome === "uncertain" ? null : await pending;
+      if (expectedOutcome === "uncertain") {
+        await expect(pending).rejects.toBeInstanceOf(IntegrationUncertainError);
+      } else {
+        expect(receipt?.outcome).toBe(expectedOutcome);
+        expect(receipt?.validation).toMatchObject({ outcome: "completed", exitCode: 0 });
+      }
       expect(updateOptions?.timeoutMs).toBeGreaterThan(0);
       expect(updateOptions?.signal).toBeUndefined();
       if (mode === "after-effect") {
-        expect(receipt.resultCommit).toBe(await integrationHead());
+        expect(receipt?.resultCommit).toBe(await integrationHead());
         expect(existsSync(candidatePath)).toBe(false);
       } else if (mode === "before-effect") {
         expect(await integrationHead()).toBe(originalIntegrationHead);
@@ -968,6 +1040,54 @@ describe("IntegrationQueue", () => {
       expect(existsSync(reviewed.lease.path)).toBe(true);
     },
   );
+
+  it("rejects a fabricated successful full validation before CAS", async () => {
+    const reviewed = await ticket("task-fabricated-validation", "fabricated-validation.txt", "change\n");
+    class CloningValidationRunner extends ValidationRunner {
+      override async run(...args: Parameters<ValidationRunner["run"]>): Promise<ValidationReport> {
+        return { ...(await super.run(...args)) };
+      }
+    }
+    const integrationQueue = new IntegrationQueue(
+      new GitClient(),
+      new CloningValidationRunner(new ProcessSupervisor()),
+    );
+
+    const receipt = await integrate(reviewed, integrationQueue);
+
+    expect(receipt.outcome).toBe("failed");
+    expect(receipt.resultCommit).toBeNull();
+    expect(await integrationHead()).toBe(originalIntegrationHead);
+  });
+
+  it("rejects a branded full-validation report replayed from an old subject and cwd", async () => {
+    const reviewed = await ticket("task-replayed-validation", "replayed-validation.txt", "change\n");
+    const oldReport = await new ValidationRunner(new ProcessSupervisor()).run(
+      project,
+      "full",
+      repositoryPath,
+      AbortSignal.timeout(10_000),
+      { invocationId: "old-full-validation", subjectSha256: originalIntegrationHead },
+    );
+    let calls = 0;
+    class ReplayingValidationRunner extends ValidationRunner {
+      override run(): Promise<ValidationReport> {
+        calls += 1;
+        return Promise.resolve(oldReport);
+      }
+    }
+    const integrationQueue = new IntegrationQueue(
+      new GitClient(),
+      new ReplayingValidationRunner(new ProcessSupervisor()),
+    );
+
+    const receipt = await integrate(reviewed, integrationQueue);
+
+    expect(calls).toBe(1);
+    expect(receipt.outcome).toBe("failed");
+    expect(receipt.resultCommit).toBeNull();
+    expect(await integrationHead()).toBe(originalIntegrationHead);
+  });
 
   it("includes source/result commits, review, and full validation evidence", async () => {
     const reviewed = await ticket("task-007", "evidence.txt", "evidence\n");

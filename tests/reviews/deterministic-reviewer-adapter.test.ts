@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
-import { DeterministicReviewerAdapter } from "../../src/reviews/reviewer-adapter.js";
+import {
+  DeterministicReviewerAdapter,
+  ReviewerExecutionError,
+} from "../../src/reviews/reviewer-adapter.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
 import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -204,4 +207,43 @@ describe("DeterministicReviewerAdapter", () => {
       AbortSignal.timeout(5_000),
     )).rejects.toThrow(/exactly one|protocol/i);
   });
+
+  it.each(["cancelled", "timed_out", "failed"] as const)(
+    "preserves a supervised %s reviewer outcome in a typed error",
+    async (outcome) => {
+      class OutcomeSupervisor extends ProcessSupervisor {
+        override execute(): Promise<WorkerResult> {
+          return Promise.resolve({
+            outcome,
+            exitCode: null,
+            events: [],
+            stdout: "",
+            rawStdout: "",
+            stderr: "reviewer stopped",
+          });
+        }
+      }
+      const adapter = new DeterministicReviewerAdapter(
+        new OutcomeSupervisor(),
+        getFixturePath(),
+      );
+
+      await expect(
+        adapter.review(
+          {
+            workerId: "worker-1",
+            reviewerId: "reviewer-1",
+            diff: "diff",
+            validation: validationReport,
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ReviewerExecutionError>>({
+          name: "ReviewerExecutionError",
+          outcome,
+        }),
+      );
+    },
+  );
 });

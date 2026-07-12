@@ -3,7 +3,16 @@
 // Accepts only: --workspace <absolute path> --file <relative path> --content <string>
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 
 function fail(message) {
@@ -43,27 +52,73 @@ const content = values.get("--content");
 if (!path.isAbsolute(workspace)) {
   fail(`--workspace must be an absolute path: ${workspace}`);
 }
+const canonicalWorkspace = realpathSync(workspace);
+if (!lstatSync(canonicalWorkspace).isDirectory()) {
+  fail(`--workspace must be a directory: ${workspace}`);
+}
 if (file === "") {
   fail("--file must not be empty");
 }
 if (path.isAbsolute(file)) {
   fail(`--file must be a relative path: ${file}`);
 }
-const segments = file.split(/[\\/]/);
-if (segments.includes("..")) {
-  fail(`--file must not contain ".." traversal: ${file}`);
+// MVP fixture scope is deliberately one root-level file, currently greeting.txt.
+if (file.includes("/") || file.includes("\\")) {
+  fail(`--file must be one root-level filename without slashes: ${file}`);
 }
-const resolved = path.resolve(workspace, file);
-if (resolved === workspace || !resolved.startsWith(workspace + path.sep)) {
+const segments = file.split(/[\\/]/);
+if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+  fail(`--file contains an unsafe path segment: ${file}`);
+}
+const resolved = path.resolve(canonicalWorkspace, file);
+if (resolved === canonicalWorkspace || !resolved.startsWith(canonicalWorkspace + path.sep)) {
   fail(`--file escapes the workspace: ${file}`);
+}
+
+let parent = canonicalWorkspace;
+for (const segment of segments.slice(0, -1)) {
+  const candidate = path.join(parent, segment);
+  if (existsSync(candidate)) {
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      fail(`--file parent must be a real directory: ${candidate}`);
+    }
+  } else {
+    mkdirSync(candidate);
+  }
+  parent = realpathSync(candidate);
+  if (!parent.startsWith(canonicalWorkspace + path.sep)) {
+    fail(`--file parent escapes the workspace: ${file}`);
+  }
+}
+const target = path.join(parent, segments.at(-1));
+if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+  fail(`--file target must not be a symbolic link: ${file}`);
 }
 
 if (content === "__WAIT__") {
   // Wait indefinitely until terminated so cancellation and timeout can be tested.
   setInterval(() => {}, 1000);
 } else {
-  mkdirSync(path.dirname(resolved), { recursive: true });
-  writeFileSync(resolved, content, "utf8");
+  let descriptor;
+  let writeError;
+  try {
+    descriptor = openSync(
+      target,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600,
+    );
+    const bytes = Buffer.from(content, "utf8");
+    let written = 0;
+    while (written < bytes.length) {
+      written += writeSync(descriptor, bytes, written, bytes.length - written);
+    }
+  } catch (error) {
+    writeError = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  if (writeError !== undefined) fail(`safe write failed: ${writeError}`);
   const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
   process.stdout.write(`${JSON.stringify({ type: "artifact.ready", path: file, sha256 })}\n`);
   process.exit(0);
