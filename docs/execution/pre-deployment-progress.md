@@ -9,7 +9,7 @@ All implementation, testing, review, and documentation edits are performed by se
 - Integration branch: `fix/pre-deployment`
 - Integration worktree: `.worktrees/predeploy-integration` (reserved for merges, progress records, final verification only)
 - Issue corpus base commit: `f54ba31` (`docs/pre-deployment-issues`, pushed to origin)
-- Current integration commit: `2cd2a31` (013, 001, 009 integrated with --no-ff; baseline green after each; pushed)
+- Current integration commit: `15d7b8c` (013, 001, 009, 011 integrated + 008 disposition doc; baseline green after each; pushed). Closed: 001(Crit), 009+011(High), 013+008(Low).
 - Node: v24.2.0
 - pnpm: 10.0.0
 - OpenCode: 1.17.18 (`/Users/talibilat/.opencode/bin/opencode`)
@@ -136,9 +136,17 @@ Integrated into fix/pre-deployment (each --no-ff, full baseline test/check/build
 - Integration branch head after Wave-1 merges + prompts: 2cd2a31 (pushed to origin).
 - **011** (High): rounds 1-3 fixed; re-review r2 returned BLOCK on 1 Important finding - `validateProtocolOutput()` inferred invocation kind from user-controlled taskId/args (a worker task named "validation" could bypass worker-artifact validation). Round-4 coordinated fix RUNNING: explicit trusted invocation-kind param on ProcessSupervisor.execute() + updated call sites (tracer-bullet worker, validation-runner, reviewer-adapter). 011 branch first merged current integration head (d4eb289) to carry 001/009/013 so the call-site edits sit on integrated code. Not yet integrated.
 
-### Wave 1 Packaging Chain started
+### Wave 1 Packaging Chain + parallel Medium/Low (speed-up)
 
-- **016** (Critical, Pod C1): writer RUNNING on fix/predeploy-c1-package (branched from f61a6e4). Production build + package lifecycle + tarball install e2e. Authorized by 008 NOT_REPRODUCED. Owns package.json build/lifecycle/bin only; files-allowlist deferred to 019; os/cpu/engines/license to 020/021/018. Running in parallel with 011-fix4 (disjoint files).
+- **011**: INTEGRATED (merge into 043ec64; 545 tests). 4 fix rounds; final re-review INTEGRATE.
+- **016** (Critical, Pod C1): writer DONE (95681ec; 533 tests; real npm pack inspected, bin 0755; prepack build + verify scripts + tarball e2e). Combined spec+quality+security review RUNNING. files-allowlist deferred to 019.
+- **023** (Medium, Pod A): writer RUNNING on fix/predeploy-a-023 (validation focused/full timeouts). Base has 001+011.
+- **006** (Medium, Pod B): writer RUNNING on fix/predeploy-b-artifacts (typed artifacts; consumes 009 evidence contract). Base has 009+011.
+- **026** (Low, doc-only): writer RUNNING on fix/predeploy-c2-docs-026 (correct stale execution docs).
+
+Speed-up measures adopted: keep all 4 writer slots saturated; Medium/Low use a single combined independent review pass (heavy multi-round 2-axis adversarial review reserved for Critical/High); review criteria front-loaded into writer prompts to reduce fix rounds; overlap reviews with next writers.
+
+Succeeded Wave-1 writer worktrees removed (013,001,009,011,008); branches retained on origin.
 
 Closed with evidence so far: 3 Critical target -> 1 (001). 7 High -> 1 (009). Plus 013 (Low) and 008 (Low, not-reproduced disposition, evidence-only; integrate its doc separately).
 
