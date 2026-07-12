@@ -355,6 +355,7 @@ describe("ProcessReviewerAdapter", () => {
 
   it("fails closed when the reviewer returns an evidence digest mismatch", async () => {
     const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
       let body = "";
       process.stdin.setEncoding("utf8");
       for await (const chunk of process.stdin) body += chunk;
@@ -362,6 +363,7 @@ describe("ProcessReviewerAdapter", () => {
       console.log(JSON.stringify({
         reviewerId: request.reviewerId,
         decision: "approve",
+        requestSha256: createHash("sha256").update(body).digest("hex"),
         diffSha256: "0".repeat(64),
         validationSha256: request.validationSha256,
         decidedAt: new Date().toISOString(),
@@ -375,6 +377,7 @@ describe("ProcessReviewerAdapter", () => {
 
   it("fails closed when the reviewer returns the right diff digest but wrong validation digest", async () => {
     const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
       let body = "";
       process.stdin.setEncoding("utf8");
       for await (const chunk of process.stdin) body += chunk;
@@ -382,6 +385,7 @@ describe("ProcessReviewerAdapter", () => {
       console.log(JSON.stringify({
         reviewerId: request.reviewerId,
         decision: "approve",
+        requestSha256: createHash("sha256").update(body).digest("hex"),
         diffSha256: request.diffSha256,
         validationSha256: "0".repeat(64),
         decidedAt: new Date().toISOString(),
@@ -422,8 +426,47 @@ describe("ProcessReviewerAdapter", () => {
     )).rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
   });
 
-  it("settles after reviewer exit when a detached descendant retains stdio", async () => {
+  it("does not approve a valid-looking decision from a reviewer that never reads stdin", async () => {
     const fixture = reviewerScript(`
+      console.log(${JSON.stringify(JSON.stringify({
+        reviewerId: input.reviewerId,
+        decision: "approve",
+        requestSha256: "0".repeat(64),
+        diffSha256: createHash("sha256").update(input.diff).digest("hex"),
+        validationSha256: canonicalValidationDigest(validationReport),
+        decidedAt: "2026-01-01T00:00:02.000Z",
+        reason: "did not read request",
+      }))});
+    `);
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toThrow(/request receipt.*mismatch/i);
+  });
+
+  it("does not approve a valid decision prefix before reviewer output reaches EOF", async () => {
+    const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
+      import { spawn } from "node:child_process";
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      const decision = JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(body).digest("hex"), diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "incomplete output" });
+      const descendant = spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write('trailing output'), 250)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "ignore"]
+      });
+      descendant.unref();
+      console.log(decision);
+    `);
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
+  });
+
+  it("fails closed after bounded settlement when a detached descendant retains stdio", async () => {
+    const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
       import { spawn } from "node:child_process";
       let body = "";
       process.stdin.setEncoding("utf8");
@@ -434,13 +477,12 @@ describe("ProcessReviewerAdapter", () => {
         stdio: ["ignore", "inherit", "inherit"]
       });
       descendant.unref();
-      console.log(JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "reviewed" }));
+      console.log(JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(body).digest("hex"), diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "reviewed" }));
     `);
     const startedAt = performance.now();
 
-    const decision = await processReviewer(fixture).review(input, AbortSignal.timeout(5_000));
-
-    expect(decision.approved).toBe(true);
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
     expect(performance.now() - startedAt).toBeLessThan(750);
   });
 
@@ -481,11 +523,12 @@ describe("ProcessReviewerAdapter", () => {
 
   it("requires exactly one reviewer decision", async () => {
     const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
       let body = "";
       process.stdin.setEncoding("utf8");
       for await (const chunk of process.stdin) body += chunk;
       const request = JSON.parse(body);
-      const decision = JSON.stringify({ reviewerId: request.reviewerId, decision: "deny", diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "denied" });
+      const decision = JSON.stringify({ reviewerId: request.reviewerId, decision: "deny", requestSha256: createHash("sha256").update(body).digest("hex"), diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "denied" });
       console.log(decision);
       console.log(decision);
     `);

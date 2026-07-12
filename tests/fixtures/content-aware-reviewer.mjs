@@ -37,6 +37,7 @@ const dangerous = request.diff.includes("requireAuthentication = false");
 const decision = {
   reviewerId: request.reviewerId,
   decision: dangerous ? "deny" : "approve",
+  requestSha256: createHash("sha256").update(input, "utf8").digest("hex"),
   diffSha256: createHash("sha256").update(request.diff, "utf8").digest("hex"),
   validationSha256,
   decidedAt: new Date().toISOString(),

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { ValidationReport } from "../capabilities/validation-runner.js";
@@ -50,6 +50,7 @@ export const ReviewDecisionSchema = z.strictObject({
 const ProcessReviewDecisionSchema = z.strictObject({
   reviewerId: z.string().min(1),
   decision: z.enum(["approve", "deny"]),
+  requestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   diffSha256: z.string().regex(/^[a-f0-9]{64}$/),
   validationSha256: z.string().regex(/^[a-f0-9]{64}$/),
   decidedAt: z.string().datetime({ offset: true }),
@@ -137,6 +138,7 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
     const validationSha256 = canonicalValidationDigest(input.validation);
     const request = JSON.stringify({
       schemaVersion: 1,
+      challenge: randomBytes(32).toString("hex"),
       workerId: input.workerId,
       reviewerId: input.reviewerId,
       diff: input.diff,
@@ -144,6 +146,7 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
       diffSha256,
       validationSha256,
     });
+    const requestSha256 = sha256(request);
     const requestBytes = Buffer.byteLength(request, "utf8");
     if (requestBytes > this.maxInputBytes) {
       throw new Error(
@@ -171,6 +174,9 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
     }
     if (parsed.data.reviewerId !== input.reviewerId) {
       throw new Error("reviewer protocol returned a reviewer identity mismatch");
+    }
+    if (parsed.data.requestSha256 !== requestSha256) {
+      throw new Error("reviewer protocol returned a request receipt digest mismatch");
     }
     if (parsed.data.diffSha256 !== diffSha256) {
       throw new Error("reviewer protocol returned a diff evidence digest mismatch");
@@ -250,6 +256,10 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
         }
         if (!stdinCompleted) {
           reject(new ReviewerExecutionError("failed", "reviewer stdin did not accept the complete request"));
+          return;
+        }
+        if (!stdoutEnded || !stderrEnded) {
+          reject(new ReviewerExecutionError("failed", "reviewer output streams did not close completely"));
           return;
         }
         resolve(Buffer.concat(stdout).toString("utf8"));
