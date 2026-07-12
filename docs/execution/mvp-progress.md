@@ -1,43 +1,64 @@
 # Zentra MVP Execution Progress
 
 ## Current State
-- Current phase: PAUSED at the start of Parallel Wave 2 (Tasks 3 and 6) due to a session usage limit.
-- Active tasks: none (Wave 2 implementation agents were stopped before completing; Task 3 left one uncommitted partial test file, Task 6 left nothing).
-- Last verified integration commit: 092c32f on feature/zentra-mvp (Wave 1 merged at 23ad815; 51/51 tests, check, and build verified again at pause time).
-- Blocking issue: session usage limit; no technical blocker.
-- Next action: Re-run the Task 3 and Task 6 implementation agents per docs/execution/HANDOFF.md, then review, commit, push, and integrate Wave 2.
+
+- Current phase: Wave 2 is integrated and Task 7 is next.
+- Active task: Task 7, single-project integration queue.
+- Last verified integration commit: `55633dc` on `feature/zentra-mvp`.
+- Blocking issue: none.
+- Next action: implement Task 7 with real-Git tests, independent specification and quality reviews, and full integration verification.
 
 ## Task Ledger
+
 | Task | Branch | Worktree | Status | Commit | Focused tests | Review | Integrated |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Docs baseline | feature/zentra-mvp | .worktrees/zentra-mvp | done | 823c18a | n/a | n/a | yes |
-| Task 1 contracts/scaffold | feature/zentra-mvp | .worktrees/zentra-mvp | done | see git log | 5/5 pass | spec: compliant; quality: 1 Important fixed, 2 plan-mandated | yes |
-| Task 2 journal | feature/mvp-journal | .worktrees/mvp-journal | done | 8e62183 | 8/8 pass | spec: compliant; quality: 1 Important fixed (guarded ROLLBACK) | yes (23ad815) |
-| Task 3 task projection | feature/mvp-task-projection | .worktrees/mvp-task-projection | interrupted (partial test file only) | - | - | - | - |
-| Task 4 projects/workspaces | feature/mvp-workspaces | .worktrees/mvp-workspaces | done | 33b5ba2 | 39/39 pass | spec: compliant; quality: 3 Important fixed (shell guard hardened, binary diff digest, truncation refusal) + 4 Minors fixed | yes (23ad815) |
-| Task 5 worker supervisor | feature/mvp-worker | .worktrees/mvp-worker | done | eded574 | 14/14 pass x2 | spec: 1 Important fixed (grandchild group-kill test); quality: 1 Important fixed (exit-based settle with flush grace) | yes (23ad815) |
-| Task 6 validation/review | feature/mvp-validation-review | .worktrees/mvp-validation-review | interrupted (no files written) | - | - | - | - |
-| Task 7 integration queue | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
-| Task 8 tracer bullet | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
-| Task 9 recovery | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
-| Task 10 CLI/README | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
+| Docs baseline | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `823c18a` | n/a | n/a | yes |
+| Task 1 contracts/scaffold | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | done | `5bdb0c5` | 5/5 pass | spec compliant; 1 Important quality finding fixed | yes |
+| Task 2 journal | `feature/mvp-journal` | `.worktrees/mvp-journal` | done | `8e62183` | 8/8 pass | spec compliant; 1 Important finding fixed | yes (`274773e`) |
+| Task 3 task projection | `feature/mvp-task-projection` | `.worktrees/mvp-task-projection` | done | `d889433` | 46/46 pass | spec and quality approved; all Critical and Important findings fixed | yes (`05b20fa`) |
+| Task 4 projects/workspaces | `feature/mvp-workspaces` | `.worktrees/mvp-workspaces` | done | `33b5ba2` | 39/39 pass | spec compliant; 3 Important and 4 Minor findings fixed | yes (`c519b36`) |
+| Task 5 worker supervisor | `feature/mvp-worker` | `.worktrees/mvp-worker` | done | `eded574` | 14/14 pass | spec and quality approved after Important fixes | yes (`23ad815`) |
+| Task 6 validation/review | `feature/mvp-validation-review` | `.worktrees/mvp-validation-review` | done | `e8a558c` | 50/50 pass with worker coverage | spec and quality approved; all Important findings fixed | yes (`55633dc`) |
+| Task 7 integration queue | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
+| Task 8 tracer bullet | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
+| Task 9 recovery | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
+| Task 10 CLI/README | `feature/zentra-mvp` | `.worktrees/zentra-mvp` | pending | - | - | - | - |
 
 ## Decisions
-- 2026-07-12: Set repository-local git identity (Md Talib / talibilat2019@gmail.com) so worktree commits have a stable author.
-- 2026-07-12: Added `pnpm.onlyBuiltDependencies: ["better-sqlite3", "esbuild"]` to package.json because pnpm 10 blocks postinstall build scripts by default and better-sqlite3 needs its native build.
-- 2026-07-12: Replaced deprecated `z.string().datetime()` with behavior-identical `z.iso.datetime()` in src/contracts/artifact.ts (quality review Important finding; keeps UTC-only semantics required by the plan).
-- 2026-07-12: Kept plan-mandated package.json bin/start entries pointing at the Task 10 CLI and the plan-mandated tsconfig that compiles tests into dist; both were flagged by quality review but are exact plan content and resolve naturally by Task 10.
-- 2026-07-12: Deferred Minor quality findings (branded id types, superRefine issue path, sha256 case sensitivity, vitest.config.ts typecheck inclusion) as plan-content deviations not justified for the MVP.
+
+- 2026-07-12: Set repository-local Git identity to `Md Talib / talibilat2019@gmail.com` so worktree commits have a stable author.
+- 2026-07-12: Added `pnpm.onlyBuiltDependencies: ["better-sqlite3", "esbuild"]` because pnpm 10 blocks postinstall build scripts by default and `better-sqlite3` needs its native build.
+- 2026-07-12: Replaced deprecated `z.string().datetime()` with behavior-identical `z.iso.datetime()` in `src/contracts/artifact.ts`.
+- 2026-07-12: Kept the plan-mandated `package.json` CLI paths and TypeScript test compilation until Task 10 supplies the CLI.
+- 2026-07-12: Task 3 prospectively validates the exact JSON-canonical event payload before durable append so rejected commands cannot poison replay.
+- 2026-07-12: Task 6 extends worker results with actual exit-code and raw bounded-output evidence so validation and review digests remain complete without changing worker event parsing.
+- 2026-07-12: Task 6 uses one shared output byte budget across stdout and stderr and allows output-limit evidence to override a provisional process exit before settlement.
+
+## Deferred Minor Findings
+
+- Branded identifier types, `superRefine` issue paths, SHA-256 case sensitivity, and `vitest.config.ts` type-check inclusion remain outside the approved MVP scope.
+- Worker JSON-looking stdout remains interpreted as worker events; validation uses retained raw stdout so its evidence is not lost.
+- Process termination still uses immediate `SIGKILL` without a `SIGTERM` grace period.
+- UTF-8 truncation may split a code point even though retained raw bytes are bounded.
+- `WorktreeManager.commit` retains a small digest-check-to-stage TOCTOU window.
+- Task 3 does not include a synthetic optimistic-concurrency race test and uses placeholder storage metadata for prospective projection events.
+- The reviewer protocol permits non-JSON stdout around its one strict JSON event and runs with `/tmp` as its working directory.
+- The process supervisor does not explicitly ignore late `decide` calls after settlement, although they cannot change the returned result.
 
 ## Blockers
+
 None.
 
 ## Verification
-- 2026-07-12: `node --version` -> v24.2.0 (exit 0). `pnpm --version` -> 10.34.5 (exit 0).
-- 2026-07-12: Docs baseline committed (823c18a) and pushed; main pushed to origin/main; feature/zentra-mvp upstream set.
-- 2026-07-12: Task 1 on feature/zentra-mvp (5bdb0c5): focused contract tests 5/5, `pnpm check` exit 0, `pnpm build` exit 0.
-- 2026-07-12: Task 2 on feature/mvp-journal (8e62183): `pnpm test` 8/8, `pnpm check` exit 0 after ROLLBACK-guard fix.
-- 2026-07-12: Task 5 on feature/mvp-worker (eded574): `pnpm test` 14/14 run twice, `pnpm check` exit 0, includes grandchild process-group kill proof.
-- 2026-07-12: Task 4 on feature/mvp-workspaces (33b5ba2): `pnpm test` 39/39 (fix agent ran twice green), `pnpm check` exit 0.
-- 2026-07-12: Wave 1 integration on feature/zentra-mvp: sequential --no-ff merges of journal, workspaces, worker; after each merge full `pnpm test` green (8 -> 42 -> 51 tests), `pnpm check` exit 0; `pnpm build` exit 0 after final merge; pushed as 23ad815, ledger update 092c32f.
-- 2026-07-12 (pause checkpoint): on feature/zentra-mvp at 092c32f: `pnpm test` 51/51 pass, `pnpm check` exit 0, working tree clean except docs/execution updates.
+
+- 2026-07-12: `node --version` returned `v24.2.0` and `pnpm --version` returned `10.34.5`.
+- 2026-07-12: Task 1 at `5bdb0c5` passed 5 focused tests, `pnpm check`, and `pnpm build`.
+- 2026-07-12: Task 2 at `8e62183` passed 8 tests and `pnpm check` after the guarded rollback fix.
+- 2026-07-12: Task 4 at `33b5ba2` passed 39 tests and `pnpm check` after review fixes.
+- 2026-07-12: Task 5 at `eded574` passed 14 tests twice and `pnpm check`, including process-group termination evidence.
+- 2026-07-12: Wave 1 merged Tasks 2, 4, and 5 sequentially with `--no-ff`; full test and type-check gates passed after each merge and the final build passed.
+- 2026-07-12: Task 3 at `d889433` passed 46 focused tests and `pnpm check`; independent spec and quality re-reviews reported no Critical or Important findings.
+- 2026-07-12: Task 6 at `e8a558c` passed 50 focused Task 5/6 tests, 92 full branch tests, and `pnpm check`; independent spec and quality re-reviews reported no Critical or Important findings.
+- 2026-07-12: Task 3 merged with `--no-ff` at `05b20fa`; `pnpm test` passed 97/97, `pnpm check` passed, and `pnpm build` passed.
+- 2026-07-12: Task 6 merged with `--no-ff` at `55633dc`; `pnpm test` passed 138/138, `pnpm check` passed, and `pnpm build` passed.
+- 2026-07-12: `feature/zentra-mvp` was pushed through `55633dc` without merging to `main`.

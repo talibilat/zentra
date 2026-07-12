@@ -1,78 +1,80 @@
 # Zentra MVP Execution Handoff
 
-This handoff records the exact state of the paused Zentra MVP run so the next agent can resume without re-deriving context.
-The authoritative task specifications are in docs/plans/mvp.md, and the run rules are in the original execution prompt plus AGENTS.md.
+This handoff records the current Zentra-only MVP state after Wave 2 integration.
+The authoritative implementation specification is `docs/plans/mvp.md`, and the architectural constraints are in `AGENTS.md` and `docs/design/orchestrator.md`.
 
 ## Current Branch And Commit
 
-- Integration worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp
-- Integration branch: feature/zentra-mvp at 092c32f, pushed to origin.
-- main is at 8eaee4c, pushed to origin.
-- Repository-local git identity is configured (Md Talib / talibilat2019@gmail.com).
+- Integration worktree: `/Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp`.
+- Integration branch: `feature/zentra-mvp` at `55633dc`, pushed to `origin/feature/zentra-mvp`.
+- `main` remains unchanged and must not receive the MVP branch.
+- Repository-local Git identity is configured as `Md Talib / talibilat2019@gmail.com`.
 
-## Completed Tasks
+## Completed And Integrated
 
-- Docs baseline: 823c18a (docs: add Zentra architecture and MVP plan).
-- Task 1 (contracts/scaffold): 5bdb0c5 on feature/zentra-mvp; spec review fully compliant; quality review's one actionable Important finding fixed (z.iso.datetime()).
-- Task 2 (SQLite journal): 8e62183 on feature/mvp-journal, pushed; Important finding fixed (ROLLBACK guarded with db.inTransaction).
-- Task 4 (projects/workspaces): 33b5ba2 on feature/mvp-workspaces, pushed; 3 Important findings fixed (hardened shell-wrapper guard, `git diff --binary` digests, truncation refusal) plus 4 Minors (quotepath off and normalized paths, GIT_TERMINAL_PROMPT=0, remove() no longer mutates preserved evidence, config path in registry errors).
-- Task 5 (worker supervisor): eded574 on feature/mvp-worker, pushed; Important findings fixed (grandchild process-group kill test, exit-based settle with 1s pipe-flush grace, spawn-error settle gated on pid undefined, fixture empty --file guard).
-- Wave 1 integration: --no-ff merges of journal, workspaces, worker into feature/zentra-mvp (23ad815), full suite green after each merge; ledger update 092c32f.
+- Documentation baseline: `823c18a`.
+- Task 1 contracts and scaffold: `5bdb0c5`.
+- Task 2 durable SQLite journal: `8e62183`, merged at `274773e`.
+- Task 4 project registry and worktrees: `33b5ba2`, merged at `c519b36`.
+- Task 5 deterministic worker supervision: `eded574`, merged at `23ad815`.
+- Task 3 durable task projection: `d889433`, merged at `05b20fa`.
+- Task 6 validation and independent review: `e8a558c`, merged at `55633dc`.
 
-## Active Task And Exact Next Step
+## Wave 2 Review Outcomes
 
-Parallel Wave 2 (Tasks 3 and 6) was starting when the run paused; both implementation agents were stopped by the user before completing.
+Task 3 fixed all blocking findings before integration.
+The fixes prevent invalid transitions, invalid creation input, malformed payloads, serialization-changing payloads, and empty task identities from poisoning the durable event stream.
+The projection permits reviewer timeout, rejects repeated review requests, and replays the exact JSON-canonical payload written to SQLite.
 
-Exact next steps:
-1. Re-dispatch the Task 3 implementation agent in .worktrees/mvp-task-projection (branch feature/mvp-task-projection, based on 23ad815, dependencies installed). A partial uncommitted tests/tasks/task-projection.test.ts (234 lines) exists; review it and keep or rewrite it.
-2. Re-dispatch the Task 6 implementation agent in .worktrees/mvp-validation-review (branch feature/mvp-validation-review, based on 23ad815, dependencies installed, working tree clean).
-3. For each: TDD per docs/plans/mvp.md, focused tests, pnpm check, independent spec and quality reviews, fix Critical/Important findings, commit with the plan's commit message, push with upstream.
-4. Merge each reviewed branch --no-ff into feature/zentra-mvp one at a time with full test/check/build after each; push.
-5. Continue sequentially: Task 7 (integration queue), Task 8 (tracer bullet), Task 9 (recovery), Task 10 (CLI/README), then final verification and docs/execution/mvp-final-report.md.
+Task 6 fixed all blocking findings before integration.
+The fixes retain actual nonzero validation exit codes, raw JSON validation output, exact command snapshots, framed output digests, and strictly decoded reviewer decisions.
+The review gate requires focused validation, binds the decision to the requested independent reviewer, recomputes evidence digests, and rejects stale or inconsistent evidence.
+The process supervisor now retains a bounded shared stdout/stderr budget and handles output that exceeds the limit after a provisional successful parent exit.
 
-## Test Results At Pause
+Independent specification and quality re-reviews reported no unresolved Critical or Important findings for either task.
 
-- feature/zentra-mvp at 092c32f: pnpm test 51/51 pass (5 files), pnpm check exit 0, pnpm build exit 0 (verified at 23ad815; only docs changed since).
-- Per-branch focused results are recorded in docs/execution/mvp-progress.md under Verification.
+## Current Verification
 
-## Open Review Findings
+- After Task 3 merge at `05b20fa`: 97/97 tests passed, `pnpm check` passed, and `pnpm build` passed.
+- After Task 6 merge at `55633dc`: 138/138 tests passed, `pnpm check` passed, and `pnpm build` passed.
+- Task 3 branch focused verification: 46/46 tests passed and `pnpm check` passed.
+- Task 6 branch verification: 50 focused Task 5/6 tests passed, 92/92 full branch tests passed, and `pnpm check` passed.
 
-- No unresolved Critical or Important findings.
-- Deferred Minor findings (recorded in mvp-progress.md Decisions): branded id types, superRefine issue path, sha256 case sensitivity, vitest.config.ts not typechecked, JSON-looking stdout lines parsed as events (tighten before real harnesses), no SIGTERM grace before SIGKILL, UTF-8 truncation may split a codepoint, worker fixture stride-2 flag parsing diagnostics, TOCTOU window inside WorktreeManager.commit between digest check and git add.
+## Exact Next Step
 
-## Active Worktrees And Ownership
+Implement Task 7 from `docs/plans/mvp.md` lines 988-1061.
+Use real temporary Git repositories and test first.
+The integration queue must serialize per project, create a disposable candidate from the current integration head, merge the reviewed source commit only in that candidate, run full validation there, and update the integration branch only with compare-and-swap semantics after validation succeeds.
+Conflict, stale review, cancellation, timeout, failed validation, or a changed integration head must leave the integration branch unchanged and preserve the ticket worktree.
+Do not automatically retry uncertain Git effects.
 
-- .worktrees/zentra-mvp -> feature/zentra-mvp (integration; owned by the orchestrator).
-- .worktrees/mvp-journal -> feature/mvp-journal (Task 2, done, clean; safe to remove after MVP completes).
-- .worktrees/mvp-workspaces -> feature/mvp-workspaces (Task 4, done, clean; safe to remove after MVP completes).
-- .worktrees/mvp-worker -> feature/mvp-worker (Task 5, done, clean; safe to remove after MVP completes).
-- .worktrees/mvp-task-projection -> feature/mvp-task-projection (Task 3; owns src/tasks/**, tests/tasks/**; contains one uncommitted partial test file).
-- .worktrees/mvp-validation-review -> feature/mvp-validation-review (Task 6; owns src/capabilities/**, src/reviews/**, fixtures/deterministic-reviewer.mjs, tests/capabilities/**, tests/reviews/**; clean).
+After Task 7 passes independent specification and quality review, continue Tasks 8, 9, and 10 sequentially.
+Run focused verification and full `pnpm test`, `pnpm check`, and `pnpm build` gates before each integration.
+
+## Active Worktrees
+
+- `.worktrees/zentra-mvp` points to `feature/zentra-mvp` and owns integration plus Tasks 7-10 unless a new task worktree is deliberately created.
+- `.worktrees/mvp-task-projection` points to `feature/mvp-task-projection` at `d889433`, is clean, and tracks its pushed remote branch.
+- `.worktrees/mvp-validation-review` points to `feature/mvp-validation-review` at `e8a558c`, is clean, and tracks its pushed remote branch.
+- `.worktrees/mvp-journal`, `.worktrees/mvp-workspaces`, and `.worktrees/mvp-worker` contain completed clean feature branches.
+- Preserve all worktrees until the MVP is complete unless the user explicitly authorizes removal.
 
 ## Blockers
 
-- None technical. The run paused because the session usage limit was near and both Wave 2 agents were stopped.
+None.
 
-## Uncommitted Changes
+## Standing Restrictions
 
-- .worktrees/mvp-task-projection: untracked tests/tasks/task-projection.test.ts (partial TDD test file from the interrupted Task 3 agent; preserved intentionally).
-- All other worktrees clean after this handoff commit.
+- Do not modify Vox or Zoe.
+- Do not add voice, email, meetings, personal tasks, devices, distributed execution, real coding harnesses, or future capability packages.
+- Do not merge `feature/zentra-mvp` into `main`.
+- Do not force-push, amend commits, delete branches, create a pull request, or create GitHub issues.
+- Do not expose a general shell capability or inherit arbitrary parent secrets.
+- Do not automatically retry a potentially effectful operation after an uncertain result.
+- Preserve failed worktrees and exact blocker evidence.
+- Fix every Critical and Important finding before integration.
+- Do not claim completion without fresh verification.
 
-## Commands The Next Agent Must Run
+## Final Required Evidence
 
-```bash
-cd /Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp
-git status --short && git log --oneline -5
-git worktree list
-pnpm test
-pnpm check
-```
-
-Expected: clean tree at or after 092c32f, five worktrees as listed, 51/51 tests, check exit 0.
-Then resume at "Active Task And Exact Next Step".
-
-## Standing Rules Reminder
-
-- Never merge feature/zentra-mvp into main; no force-push, no amend, no PRs, no issue creation, no remote branch deletion.
-- Fix every Critical and Important review finding before committing a task.
-- Never bypass tests or reviews; never auto-retry a potentially effectful Git operation after an uncertain result.
+The final report must prove the complete tracer bullet, exact event replay, deterministic cancellation and timeout outcomes, failed-worktree preservation, effect-safe recovery, independent worker and reviewer identities, review evidence bound to the committed diff, candidate-worktree validation, unchanged integration state after candidate failure, serialized integration, reduced child environments, and absence of a general shell capability.
