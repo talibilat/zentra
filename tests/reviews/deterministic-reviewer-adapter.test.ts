@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import {
   DeterministicReviewerAdapter,
+  ProcessReviewerAdapter,
   ReviewerExecutionError,
 } from "../../src/reviews/reviewer-adapter.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
@@ -34,6 +35,29 @@ function getFixturePath(): string {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   return path.join(__dirname, "../../fixtures/deterministic-reviewer.mjs");
+}
+
+function getContentAwareFixturePath(): string {
+  return path.resolve(import.meta.dirname, "../fixtures/content-aware-reviewer.mjs");
+}
+
+function processReviewer(
+  fixture: string,
+  options: { readonly timeoutMs?: number; readonly maxInputBytes?: number; readonly maxOutputBytes?: number } = {},
+): ProcessReviewerAdapter {
+  return new ProcessReviewerAdapter({
+    executable: process.execPath,
+    args: [fixture],
+    timeoutMs: options.timeoutMs ?? 5_000,
+    ...(options.maxInputBytes === undefined ? {} : { maxInputBytes: options.maxInputBytes }),
+    ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+  });
+}
+
+function reviewerScript(source: string): string {
+  const fixture = path.join(makeTempDir(), "reviewer.mjs");
+  writeFileSync(fixture, source, "utf8");
+  return fixture;
 }
 
 describe("DeterministicReviewerAdapter", () => {
@@ -95,6 +119,34 @@ describe("DeterministicReviewerAdapter", () => {
     );
 
     expect(decision.approved).toBe(true);
+  });
+
+  it("denies a dangerous diff even when focused validation passes", async () => {
+    const adapter = processReviewer(getContentAwareFixturePath());
+    const dangerousDiff = [
+      "diff --git a/src/auth.ts b/src/auth.ts",
+      "--- a/src/auth.ts",
+      "+++ b/src/auth.ts",
+      "@@ -1 +1 @@",
+      "-export const requireAuthentication = true;",
+      "+export const requireAuthentication = false;",
+      "",
+    ].join("\n");
+
+    const decision = await adapter.review(
+      {
+        workerId: "worker-1",
+        reviewerId: "reviewer-1",
+        diff: dangerousDiff,
+        validation: validationReport,
+      },
+      AbortSignal.timeout(5_000),
+    );
+
+    expect(validationReport.outcome).toBe("completed");
+    expect(validationReport.exitCode).toBe(0);
+    expect(decision.approved).toBe(false);
+    expect(decision.reason).toMatch(/authentication|dangerous|security/i);
   });
 
   it("rejects when worker and reviewer have the same identity", async () => {
@@ -251,4 +303,121 @@ describe("DeterministicReviewerAdapter", () => {
       );
     },
   );
+});
+
+describe("ProcessReviewerAdapter", () => {
+  const validationReport: ValidationReport = {
+    name: "focused",
+    outcome: "completed",
+    exitCode: 0,
+    stdout: "focused validation passed",
+    stderr: "",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    command: ["node", "--test"],
+    argvSha256: createHash("sha256").update(JSON.stringify(["node", "--test"])).digest("hex"),
+    outputSha256: createHash("sha256")
+      .update(JSON.stringify({ stdout: "focused validation passed", stderr: "" }))
+      .digest("hex"),
+    provenance: {
+      invocationId: "content-review-validation",
+      canonicalCwd: "/tmp",
+      subjectSha256: "content-review-subject",
+    },
+  };
+  const input = {
+    workerId: "worker-1",
+    reviewerId: "reviewer-1",
+    diff: "diff --git a/file b/file\n-old\n+new\n",
+    validation: validationReport,
+  } as const;
+
+  it("sends the exact diff and validation evidence through stdin rather than argv", async () => {
+    const decision = await processReviewer(getContentAwareFixturePath()).review(
+      input,
+      AbortSignal.timeout(5_000),
+    );
+
+    expect(decision.approved).toBe(true);
+    expect(decision.reason).toContain(validationReport.stdout);
+  });
+
+  it("rejects reviewer input that exceeds its byte bound before spawning", async () => {
+    const fixture = reviewerScript('process.stdout.write("should not run\\n");');
+    const adapter = processReviewer(fixture, { maxInputBytes: 128 });
+
+    await expect(adapter.review(
+      { ...input, diff: "x".repeat(129) },
+      AbortSignal.timeout(5_000),
+    )).rejects.toThrow(/input.*limit|evidence.*large|bounded/i);
+  });
+
+  it("fails closed when the reviewer returns an evidence digest mismatch", async () => {
+    const fixture = reviewerScript(`
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      console.log(JSON.stringify({
+        reviewerId: request.reviewerId,
+        decision: "approve",
+        diffSha256: "0".repeat(64),
+        validationSha256: request.validationSha256,
+        decidedAt: new Date().toISOString(),
+        reason: "reviewed"
+      }));
+    `);
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toThrow(/diff.*digest.*mismatch|evidence.*mismatch/i);
+  });
+
+  it("fails closed when the reviewer times out", async () => {
+    const fixture = reviewerScript("setInterval(() => {}, 1_000);");
+
+    await expect(processReviewer(fixture, { timeoutMs: 20 }).review(
+      input,
+      AbortSignal.timeout(5_000),
+    )).rejects.toEqual(expect.objectContaining({ outcome: "timed_out" }));
+  });
+
+  it("fails closed on malformed reviewer output", async () => {
+    const fixture = reviewerScript('process.stdin.resume(); process.stdin.on("end", () => console.log("not json"));');
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toThrow(/invalid|protocol|json/i);
+  });
+
+  it("fails closed when reviewer output exceeds its byte bound", async () => {
+    const fixture = reviewerScript('process.stdin.resume(); process.stdin.on("end", () => process.stdout.write("x".repeat(1_024)));');
+
+    await expect(processReviewer(fixture, { maxOutputBytes: 128 }).review(
+      input,
+      AbortSignal.timeout(5_000),
+    )).rejects.toThrow(/output.*limit|truncat/i);
+  });
+
+  it("requires exactly one reviewer decision", async () => {
+    const fixture = reviewerScript(`
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      const decision = JSON.stringify({ reviewerId: request.reviewerId, decision: "deny", diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "denied" });
+      console.log(decision);
+      console.log(decision);
+    `);
+
+    await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
+      .rejects.toThrow(/exactly one|single.*decision|protocol/i);
+  });
+
+  it("rejects matching worker and reviewer identities before spawning", async () => {
+    const fixture = reviewerScript('process.stdout.write("should not run\\n");');
+
+    await expect(processReviewer(fixture).review(
+      { ...input, reviewerId: input.workerId },
+      AbortSignal.timeout(5_000),
+    )).rejects.toThrow(/identity|differ|same/i);
+  });
 });
