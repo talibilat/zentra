@@ -10,6 +10,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const workerFixture = path.resolve(here, "../../fixtures/deterministic-worker.mjs");
 const printEnvFixture = path.resolve(here, "fixtures/print-env.mjs");
 const spawnGrandchildFixture = path.resolve(here, "fixtures/spawn-grandchild.mjs");
+const exitBeforeDescendantOutputFixture = path.resolve(
+  here,
+  "fixtures/exit-before-descendant-output.mjs",
+);
 
 async function waitForFile(filePath: string, timeoutMs = 5_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
@@ -82,7 +86,9 @@ describe("ProcessSupervisor", () => {
     );
 
     expect(result.outcome).toBe("completed");
+    expect(result.exitCode).toBe(0);
     expect(result.events).toHaveLength(1);
+    expect(result.rawStdout).toContain('"type":"artifact.ready"');
     const event = result.events[0] as { type: string; path: string };
     expect(event.type).toBe("artifact.ready");
     expect(event.path).toBe("out.txt");
@@ -125,6 +131,43 @@ describe("ProcessSupervisor", () => {
     );
 
     expect(result.outcome).toBe("failed");
+    expect(result.exitCode).toBeNull();
+    expect(Buffer.byteLength(result.rawStdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(
+      1024 + Buffer.byteLength("process supervisor: output limit of 1024 bytes exceeded\n"),
+    );
+    expect(result.stderr).toContain("output limit");
+  });
+
+  it("retains at most the shared output byte limit across multiple stdout and stderr chunks", async () => {
+    const supervisor = new ProcessSupervisor({ maxOutputBytes: 64 });
+    const result = await supervisor.execute(
+      request({
+        args: [
+          "-e",
+          'for (let i = 0; i < 20; i++) { process.stdout.write("abcd"); process.stderr.write("WXYZ"); }',
+        ],
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.outcome).toBe("failed");
+    const capturedStderr = result.stderr.replace(
+      /(?:\n)?process supervisor: output limit of 64 bytes exceeded\n$/,
+      "",
+    );
+    expect(Buffer.byteLength(result.rawStdout) + Buffer.byteLength(capturedStderr)).toBeLessThanOrEqual(64);
+  });
+
+  it("fails when descendant output exceeds the limit after the parent exits successfully", async () => {
+    const supervisor = new ProcessSupervisor({ maxOutputBytes: 64 });
+    const result = await supervisor.execute(
+      request({ args: [exitBeforeDescendantOutputFixture] }),
+      new AbortController().signal,
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.exitCode).toBeNull();
+    expect(Buffer.byteLength(result.rawStdout)).toBeLessThanOrEqual(64);
     expect(result.stderr).toContain("output limit");
   });
 
@@ -136,6 +179,8 @@ describe("ProcessSupervisor", () => {
     );
 
     expect(result.outcome).toBe("timed_out");
+    expect(result.exitCode).toBeNull();
+    expect(result.rawStdout).toBe("");
     expect(result.events).toEqual([]);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
@@ -152,6 +197,8 @@ describe("ProcessSupervisor", () => {
     const result = await pending;
 
     expect(result.outcome).toBe("cancelled");
+    expect(result.exitCode).toBeNull();
+    expect(result.rawStdout).toBe("");
     expect(result.events).toEqual([]);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
@@ -185,7 +232,25 @@ describe("ProcessSupervisor", () => {
     );
 
     expect(result.outcome).toBe("failed");
+    expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("unknown flag");
+  });
+
+  it("maps a spawn error to failed with no available exit code", async () => {
+    const supervisor = new ProcessSupervisor();
+    const result = await supervisor.execute(
+      request({ executable: path.join(workspace, "missing-executable"), args: [] }),
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      exitCode: null,
+      events: [],
+      stdout: "",
+      rawStdout: "",
+    });
+    expect(result.stderr).toContain("process supervisor:");
   });
 
   it("resolves an already-aborted signal as cancelled", async () => {
@@ -198,6 +263,8 @@ describe("ProcessSupervisor", () => {
     );
 
     expect(result.outcome).toBe("cancelled");
+    expect(result.exitCode).toBeNull();
+    expect(result.rawStdout).toBe("");
     expect(result.events).toEqual([]);
   });
 
@@ -213,5 +280,6 @@ describe("ProcessSupervisor", () => {
     expect(result.outcome).toBe("completed");
     expect(result.events).toEqual([{ type: "ok" }]);
     expect(result.stdout).toContain("plain text");
+    expect(result.rawStdout).toContain('{"type":"ok"}');
   });
 });
