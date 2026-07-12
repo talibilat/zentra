@@ -32,10 +32,16 @@ Consequently, a successful leader could leave descendants running after Zentra r
 - Group and leader signal denial cannot prevent settlement because absence confirmation is bounded and only `ESRCH` proves absence.
 - Cancellation, timeout, and output-limit decisions override an unsettled successful exit and begin forced termination immediately.
 
+## Round Three Review Fixes
+
+- Reviewer completion now uses the exported `ReviewDecisionSchema`, exactly matching the downstream reviewer adapter's strict validation and rejecting impossible calendar dates before the supervisor can report `completed`.
+- The inherited-stream regression fixture records monotonic timestamps from the leader's `exit` hook and the descendant's `SIGTERM` hook.
+- The stream-grace assertion now measures termination from observed leader exit, excluding process spawn and fixture startup latency, and checks both the configured lower bound and bounded forced-termination window.
+
 ## Tests Added
 
 - Successful leaders leave live same-group descendants, and the tests capture each PID while `execute()` is pending, prove the promise remains pending while the PID exists, and prove absence before resolution.
-- A successful leader leaves inherited stdout and stderr open, and the test proves stream flushing terminates within the configured upper bound.
+- A successful leader leaves inherited stdout and stderr open, and the test proves descendant termination starts no earlier than the configured stream grace after leader exit and remains inside the bounded termination window.
 - A same-group descendant ignores `SIGTERM`, and the test proves bounded escalation to `SIGKILL`, pending-promise behavior, and confirmed process absence.
 - A zero-length forced-confirmation bound exercises the fail-closed `descendant_survived` result.
 - A descendant deliberately creates a new session, and the test records the unsupported macOS process-group escape boundary while cleaning up the escaped process.
@@ -44,15 +50,17 @@ Consequently, a successful leader could leave descendants running after Zentra r
 - Denied process-group signaling and denied group-plus-leader signaling both settle within a fixed upper bound, with tests treating only `ESRCH` as process absence.
 - Post-exit cancellation and timeout bypass the stream and graceful-termination windows.
 - Invalid supervisor and request duration values are rejected.
+- An impossible reviewer calendar date that the downstream schema rejects cannot produce a supervisor `completed` result.
 
 ## Commands And Results
 
 - `pnpm install --frozen-lockfile`: passed, reported `Already up to date` and `Done in 120ms`; `pnpm-lock.yaml` remained unchanged.
 - The initial focused regression run failed four new tests for invalid protocol acceptance, denied leader signaling, post-exit cancellation precedence, and invalid durations, confirming the review findings before implementation.
-- `pnpm exec vitest run tests/workers/process-supervisor.test.ts --reporter=verbose`: passed, 1 file and 26 tests.
+- The round-three focused regression run failed the new invalid-calendar-date test against the previous implementation because the supervisor reported `completed`, while the synchronized stream-grace test passed.
+- `pnpm exec vitest run tests/workers/process-supervisor.test.ts --reporter=verbose`: passed, 1 file and 27 tests.
 - `pnpm exec vitest run tests/workers/process-supervisor.test.ts tests/capabilities/validation-runner.test.ts tests/reviews/deterministic-reviewer-adapter.test.ts tests/reviews/review-gate.test.ts --reporter=verbose`: passed, 4 files and 86 tests.
 - `pnpm exec vitest run tests/workers/process-supervisor.test.ts --reporter=verbose -t "descendant|stream|termination|deadline|abort|timeout|output|protocol|duration|signaling"`: passed, 1 file with 16 selected tests and 10 skipped tests.
-- `pnpm test`: passed, 15 files and 489 tests in 36.88 seconds.
+- `pnpm test`: passed, 15 files and 490 tests in 41.06 seconds.
 - `pnpm check`: passed with exit code 0 and no TypeScript diagnostics.
 - `pnpm build`: passed with exit code 0 and no TypeScript diagnostics.
 - `git diff --check`: passed with no output.
@@ -65,6 +73,7 @@ Consequently, a successful leader could leave descendants running after Zentra r
 - The supervisor settles successfully only after group absence is confirmed.
 - Failure to confirm group absence within the forced termination bound changes the result to `failed` with `process group survived bounded termination` evidence.
 - A zero exit becomes `completed` only when the decoder for that invocation accepts its protocol output.
+- Reviewer output is accepted by the same exported strict schema used by the downstream reviewer adapter.
 - Successful worker fixtures emit one valid `artifact.ready` JSON line, exit with code zero, and have no same-group descendant alive when `execute` resolves.
 - Cancellation and timeout supersede an unsettled exit and immediately enter forced cleanup instead of consuming remaining stream or graceful-termination grace.
 - Monotonic stream and termination deadlines remain bounded across wall-clock changes.
@@ -88,5 +97,6 @@ This implementation does not claim containment of privileged processes, delibera
 
 Initial implementation commit: `102095a92691ef9c5bb06bc81bdada508c0137c0` (`fix: terminate worker descendants after leader exit`).
 Independent review fix commit: `d453bab209dc51e8bd57cc61ef11747a013b89ee` (`fix: harden worker completion supervision`).
+Round three review fix commit: `ef2d8577f2e493d326098cc52f1167d458e4cc78` (`fix: align supervisor protocol validation`).
 Author: `Md Talib <talibilat2019@gmail.com>`.
 Branch: `fix/predeploy-a-011`.
