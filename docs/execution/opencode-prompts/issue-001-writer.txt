@@ -1,0 +1,65 @@
+You are the OpenCode implementation agent for Zentra issue 001.
+
+Repository worktree:
+/Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+
+Branch:
+fix/predeploy-a-001
+
+Read first:
+- AGENTS.md
+- docs/design/orchestrator.md
+- docs/issues/001-critical-contain-configured-validation-execution.md
+
+HUMAN DECISION ALREADY MADE (do not re-decide, do not infer alternatives):
+The repository owner (Md Talib / talibilat) selected **Trusted-Project MVP Mode** for issue 001.
+Implement exactly that closure path. You must NOT implement Contained Mode. You must NOT invent, question, or switch the trust model.
+
+Trusted-Project MVP Mode requirements to implement:
+- A named human explicitly accepts that validation code executes with the host user's authority and is NOT filesystem-contained by executable validation. Encode this acceptance in security documentation.
+- Update AGENTS.md, README.md, and all security claims to state host-user authority and to STOP describing the executable policy as containment. Remove or correct any language implying the allowlist or shell:false provides filesystem containment.
+- Explicitly prohibit hostile repositories and hostile or untrusted project configuration; state deployment is restricted to owner-controlled projects.
+- Implement a strict exact-executable policy that resolves and permits only approved executable identities, to reduce accidental execution, without claiming to stop an approved executable from exercising host-user authority.
+- Policy checks must be canonical-path aware and reject relative, symlinked, env-prefixed, alternately spelled, or replaced executable identities BEFORE process creation.
+
+Exclusive ownership:
+- src/projects/project-config.ts
+- src/capabilities/validation-runner.ts
+- README.md
+- AGENTS.md
+- Any new security documentation file you add (for example docs/security/ or SECURITY-MODEL notes; do NOT create SECURITY.md, which belongs to issue 027).
+- Test files you add covering project-config executable policy and validation-runner enforcement.
+
+Forbidden ownership:
+- src/workers/process-supervisor.ts (issue 011 owns it exclusively; do not edit it).
+- src/reviews/reviewer-adapter.ts, src/cli/main.ts, fixtures/deterministic-reviewer.mjs (issue 009).
+- src/journal/sqlite-journal.ts (issue 013).
+- SECURITY.md (issue 027, human-blocked).
+- The integration worktree. docs/issues/ briefs. package.json, pnpm-lock.yaml, tsconfig.json, workflow files.
+- Do NOT change validation timeout schema/behavior; that is issue 023 and will be serialized after you.
+
+Requirements:
+1. Reproduce the failure sequence first: a configured direct executable (absolute, relative, symlinked, or env-prefixed) currently passes project-config and runs with host authority. Write failing tests proving denied identities are currently accepted.
+2. Follow test-driven development.
+3. Implement only issue 001 Trusted-Project MVP Mode. Do not add unrelated scope.
+4. Satisfy every acceptance criterion for Trusted-Project MVP Mode above.
+5. Add every required test: project-configuration and runner tests for allowed executables and denied absolute, relative, symlinked, and env-prefixed alternatives; exact-executable rejection and documentation-consistency tests (without asserting filesystem containment); regression tests showing focused and full validation still run through the same policy. Verify denial occurs BEFORE process creation.
+6. Final verification: run pnpm test, pnpm check, pnpm build. Run the CLI against an allowed project and a denied executable and verify executable-policy denial occurs before process creation. Review AGENTS.md, README.md, and security language against the Trusted-Project MVP guarantee (host-user authority, not containment).
+7. Run pnpm check.
+8. Run focused tests covering project-config and validation-runner.
+9-16 (control rules): Do not merge branches. Do not modify main or fix/pre-deployment. Do not force-push or amend. Do not create issues or pull requests. Do not answer or re-open the human-decision (it is already made). Preserve exact evidence for any uncertain effect. Commit only after verification passes with a concise issue-specific message and no co-author trailer. Push fix/predeploy-a-001 with upstream tracking.
+
+Non-goals: do not claim an allowlist provides filesystem containment or supports untrusted repositories; do not add distributed/multi-user/container orchestration; do not broaden the validation tool set beyond those explicitly selected for the trusted MVP.
+
+Create docs/execution/issue-001-implementation-report.md in your worktree with:
+- Status
+- Root cause
+- Files changed
+- Tests added
+- Commands and results
+- Acceptance criteria evidence
+- Security boundary
+- Remaining concerns
+- Commit identity
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.

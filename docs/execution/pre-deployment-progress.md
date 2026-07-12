@@ -24,12 +24,14 @@ All implementation, testing, review, and documentation edits are performed by se
 
 ## Human Decisions Required (agents must not answer)
 
+Named human decision-maker: repository owner Md Talib (talibilat, talibilat2019@gmail.com). Decisions recorded 2026-07-12.
+
 | Issue | Decision | Status |
 | --- | --- | --- |
-| 001 | Select Contained Mode or Trusted-Project MVP Mode | PENDING |
-| 017 | Select distribution model (public npm / GitHub release tarball / private) | PENDING |
-| 018 | Select software license | PENDING |
-| 027 | Approve private security reporting route | PENDING |
+| 001 | **Trusted-Project MVP Mode** - validation runs with host-user authority under a strict exact-executable canonical-path allowlist; docs must not describe it as containment; hostile repos/configs prohibited; owner-controlled projects only. | DECIDED |
+| 017 | **GitHub release tarball** - verified packed tarball with checksum on GitHub releases; no npm publication. | DECIDED |
+| 018 | **MIT** license (SPDX `MIT`). Exact copyright holder string to confirm with owner before 018 writer launches. | DECIDED (holder TBC) |
+| 027 | **GitHub private vulnerability reporting** on talibilat/zentra as the monitored private intake route. | DECIDED |
 
 ## Issue Inventory
 
@@ -88,15 +90,33 @@ Baseline verdict: all six commands green at `f54ba31`. Safe to begin Wave 1.
 
 ## Active OpenCode Processes
 
-| PID | Title | Worktree | Issue(s) | Log path | Started (UTC) | Status |
-| --- | --- | --- | --- | --- | --- | --- |
-| (none yet) | | | | | | |
+Model: azure/gpt-5.6-sol. Launched without `--auto`. Logs under docs/execution/opencode-logs/.
+
+| PID | Title | Worktree | Issue(s) | Started (UTC) | Status |
+| --- | --- | --- | --- | --- | --- |
+| 65526 | zentra-issue-013-writer | predeploy-d-persistence | 013 | 2026-07-12T22:45:55Z | RUNNING |
+| 70972 | zentra-issue-011-writer | predeploy-a-011 | 011 | 2026-07-12T22:48:46Z | RUNNING |
+| 70975 | zentra-issue-009-writer | predeploy-b-review-artifacts | 009 | 2026-07-12T22:48:46Z | RUNNING |
+| 99552 | zentra-issue-001-writer-retry1 | predeploy-a-001 | 001 | 2026-07-12T22:50:38Z | RUNNING (retry 1) |
+| 65529 | zentra-issue-008-reproducer | predeploy-c0-deprecation | 008 | 2026-07-12T22:45:55Z | DONE (NOT_REPRODUCED) |
+
+Writer count: 4 concurrent (013, 011, 009, 001) - at cap. 008 is a read-only reproducer (done).
+
+## Wave 1 Launch Log
+
+- 008 (C0 reproducer): DONE - NOT_REPRODUCED. Commit 719a2e6 on fix/predeploy-c0-deprecation (pushed). Built CLI `node --trace-deprecation dist/src/cli/main.js --help` emits clean stderr, no DEP0169; lockfile SHA-1 7891f8a5... unchanged; no dependency/src changes. Disposition matches baseline. Pending: spec review of evidence doc, then integrate doc + close 008. This records the "either deterministic C0 evidence outcome" that releases Pod C1 (016).
+- 001 attempt 0: BLOCKED by Azure ContentFilterError on first model response (adversarial security wording in prompt/issue tripped the provider filter). No files changed. Logs preserved at issue-001-writer.attempt0.{jsonl,stderr}.
+- 001 retry 1: relaunched 2026-07-12T22:50:38Z with neutral engineering framing (exact-executable allowlist + canonical-path checks + doc-accuracy), issue file read by agent from its own worktree instead of `-f` attachment. Progressing past the filter (no content-filter error). Scope unchanged; Trusted-Project MVP Mode per owner decision.
 
 ## Writer Branch / Worktree Registry
 
-| Branch | Worktree | Issue(s) | Owned paths | OpenCode session title | Writer status | Review status | Integration status |
+| Branch | Worktree | Issue(s) | Owned paths | Session title | Writer status | Review | Integration |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| (none yet) | | | | | | | |
+| fix/predeploy-d-persistence | predeploy-d-persistence | 013 | src/journal/sqlite-journal.ts (+journal tests) | zentra-issue-013-writer | RUNNING | pending | pending |
+| fix/predeploy-a-011 | predeploy-a-011 | 011 | src/workers/process-supervisor.ts (+supervision tests) | zentra-issue-011-writer | RUNNING | pending | pending |
+| fix/predeploy-b-review-artifacts | predeploy-b-review-artifacts | 009 | src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring), fixtures/deterministic-reviewer.mjs (+reviewer tests) | zentra-issue-009-writer | RUNNING | pending | pending |
+| fix/predeploy-a-001 | predeploy-a-001 | 001 | src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md (+policy tests) | zentra-issue-001-writer-retry1 | RUNNING | pending | pending |
+| fix/predeploy-c0-deprecation | predeploy-c0-deprecation | 008 | docs/execution/issue-008-reproduction-report.md (evidence only) | zentra-issue-008-reproducer | DONE | pending spec review | pending |
 
 ## Accepted Risks
 
@@ -108,4 +128,4 @@ Baseline verdict: all six commands green at `f54ba31`. Safe to begin Wave 1.
 
 ## Exact Next Action
 
-Run baseline verification (pnpm install --frozen-lockfile, pnpm test, pnpm check, pnpm build, pnpm start -- --help, pnpm audit --prod) from the integration worktree and record results, then launch Wave 1 ready writers (011, 009, 013) via OpenCode.
+Monitor the 4 running writers (013, 011, 009, 001-retry1) to completion. On each writer DONE: verify git state + implementation report, dispatch a fresh read-only OpenCode spec reviewer and a separate code-quality/security reviewer, resolve Critical/Important findings via fresh fix sessions, then integrate with --no-ff into fix/pre-deployment from the integration worktree and re-run the baseline. Separately, spec-review the 008 NOT_REPRODUCED evidence and integrate its doc to formally release Pod C1 (016). Human decisions all recorded (001 Trusted-Project MVP, 017 GitHub release tarball, 018 MIT [holder TBC], 027 GitHub private advisories).

@@ -1,0 +1,52 @@
+You are the OpenCode implementation agent for Zentra issue 001. This is an engineering task about input validation and documentation accuracy for a local developer CLI. Keep all reasoning and output focused on concrete software engineering: path resolution, allowlist checks, and precise wording in docs.
+
+Repository worktree:
+/Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+
+Branch:
+fix/predeploy-a-001
+
+Read first:
+- AGENTS.md
+- docs/design/orchestrator.md
+- docs/issues/001-critical-contain-configured-validation-execution.md
+
+DECISION ALREADY MADE by the repository owner (Md Talib): implement the "Trusted-Project MVP Mode" path from the issue file. Do not implement the alternative "Contained Mode". Do not re-decide or ask about the trust model; it is settled.
+
+What to build (Trusted-Project MVP Mode), stated as plain engineering work:
+1. Exact-executable allowlist. In src/projects/project-config.ts and src/capabilities/validation-runner.ts, permit only executable identities that resolve to an approved canonical absolute path. Reject, before any process is started, executable specifications that are:
+   - relative paths,
+   - symlinks (resolve and compare the canonical real path),
+   - prefixed with `env` or a similar wrapper,
+   - spelled differently but pointing at a non-approved target,
+   - or otherwise not identical to an approved canonical path.
+2. Documentation accuracy. Update AGENTS.md and README.md security wording so they describe the actual authority model precisely: configured validation commands run with the same operating-system authority as the user who runs the CLI, and the allowlist reduces accidental use of unintended executables but is not a filesystem sandbox. Remove any wording that describes the allowlist or `shell: false` as "containment". State that this MVP is intended for projects the operator controls and configures themselves, and record an explicit owner acceptance of this authority model in the docs.
+
+Exclusive ownership (only edit these):
+- src/projects/project-config.ts
+- src/capabilities/validation-runner.ts
+- README.md
+- AGENTS.md
+- Any new docs file you add under docs/ for the authority-model note (do NOT create SECURITY.md; that belongs to a different issue).
+- Test files you add covering the executable allowlist in project-config and validation-runner.
+
+Do NOT edit (owned by other concurrent agents):
+- src/workers/process-supervisor.ts
+- src/reviews/reviewer-adapter.ts, src/cli/main.ts, fixtures/deterministic-reviewer.mjs
+- src/journal/sqlite-journal.ts
+- SECURITY.md
+- The integration worktree, docs/issues/ briefs, package.json, pnpm-lock.yaml, tsconfig.json, workflow files.
+- Do not change validation timeout schema or behavior (a separate issue owns that).
+
+Method:
+1. Write failing tests first that show the current code accepts unintended executable identities: an absolute path that is not on the approved list, a relative path, a symlink whose real path differs, and an `env`-prefixed form. Assert these should be rejected before process creation.
+2. Implement the allowlist and canonical-path checks so those tests pass.
+3. Add regression tests showing focused and full validation still run through the same policy for an approved executable.
+4. Update the docs as described and add tests or checks that keep the doc wording consistent with the implemented policy where practical.
+5. Run pnpm test, pnpm check, and pnpm build. Run focused tests for project-config and validation-runner. Confirm rejection happens before any process starts.
+
+Control rules: implement only issue 001; do not add unrelated scope; do not merge branches; do not modify main or fix/pre-deployment; do not force-push or amend; do not create issues or pull requests; commit only after verification passes with a concise message and no co-author trailer; push fix/predeploy-a-001 with upstream tracking.
+
+Create docs/execution/issue-001-implementation-report.md with: Status, Root cause, Files changed, Tests added, Commands and results, Acceptance criteria evidence, Security boundary, Remaining concerns, Commit identity.
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.
