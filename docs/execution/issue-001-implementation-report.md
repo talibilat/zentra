@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and verification complete pending commit and push.
+Implementation and verification complete.
 
 ## Root Cause
 
@@ -30,13 +30,11 @@ Documentation regression tests require both operator-facing documents to retain 
 
 ## Commands And Results
 
-`pnpm exec vitest run tests/projects/project-config.test.ts tests/capabilities/validation-runner.test.ts` passed with 61 tests after implementation.
-`pnpm exec vitest run tests/projects/executable-policy-docs.test.ts` passed with 2 tests.
-`pnpm test` passed with 15 test files and 486 tests.
-`pnpm check` passed.
-`pnpm build` passed.
-The built CLI accepted a project using `/opt/homebrew/Cellar/node/24.2.0/bin/node` as its canonical executable.
-The built CLI rejected an otherwise equivalent project using `/bin/echo` with exit code 1 and `INVALID_CONFIG`.
+`pnpm install --frozen-lockfile` reported `Already up to date` and completed in 123 ms without changing `pnpm-lock.yaml`.
+`pnpm test` passed with 16 test files and 486 tests in 40.00 seconds.
+`pnpm check` exited successfully with no TypeScript diagnostics.
+`pnpm build` exited successfully with no TypeScript diagnostics.
+`pnpm exec vitest run tests/projects/project-config.test.ts tests/capabilities/validation-runner.test.ts` passed with 2 test files and 61 tests in 575 ms.
 
 ## Acceptance Criteria Evidence
 
@@ -62,4 +60,5 @@ Filesystem isolation would require a separate OS-enforced sandbox or virtual-mac
 ## Commit Identity
 
 Branch: `fix/predeploy-a-001`.
+Implementation commit: `2e91baf5295f5eea7ffda15a74759d112659a86a` (`2e91baf`).
 Commit subject: `fix: enforce canonical validation executables`.
