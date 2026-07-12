@@ -8,8 +8,10 @@ export interface WorkerRequest {
 
 export interface WorkerResult {
   readonly outcome: "completed" | "cancelled" | "timed_out" | "failed";
+  readonly exitCode: number | null;
   readonly events: readonly unknown[];
   readonly stdout: string;
+  readonly rawStdout: string;
   readonly stderr: string;
 }
 

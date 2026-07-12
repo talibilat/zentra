@@ -25,7 +25,14 @@ export class ProcessSupervisor implements WorkerAdapter {
 
   execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
     if (signal.aborted) {
-      return Promise.resolve({ outcome: "cancelled", events: [], stdout: "", stderr: "" });
+      return Promise.resolve({
+        outcome: "cancelled",
+        exitCode: null,
+        events: [],
+        stdout: "",
+        rawStdout: "",
+        stderr: "",
+      });
     }
 
     return new Promise((resolve) => {
@@ -47,8 +54,7 @@ export class ProcessSupervisor implements WorkerAdapter {
 
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
+      let capturedBytes = 0;
       let decision: Decision | undefined;
       let exited = false;
       let settled = false;
@@ -78,7 +84,9 @@ export class ProcessSupervisor implements WorkerAdapter {
 
       const decide = (candidate: Decision): void => {
         if (decision !== undefined) {
-          return;
+          if (decision.kind !== "exit" || candidate.kind !== "output_limit") {
+            return;
+          }
         }
         decision = candidate;
         if (candidate.kind !== "exit") {
@@ -103,24 +111,27 @@ export class ProcessSupervisor implements WorkerAdapter {
         resolve(buildResult(made, stdoutChunks, stderrChunks, this.maxOutputBytes));
       };
 
-      const capture = (
-        chunks: Buffer[],
-        counted: number,
-        chunk: Buffer,
-      ): number => {
-        const total = counted + chunk.byteLength;
-        chunks.push(chunk);
-        if (total > this.maxOutputBytes) {
+      const capture = (chunks: Buffer[], chunk: Buffer): void => {
+        const remaining = this.maxOutputBytes - capturedBytes;
+        if (remaining > 0) {
+          const retainedBytes = Math.min(remaining, chunk.byteLength);
+          chunks.push(
+            retainedBytes === chunk.byteLength
+              ? chunk
+              : Buffer.from(chunk.subarray(0, retainedBytes)),
+          );
+          capturedBytes += retainedBytes;
+        }
+        if (chunk.byteLength > remaining) {
           decide({ kind: "output_limit" });
         }
-        return total;
       };
 
       child.stdout.on("data", (chunk: Buffer) => {
-        stdoutBytes = capture(stdoutChunks, stdoutBytes, chunk);
+        capture(stdoutChunks, chunk);
       });
       child.stderr.on("data", (chunk: Buffer) => {
-        stderrBytes = capture(stderrChunks, stderrBytes, chunk);
+        capture(stderrChunks, chunk);
       });
 
       child.on("error", (error) => {
@@ -157,35 +168,67 @@ function buildResult(
   stderrChunks: readonly Buffer[],
   maxOutputBytes: number,
 ): WorkerResult {
-  const stdout = Buffer.concat(stdoutChunks).subarray(0, maxOutputBytes).toString("utf8");
-  const stderr = Buffer.concat(stderrChunks).subarray(0, maxOutputBytes).toString("utf8");
+  const rawStdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
 
   switch (decision.kind) {
     case "timed_out":
       // Discard any output parsed after the kill decision; no stale worker events.
-      return { outcome: "timed_out", events: [], stdout: "", stderr: "" };
+      return {
+        outcome: "timed_out",
+        exitCode: null,
+        events: [],
+        stdout: "",
+        rawStdout: "",
+        stderr: "",
+      };
     case "cancelled":
-      return { outcome: "cancelled", events: [], stdout: "", stderr: "" };
+      return {
+        outcome: "cancelled",
+        exitCode: null,
+        events: [],
+        stdout: "",
+        rawStdout: "",
+        stderr: "",
+      };
     case "output_limit":
       return {
         outcome: "failed",
+        exitCode: null,
         events: [],
-        stdout,
+        stdout: rawStdout,
+        rawStdout,
         stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: output limit of ${maxOutputBytes} bytes exceeded\n`,
       };
     case "spawn_error":
       return {
         outcome: "failed",
+        exitCode: null,
         events: [],
-        stdout,
+        stdout: rawStdout,
+        rawStdout,
         stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: ${decision.message}\n`,
       };
     case "exit": {
       if (decision.code === 0) {
-        const { events, plain } = parseJsonLines(stdout);
-        return { outcome: "completed", events, stdout: plain, stderr };
+        const { events, plain } = parseJsonLines(rawStdout);
+        return {
+          outcome: "completed",
+          exitCode: 0,
+          events,
+          stdout: plain,
+          rawStdout,
+          stderr,
+        };
       }
-      return { outcome: "failed", events: [], stdout, stderr };
+      return {
+        outcome: "failed",
+        exitCode: decision.code,
+        events: [],
+        stdout: rawStdout,
+        rawStdout,
+        stderr,
+      };
     }
   }
 }
