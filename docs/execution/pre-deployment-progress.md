@@ -95,7 +95,7 @@ Model: azure/gpt-5.6-sol. Launched without `--auto`. Logs under docs/execution/o
 | PID | Title | Worktree | Issue(s) | Started (UTC) | Status |
 | --- | --- | --- | --- | --- | --- |
 | 65526 | zentra-issue-013-writer | predeploy-d-persistence | 013 | 2026-07-12T22:45:55Z | RUNNING |
-| 70972 | zentra-issue-011-writer | predeploy-a-011 | 011 | 2026-07-12T22:48:46Z | RUNNING |
+| 70110 | zentra-issue-011-writer-retry1 | predeploy-a-011 | 011 | 2026-07-12T22:58:14Z | RUNNING (retry 1, --pure) |
 | 70975 | zentra-issue-009-writer | predeploy-b-review-artifacts | 009 | 2026-07-12T22:48:46Z | RUNNING |
 | 99552 | zentra-issue-001-writer-retry1 | predeploy-a-001 | 001 | 2026-07-12T22:50:38Z | RUNNING (retry 1) |
 | 65529 | zentra-issue-008-reproducer | predeploy-c0-deprecation | 008 | 2026-07-12T22:45:55Z | DONE (NOT_REPRODUCED) |
@@ -107,6 +107,8 @@ Writer count: 4 concurrent (013, 011, 009, 001) - at cap. 008 is a read-only rep
 - 008 (C0 reproducer): DONE - NOT_REPRODUCED. Commit 719a2e6 on fix/predeploy-c0-deprecation (pushed). Built CLI `node --trace-deprecation dist/src/cli/main.js --help` emits clean stderr, no DEP0169; lockfile SHA-1 7891f8a5... unchanged; no dependency/src changes. Disposition matches baseline. Pending: spec review of evidence doc, then integrate doc + close 008. This records the "either deterministic C0 evidence outcome" that releases Pod C1 (016).
 - 001 attempt 0: BLOCKED by Azure ContentFilterError on first model response (adversarial security wording in prompt/issue tripped the provider filter). No files changed. Logs preserved at issue-001-writer.attempt0.{jsonl,stderr}.
 - 001 retry 1: relaunched 2026-07-12T22:50:38Z with neutral engineering framing (exact-executable allowlist + canonical-path checks + doc-accuracy), issue file read by agent from its own worktree instead of `-f` attachment. Progressing past the filter (no content-filter error). Scope unchanged; Trusted-Project MVP Mode per owner decision.
+- 011 attempt 0: STALLED - process alive but idle ~3 min (0 CPU, no output) after invoking the superpowers TDD skill; no edits or commits made (worktree clean). Killed PID 70972 (SIGTERM, confirmed exited). Logs preserved at issue-011-writer.attempt0.{jsonl,stderr}.
+- 011 retry 1: relaunched 2026-07-12T22:58:14Z with `--pure` (no external plugins) to bypass the skill orchestration that hung. Progressing normally. Scope unchanged.
 
 ## Writer Branch / Worktree Registry
 
