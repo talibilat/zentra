@@ -1,21 +1,21 @@
 # Zentra MVP Execution Progress
 
 ## Current State
-- Current phase: Parallel Wave 1 (Tasks 2, 4, 5)
-- Active tasks: Task 2 (journal), Task 4 (workspaces), Task 5 (worker)
-- Last verified integration commit: Task 1 commit on feature/zentra-mvp
+- Current phase: Parallel Wave 2 (Tasks 3 and 6)
+- Active tasks: Task 3 (task projection), Task 6 (validation/review gates)
+- Last verified integration commit: 23ad815 (Wave 1 merged; 51/51 tests, check, build all pass)
 - Blocking issue: none
-- Next action: Run Wave 1 implementation agents in dedicated worktrees, then review, commit, push each branch.
+- Next action: Run Wave 2 implementation agents in dedicated worktrees, then review, commit, push, integrate.
 
 ## Task Ledger
 | Task | Branch | Worktree | Status | Commit | Focused tests | Review | Integrated |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Docs baseline | feature/zentra-mvp | .worktrees/zentra-mvp | done | 823c18a | n/a | n/a | yes |
 | Task 1 contracts/scaffold | feature/zentra-mvp | .worktrees/zentra-mvp | done | see git log | 5/5 pass | spec: compliant; quality: 1 Important fixed, 2 plan-mandated | yes |
-| Task 2 journal | feature/mvp-journal | .worktrees/mvp-journal | pending | - | - | - | - |
-| Task 3 task projection | feature/mvp-task-projection | .worktrees/mvp-task-projection | pending | - | - | - | - |
-| Task 4 projects/workspaces | feature/mvp-workspaces | .worktrees/mvp-workspaces | pending | - | - | - | - |
-| Task 5 worker supervisor | feature/mvp-worker | .worktrees/mvp-worker | pending | - | - | - | - |
+| Task 2 journal | feature/mvp-journal | .worktrees/mvp-journal | done | 8e62183 | 8/8 pass | spec: compliant; quality: 1 Important fixed (guarded ROLLBACK) | yes (23ad815) |
+| Task 3 task projection | feature/mvp-task-projection | .worktrees/mvp-task-projection | in progress | - | - | - | - |
+| Task 4 projects/workspaces | feature/mvp-workspaces | .worktrees/mvp-workspaces | done | 33b5ba2 | 39/39 pass | spec: compliant; quality: 3 Important fixed (shell guard hardened, binary diff digest, truncation refusal) + 4 Minors fixed | yes (23ad815) |
+| Task 5 worker supervisor | feature/mvp-worker | .worktrees/mvp-worker | done | eded574 | 14/14 pass x2 | spec: 1 Important fixed (grandchild group-kill test); quality: 1 Important fixed (exit-based settle with flush grace) | yes (23ad815) |
 | Task 6 validation/review | feature/mvp-validation-review | .worktrees/mvp-validation-review | pending | - | - | - | - |
 | Task 7 integration queue | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
 | Task 8 tracer bullet | feature/zentra-mvp | .worktrees/zentra-mvp | pending | - | - | - | - |
