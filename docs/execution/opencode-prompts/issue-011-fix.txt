@@ -1,0 +1,27 @@
+You are the OpenCode fix agent for Zentra issue 011, addressing independent review findings in this worktree. Engineering work on process supervision for a local developer CLI.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; implementation is already committed (102095a). Add fixes on top with new commits (no amend, no force-push).
+
+The independent spec and code-quality reviews found these REQUIRED FIXES:
+1. Enforce that reporting `completed` requires VALID PROTOCOL OUTPUT, not merely process-exit success. Separate process-exit success from protocol-level completion; use an invocation-specific decoder for the protocol each caller (worker vs validation) actually exercises. Success = leader exited successfully AND protocol output is valid AND no owned descendant remains.
+2. Use a MONOTONIC clock (process.hrtime.bigint) for the stream-grace and forced-termination deadlines, and guard against invalid/negative/NaN duration values.
+3. Fix the unbounded-wait risk when group/leader signaling fails (e.g. EPERM/denied): the supervisor must always settle within a fixed bound even if signals are denied; treat ESRCH as proof of absence.
+4. Define and enforce cancellation/timeout precedence during post-exit cleanup: if abort or timeout occurs before settlement, force immediate termination rather than waiting through the full stream and graceful-termination windows.
+
+Required test changes:
+5. Change the successful-descendant tests to capture the descendant PID while execute() is still pending and prove the promise does NOT resolve while that PID exists; assert resolution only after PID absence.
+6. Add an upper-bound assertion or deterministic synchronization to the inherited-open-stream test proving termination follows the configured bounded stream grace.
+7. Update the success fixtures to emit output VALID for the protocol exercised by each test (not an unrecognized worker.completed event).
+8. Add regression tests simulating EPERM/denied group and leader signaling, asserting the supervisor settles within a fixed bound, using ESRCH-only process-absence checks.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and the focused worker supervision/cancellation/timeout/output-limit tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-a-011
+- Update docs/execution/issue-011-implementation-report.md with the fixes and new commit ids.
+
+Owned files only: src/workers/process-supervisor.ts and worker supervision test files/fixtures, plus the report. Do not touch other files.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.
