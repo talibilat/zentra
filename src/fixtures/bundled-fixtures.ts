@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 export const BUNDLED_FIXTURE_SHA256 = Object.freeze({
   "deterministic-worker.mjs": "9839f5c1ae46c984bd0a3180b4dcaa9967bf81b73610b024d0a38538f973ce22",
-  "deterministic-reviewer.mjs": "bf28776ad1e54b7ce7117ae91bec10f19a9c96d551e5e5bfbc3ec7bd950f4745",
 });
 
 export type BundledFixtureName = keyof typeof BUNDLED_FIXTURE_SHA256;
@@ -61,7 +60,6 @@ export function resolveBundledFixtures(
 ): BundledFixturePaths {
   return Object.freeze({
     "deterministic-worker.mjs": resolveBundledFixture("deterministic-worker.mjs", anchor),
-    "deterministic-reviewer.mjs": resolveBundledFixture("deterministic-reviewer.mjs", anchor),
   });
 }
 
