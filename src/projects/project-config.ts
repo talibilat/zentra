@@ -1,10 +1,31 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
-// Best-effort guard against configuring shell "-c" wrappers as validation
-// commands. This is NOT a security boundary: the real boundary is that only
-// named project commands run and they are spawned with shell: false. This
-// check merely catches obvious misconfiguration.
+export const APPROVED_VALIDATION_EXECUTABLE = realpathSync(process.execPath);
+
+export function assertApprovedValidationExecutable(executable: string): void {
+  if (!path.isAbsolute(executable)) {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+
+  let canonicalExecutable: string;
+  try {
+    canonicalExecutable = realpathSync(executable);
+  } catch {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+
+  if (
+    executable !== canonicalExecutable ||
+    canonicalExecutable !== APPROVED_VALIDATION_EXECUTABLE
+  ) {
+    throw new Error("Validation executable must be an approved canonical absolute path");
+  }
+}
+
+// This catches obvious shell-wrapper misconfiguration before the stricter
+// executable identity check reports the generic allowlist error.
 const FORBIDDEN_SHELLS = new Set([
   "sh",
   "bash",
@@ -78,6 +99,16 @@ const CommandSchema = z
   .refine((command) => !isShellWrapperCommand(command), {
     message:
       "Validation commands must be direct executable invocations, not shell -c wrappers",
+  })
+  .superRefine((command, context) => {
+    try {
+      assertApprovedValidationExecutable(command[0]);
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid validation executable",
+      });
+    }
   });
 
 export const ProjectConfigSchema = z.object({

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,8 +14,8 @@ const validConfig = {
   integrationBranch: "zentra/integration",
   worktreeRoot: "/absolute/path/to/worktrees",
   validations: {
-    focused: ["node", "--test", "test/greeting.test.mjs"],
-    full: ["node", "--test"],
+    focused: [process.execPath, "--test", "test/greeting.test.mjs"],
+    full: [process.execPath, "--test"],
   },
 };
 
@@ -24,7 +24,7 @@ describe("ProjectConfigSchema", () => {
     const parsed = ProjectConfigSchema.parse(validConfig);
     expect(parsed.projectId).toBe("fixture-project");
     expect(parsed.validations.focused).toEqual([
-      "node",
+      process.execPath,
       "--test",
       "test/greeting.test.mjs",
     ]);
@@ -186,20 +186,40 @@ describe("ProjectConfigSchema", () => {
     }
   });
 
-  it("still accepts env-prefixed non-shell commands", () => {
-    const parsed = ProjectConfigSchema.parse({
-      ...validConfig,
-      validations: {
-        ...validConfig.validations,
-        focused: ["env", "NODE_ENV=test", "node", "--test"],
-      },
-    });
-    expect(parsed.validations.focused).toEqual([
-      "env",
-      "NODE_ENV=test",
-      "node",
-      "--test",
-    ]);
+  it.each([
+    ["absolute executable outside the allowlist", "/bin/echo"],
+    ["relative executable", "node"],
+    ["env-prefixed executable", "/usr/bin/env"],
+  ])("rejects an %s", (_case, executable) => {
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focused: [executable, process.execPath, "--test"],
+        },
+      }),
+    ).toThrow(/approved canonical absolute path/);
+  });
+
+  it("rejects a symlink to the approved executable", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "zentra-executable-"));
+    const executable = path.join(dir, "node-link");
+    symlinkSync(process.execPath, executable);
+
+    try {
+      expect(() =>
+        ProjectConfigSchema.parse({
+          ...validConfig,
+          validations: {
+            ...validConfig.validations,
+            focused: [executable, "--test"],
+          },
+        }),
+      ).toThrow(/approved canonical absolute path/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

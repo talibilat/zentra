@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
+import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
 
 const cleanup: string[] = [];
 
@@ -42,7 +43,69 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+class CountingSupervisor extends ProcessSupervisor {
+  readonly requests: WorkerRequest[] = [];
+
+  override execute(request: WorkerRequest, _signal: AbortSignal): Promise<WorkerResult> {
+    this.requests.push(request);
+    return Promise.resolve({
+      outcome: "completed",
+      exitCode: 0,
+      events: [],
+      stdout: "",
+      rawStdout: "",
+      stderr: "",
+    });
+  }
+}
+
 describe("ValidationRunner", () => {
+  it("rejects unintended executable identities before process creation", async () => {
+    const cwd = await workspace();
+    const executableLink = path.join(cwd, "node-link");
+    await symlink(process.execPath, executableLink);
+    const deniedCommands = [
+      ["/bin/echo", "unapproved"],
+      ["node", "--version"],
+      [executableLink, "--version"],
+      ["/usr/bin/env", process.execPath, "--version"],
+    ] as const;
+
+    for (const command of deniedCommands) {
+      const supervisor = new CountingSupervisor();
+      await expect(
+        new ValidationRunner(supervisor).run(
+          project(command),
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).rejects.toThrow(/approved canonical absolute path/);
+      expect(supervisor.requests).toHaveLength(0);
+    }
+  });
+
+  it.each(["focused", "full"] as const)(
+    "runs approved %s validation through the executable policy",
+    async (name) => {
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      const configured = project([process.execPath, "--version"]);
+      configured.validations.full = [process.execPath, "--version"];
+
+      await expect(
+        new ValidationRunner(supervisor).run(
+          configured,
+          name,
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).resolves.toMatchObject({ name, outcome: "completed", exitCode: 0 });
+      expect(supervisor.requests).toHaveLength(1);
+      expect(supervisor.requests[0]?.executable).toBe(process.execPath);
+    },
+  );
+
   it("reports named command identity, exact argv digest, timing, outcome, and exit code", async () => {
     const cwd = await workspace();
     const command = [process.execPath, "-e", 'process.stdout.write("ok")'] as const;
