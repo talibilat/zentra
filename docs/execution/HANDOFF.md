@@ -6,7 +6,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 ## Current Branch And Commit
 
 - Integration worktree: `/Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp`.
-- Integration branch: `feature/zentra-mvp` at `ccec845`, pushed to `origin/feature/zentra-mvp`.
+- Integration branch: `feature/zentra-mvp` at `2e553e8`, pushed to `origin/feature/zentra-mvp`.
 - `main` remains unchanged and must not receive the MVP branch.
 - Repository-local Git identity is configured as `Md Talib / talibilat2019@gmail.com`.
 
@@ -20,6 +20,7 @@ The authoritative implementation specification is `docs/plans/mvp.md`, and the a
 - Task 3 durable task projection: `d889433`, merged at `05b20fa`.
 - Task 6 validation and independent review: `e8a558c`, merged at `55633dc`.
 - Task 7 serialized reviewed integration: `ccec845`.
+- Task 8 complete verified tracer bullet: `2e553e8`.
 
 ## Wave 2 Review Outcomes
 
@@ -41,16 +42,16 @@ Independent specification and quality re-reviews reported no unresolved Critical
 - Task 3 branch focused verification: 46/46 tests passed and `pnpm check` passed.
 - Task 6 branch verification: 50 focused Task 5/6 tests passed, 92/92 full branch tests passed, and `pnpm check` passed.
 - Task 7 verification: 44/44 focused integration tests passed, 187/187 full tests passed, `pnpm check` passed, and `pnpm build` passed.
+- Task 8 verification: 59/59 focused tracer tests passed, 293/293 full tests passed, `pnpm check` passed, and `pnpm build` passed.
 
 ## Exact Next Step
 
-Implement Task 8 from `docs/plans/mvp.md` lines 1065-1160.
-The end-to-end test must create a real temporary Git repository, run the deterministic worker, retain patch and integration evidence, run focused validation, obtain and verify an independent review, commit only reviewed paths, integrate through Task 7's validated candidate, and reach `completed`.
-Every accepted state transition must be journaled before the following effect.
-Every failure must map to one canonical terminal outcome and preserve the ticket worktree.
-The final event replay must reconstruct the exact terminal task view.
+Implement Task 9 from `docs/plans/mvp.md` lines 1164-1233.
+Recovery must inspect journal, project, worktree, branch, commit, and integration evidence without performing a new effect.
+Safe preparation may resume, but uncertain worker, commit, and integration effects must enter reconciliation and must never be repeated automatically.
+A completed integration may append completion exactly once only after its durable source, result, review, validation, and exact integration-ref facts are established.
 
-After Task 8 passes independent specification and quality review, continue Tasks 9 and 10 sequentially.
+After Task 9 passes independent specification and quality review, continue Task 10.
 Run focused verification and full `pnpm test`, `pnpm check`, and `pnpm build` gates before each integration.
 
 ## Active Worktrees
