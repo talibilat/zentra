@@ -7,8 +7,10 @@
     "zentra": "./dist/src/cli/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build-package.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "package:verify": "node scripts/verify-package.mjs",
+    "prepack": "pnpm build && pnpm package:verify",
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "node dist/src/cli/main.js"
