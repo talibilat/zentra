@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ReviewGate } from "../../src/reviews/review-gate.js";
+import {
+  isVerifiedReviewDecision,
+  ReviewGate,
+} from "../../src/reviews/review-gate.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
 import {
   canonicalValidationDigest,
@@ -51,6 +54,62 @@ describe("ReviewGate", () => {
   it("approves when all conditions pass", () => {
     const verified = gate.verify(input, decision);
     expect(verified).toEqual(decision);
+    expect(verified).not.toBe(decision);
+    expect(Object.isFrozen(verified)).toBe(true);
+    expect(Object.isFrozen(decision)).toBe(false);
+  });
+
+  it("reads accessor-backed decision fields once into the verified snapshot", () => {
+    const reads = new Map<keyof ReviewDecision, number>();
+    const values: ReviewDecision = { ...decision };
+    const retargeted: ReviewDecision = {
+      reviewerId: "attacker",
+      approved: false,
+      diffSha256: "0".repeat(64),
+      validationSha256: "1".repeat(64),
+      decidedAt: new Date(0).toISOString(),
+      reason: "retargeted",
+    };
+    const source = {} as ReviewDecision;
+    for (const key of Object.keys(values) as (keyof ReviewDecision)[]) {
+      Object.defineProperty(source, key, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          const count = (reads.get(key) ?? 0) + 1;
+          reads.set(key, count);
+          return count === 1 ? values[key] : retargeted[key];
+        },
+      });
+      reads.set(key, 0);
+    }
+
+    const verified = gate.verify(input, source);
+
+    expect(verified).toEqual(values);
+    expect([...reads.values()]).toEqual([1, 1, 1, 1, 1, 1]);
+    expect(isVerifiedReviewDecision(verified)).toBe(true);
+    expect(isVerifiedReviewDecision(source)).toBe(false);
+  });
+
+  it("registers only a captured snapshot from a retargeting Proxy", () => {
+    const values: ReviewDecision = { ...decision };
+    const reads = new Map<PropertyKey, number>();
+    const source = new Proxy(values, {
+      get(target, property, receiver) {
+        const count = (reads.get(property) ?? 0) + 1;
+        reads.set(property, count);
+        if (count > 1 && property === "diffSha256") return "0".repeat(64);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const verified = gate.verify(input, source);
+
+    expect(verified).toEqual(values);
+    expect(verified).not.toBe(source);
+    expect(isVerifiedReviewDecision(verified)).toBe(true);
+    expect(isVerifiedReviewDecision(source)).toBe(false);
   });
 
   it("rejects when diff is empty", () => {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -120,6 +120,25 @@ describe("WorktreeManager", () => {
     const dirty = await manager.inspect(lease);
     expect(dirty.dirty).toBe(true);
     expect(dirty.diff).toContain("feature.txt");
+  });
+
+  it("does not execute a configured external diff program", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const lease = await manager.create(project, "task-no-external-diff");
+    const marker = path.join(baseDir, "external-diff-ran");
+    const executable = path.join(baseDir, "external-diff.js");
+    writeFileSync(
+      executable,
+      `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")\n`,
+    );
+    chmodSync(executable, 0o755);
+    await gitOk(repoPath, ["config", "diff.external", executable]);
+    writeFileSync(path.join(lease.path, "README.md"), "changed\n", "utf8");
+
+    const inspected = await manager.inspect(lease);
+
+    expect(inspected.diff).toContain("changed");
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("commits only explicitly reviewed relative paths", async () => {

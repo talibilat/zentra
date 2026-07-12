@@ -1,0 +1,696 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, lstat, mkdtemp, realpath, rmdir } from "node:fs/promises";
+import path from "node:path";
+import type {
+  ValidationReport,
+  ValidationRunner,
+} from "../capabilities/validation-runner.js";
+import type { ProjectConfig } from "../projects/project-config.js";
+import type { ReviewDecision } from "../reviews/reviewer-adapter.js";
+import { isVerifiedReviewDecision } from "../reviews/review-gate.js";
+import type { CommandResult, GitClient } from "../workspaces/git-client.js";
+import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
+
+const projectTails = new Map<string, Promise<void>>();
+const GIT_OPERATION_TIMEOUT_MS = 30_000;
+
+export interface IntegrationReceipt {
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly sourceCommit: string;
+  readonly resultCommit: string | null;
+  readonly review: ReviewDecision;
+  readonly validation: ValidationReport;
+  readonly outcome: "completed" | "cancelled" | "timed_out" | "failed";
+}
+
+export interface CleanupFailure {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly candidatePath: string;
+  readonly reason: string;
+  readonly timestamp: string;
+}
+
+export class IntegrationQueue {
+  private readonly cleanupFailures: CleanupFailure[] = [];
+
+  constructor(
+    private readonly git: GitClient,
+    private readonly validations: ValidationRunner,
+  ) {}
+
+  getCleanupFailures(): readonly CleanupFailure[] {
+    return [...this.cleanupFailures];
+  }
+
+  integrate(input: {
+    project: ProjectConfig;
+    lease: WorkspaceLease;
+    review: ReviewDecision;
+    signal: AbortSignal;
+  }): Promise<IntegrationReceipt> {
+    return withProjectLock(input.project.projectId, () =>
+      this.integrateUnderLock(input),
+    );
+  }
+
+  private async integrateUnderLock(input: {
+    project: ProjectConfig;
+    lease: WorkspaceLease;
+    review: ReviewDecision;
+    signal: AbortSignal;
+  }): Promise<IntegrationReceipt> {
+    const { project, lease, review, signal } = input;
+    const integrationRef = `refs/heads/${project.integrationBranch}`;
+    let candidatePath: string | null = null;
+    let candidateOwned = false;
+    let candidateRoot: string | null = null;
+    let candidateRootCreated = false;
+    let preserveCandidate = false;
+
+    const source = await this.git.run(
+      project.repositoryPath,
+      ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
+      { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+    );
+    if (source.exitCode !== 0 || source.truncated) {
+      throw new Error(gitFailure("read source commit", source));
+    }
+    const sourceCommit = source.stdout.trim();
+    if (sourceCommit === "") {
+      throw new Error("read source commit returned an empty identity");
+    }
+
+    const receipt = (
+      outcome: IntegrationReceipt["outcome"],
+      validation: ValidationReport,
+      resultCommit: string | null = null,
+    ): IntegrationReceipt => ({
+      taskId: lease.taskId,
+      projectId: project.projectId,
+      sourceCommit,
+      resultCommit,
+      review,
+      validation,
+      outcome,
+    });
+    const terminationReceipt = (
+      operation: string,
+      result: CommandResult,
+    ): IntegrationReceipt | null => {
+      if (result.termination === null) return null;
+      return receipt(
+        result.termination,
+        unavailableValidation(
+          project,
+          result.termination,
+          `${operation} was ${result.termination}`,
+        ),
+      );
+    };
+
+    try {
+      if (!isVerifiedReviewDecision(review)) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "integration requires a verified review decision"),
+        );
+      }
+      if (signal.aborted) {
+        return receipt(
+          "cancelled",
+          unavailableValidation(project, "cancelled", "integration was cancelled before validation"),
+        );
+      }
+
+      const symbolicIntegrationRef = await this.git.run(
+        project.repositoryPath,
+        ["symbolic-ref", "--quiet", integrationRef],
+        { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+      );
+      const symbolicTermination = terminationReceipt(
+        "integration ref inspection",
+        symbolicIntegrationRef,
+      );
+      if (symbolicTermination !== null) return symbolicTermination;
+      if (symbolicIntegrationRef.exitCode === 0) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "integration ref must not be symbolic"),
+        );
+      }
+      if (symbolicIntegrationRef.exitCode !== 1 || symbolicIntegrationRef.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            gitFailure("inspect integration ref", symbolicIntegrationRef),
+          ),
+        );
+      }
+
+      const original = await this.git.run(
+        project.repositoryPath,
+        ["rev-parse", "--verify", `${integrationRef}^{commit}`],
+        { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+      );
+      const originalTermination = terminationReceipt("integration head read", original);
+      if (originalTermination !== null) return originalTermination;
+      if (original.exitCode !== 0 || original.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            gitFailure("read integration commit", original),
+          ),
+        );
+      }
+      const originalIntegrationCommit = original.stdout.trim();
+
+      const mergeBase = await this.git.run(
+        project.repositoryPath,
+        ["merge-base", originalIntegrationCommit, sourceCommit],
+        { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+      );
+      const mergeBaseTermination = terminationReceipt("merge-base read", mergeBase);
+      if (mergeBaseTermination !== null) return mergeBaseTermination;
+      if (mergeBase.exitCode !== 0 || mergeBase.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", gitFailure("find merge base", mergeBase)),
+        );
+      }
+
+      const committedDiff = await this.git.run(project.repositoryPath, [
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        mergeBase.stdout.trim(),
+        sourceCommit,
+      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      const diffTermination = terminationReceipt("committed diff read", committedDiff);
+      if (diffTermination !== null) return diffTermination;
+      if (committedDiff.exitCode !== 0 || committedDiff.truncated) {
+        const reason = committedDiff.truncated
+          ? "committed branch diff exceeded the Git output capture limit"
+          : gitFailure("read committed branch diff", committedDiff);
+        return receipt("failed", unavailableValidation(project, "failed", reason));
+      }
+
+      const diffSha256 = sha256(committedDiff.stdout);
+      if (!review.approved || review.diffSha256 !== diffSha256) {
+        const reason = !review.approved
+          ? `review was not approved: ${review.reason}`
+          : `review digest mismatch: reviewed ${review.diffSha256}, committed ${diffSha256}`;
+        return receipt("failed", unavailableValidation(project, "failed", reason));
+      }
+
+      const externalPrograms = await this.git.run(project.repositoryPath, [
+        "config",
+        "--get-regexp",
+        "^(merge\\..*\\.driver|diff\\.external|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process))$",
+      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      const configTermination = terminationReceipt(
+        "external Git configuration inspection",
+        externalPrograms,
+      );
+      if (configTermination !== null) return configTermination;
+      if (externalPrograms.exitCode === 0 && externalPrograms.stdout.trim() !== "") {
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            "configured external Git programs are not allowed",
+          ),
+        );
+      }
+      if (externalPrograms.exitCode !== 1 || externalPrograms.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            gitFailure("inspect external Git configuration", externalPrograms),
+          ),
+        );
+      }
+
+      const canonicalWorktreeRoot = await realpath(project.worktreeRoot);
+      candidateRoot = await mkdtemp(
+        path.join(canonicalWorktreeRoot, ".zentra-integration-"),
+      );
+      candidateRootCreated = true;
+      await chmod(candidateRoot, 0o700);
+      if (path.dirname(candidateRoot) !== canonicalWorktreeRoot) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "private candidate root escaped worktree root"),
+        );
+      }
+      candidatePath = path.resolve(candidateRoot, randomUUID());
+      const relativeCandidate = path.relative(candidateRoot, candidatePath);
+      if (
+        relativeCandidate === "" ||
+        relativeCandidate.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativeCandidate) ||
+        path.dirname(candidatePath) !== candidateRoot
+      ) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "candidate path escaped its owned root"),
+        );
+      }
+      const candidateRootStat = await lstat(candidateRoot);
+      if (
+        !candidateRootStat.isDirectory() ||
+        candidateRootStat.isSymbolicLink() ||
+        (candidateRootStat.mode & 0o777) !== 0o700
+      ) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "candidate root must be a real directory"),
+        );
+      }
+      if ((await realpath(candidateRoot)) !== candidateRoot) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "candidate root must be canonical"),
+        );
+      }
+      let candidate: CommandResult;
+      try {
+        candidate = await this.git.run(project.repositoryPath, [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=false",
+          "worktree",
+          "add",
+          "--detach",
+          candidatePath,
+          originalIntegrationCommit,
+        ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      } catch (error) {
+        preserveCandidate = true;
+        this.recordCleanupFailure(
+          project,
+          lease,
+          candidatePath,
+          `candidate creation result is uncertain: ${errorMessage(error)}`,
+        );
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            `candidate creation result is uncertain: ${errorMessage(error)}`,
+          ),
+        );
+      }
+      if (candidate.termination !== null) {
+        preserveCandidate = true;
+        this.recordCleanupFailure(
+          project,
+          lease,
+          candidatePath,
+          `candidate creation was ${candidate.termination}`,
+        );
+        return terminationReceipt("candidate creation", candidate)!;
+      }
+      if (candidate.exitCode !== 0) {
+        preserveCandidate = true;
+        this.recordCleanupFailure(
+          project,
+          lease,
+          candidatePath,
+          gitFailure("create candidate", candidate),
+        );
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", gitFailure("create candidate", candidate)),
+        );
+      }
+      candidateOwned = true;
+      if (candidate.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", "candidate creation output was truncated"),
+        );
+      }
+
+      const merge = await this.git.run(candidatePath, [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "merge.gpgSign=false",
+        "-c",
+        "core.fsmonitor=false",
+        "merge",
+        "--no-ff",
+        "--no-edit",
+        "--no-verify",
+        sourceCommit,
+      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      const mergeTermination = terminationReceipt("candidate merge", merge);
+      if (mergeTermination !== null) return mergeTermination;
+      if (merge.exitCode !== 0 || merge.truncated) {
+        return receipt(
+          "failed",
+          unavailableValidation(project, "failed", gitFailure("merge conflict", merge)),
+        );
+      }
+
+      const candidateHead = await this.git.run(candidatePath, ["rev-parse", "HEAD"], {
+        signal,
+        timeoutMs: GIT_OPERATION_TIMEOUT_MS,
+      });
+      const headTermination = terminationReceipt("candidate HEAD read", candidateHead);
+      if (headTermination !== null) return headTermination;
+      if (candidateHead.exitCode !== 0) {
+        return receipt(
+          "failed",
+          unavailableValidation(
+            project,
+            "failed",
+            gitFailure("read candidate result commit", candidateHead),
+          ),
+        );
+      }
+      const resultCommit = candidateHead.stdout.trim();
+
+      let validation: ValidationReport;
+      try {
+        validation = await this.validations.run(project, "full", candidatePath, signal);
+      } catch (error) {
+        return receipt(
+          signal.aborted ? "cancelled" : "failed",
+          unavailableValidation(
+            project,
+            signal.aborted ? "cancelled" : "failed",
+            `full validation could not run: ${errorMessage(error)}`,
+          ),
+        );
+      }
+
+      if (validation.outcome !== "completed" || validation.exitCode !== 0) {
+        return receipt(validation.outcome === "completed" ? "failed" : validation.outcome, validation);
+      }
+      const validatedHead = await this.git.run(candidatePath, ["rev-parse", "HEAD"], {
+        signal,
+        timeoutMs: GIT_OPERATION_TIMEOUT_MS,
+      });
+      const validatedHeadTermination = terminationReceipt(
+        "post-validation HEAD read",
+        validatedHead,
+      );
+      if (validatedHeadTermination !== null) {
+        return receipt(validatedHead.termination!, validation);
+      }
+      if (
+        validatedHead.exitCode !== 0 ||
+        validatedHead.truncated ||
+        validatedHead.stdout.trim() !== resultCommit
+      ) {
+        return receipt("failed", validation);
+      }
+      const validatedStatus = await this.git.run(candidatePath, [
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      const statusTermination = terminationReceipt(
+        "post-validation status read",
+        validatedStatus,
+      );
+      if (statusTermination !== null) {
+        return receipt(validatedStatus.termination!, validation);
+      }
+      if (
+        validatedStatus.exitCode !== 0 ||
+        validatedStatus.truncated ||
+        validatedStatus.stdout !== ""
+      ) {
+        return receipt("failed", validation);
+      }
+      if (signal.aborted) {
+        return receipt("cancelled", validation);
+      }
+
+      let update: CommandResult;
+      let uncertainUpdateReason: string | null = null;
+      try {
+        update = await this.git.run(
+          project.repositoryPath,
+          [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "update-ref",
+            "--no-deref",
+            integrationRef,
+            resultCommit,
+            originalIntegrationCommit,
+          ],
+          { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+        );
+        if (update.termination !== null) {
+          uncertainUpdateReason = `update-ref was ${update.termination}`;
+        }
+      } catch (error) {
+        update = {
+          stdout: "",
+          stderr: errorMessage(error),
+          exitCode: -1,
+          truncated: false,
+          termination: null,
+        };
+        uncertainUpdateReason = `update-ref result is uncertain: ${errorMessage(error)}`;
+      }
+      if (uncertainUpdateReason !== null) {
+        let reconciled: CommandResult;
+        try {
+          reconciled = await this.git.run(
+            project.repositoryPath,
+            [
+              "for-each-ref",
+              "--format=%(refname)%09%(objectname)%09%(symref)",
+              "--count=2",
+              integrationRef,
+            ],
+            { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
+          );
+        } catch (error) {
+          reconciled = {
+            stdout: "",
+            stderr: errorMessage(error),
+            exitCode: -1,
+            truncated: false,
+            termination: null,
+          };
+        }
+        let reconciledHead: string | null = null;
+        let reconciliationIssue: string | null = null;
+        if (
+          reconciled.exitCode === 0 &&
+          reconciled.termination === null &&
+          !reconciled.truncated
+        ) {
+          const lines = reconciled.stdout.split(/\r?\n/).filter((line) => line !== "");
+          if (lines.length === 1) {
+            const fields = lines[0]!.split("\t");
+            const refName = fields[0] ?? "";
+            const objectName = fields[1] ?? "";
+            const symbolicTarget = fields[2] ?? "";
+            if (
+              fields.length === 3 &&
+              refName === integrationRef &&
+              /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(objectName)
+            ) {
+              if (symbolicTarget === "") reconciledHead = objectName;
+              else reconciliationIssue = `integration ref became symbolic: ${symbolicTarget}`;
+            } else {
+              reconciliationIssue =
+                "integration ref inspection returned malformed or non-exact metadata";
+            }
+          } else {
+            reconciliationIssue = "integration ref inspection did not return exactly one ref";
+          }
+        } else {
+          reconciliationIssue = gitFailure("read integration ref metadata", reconciled);
+        }
+        if (reconciledHead === resultCommit) {
+          return receipt("completed", validation, resultCommit);
+        }
+        const uncertainOutcome = update.termination ?? "failed";
+        if (reconciledHead === originalIntegrationCommit) {
+          return receipt(
+            uncertainOutcome,
+            validation,
+          );
+        }
+        preserveCandidate = true;
+        this.recordCleanupFailure(
+          project,
+          lease,
+          candidatePath,
+          `${uncertainUpdateReason}; update-ref reconciliation ${
+            reconciledHead === null
+              ? `failed: ${reconciliationIssue ?? "unknown ref metadata"}`
+              : `found competing commit ${reconciledHead}`
+          }`,
+        );
+        return receipt(
+          uncertainOutcome,
+          validation,
+        );
+      }
+      if (update.exitCode !== 0) {
+        return receipt("failed", validation);
+      }
+
+      return receipt("completed", validation, resultCommit);
+    } catch (error) {
+      return receipt(
+        signal.aborted ? "cancelled" : "failed",
+        unavailableValidation(
+          project,
+          signal.aborted ? "cancelled" : "failed",
+          `integration could not continue: ${errorMessage(error)}`,
+        ),
+      );
+    } finally {
+      if (candidatePath !== null && candidateOwned && !preserveCandidate) {
+        try {
+          const cleanup = await this.git.run(project.repositoryPath, [
+            "worktree",
+            "remove",
+            "--force",
+            candidatePath,
+          ], { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+          if (cleanup.termination !== null) {
+            this.recordCleanupFailure(
+              project,
+              lease,
+              candidatePath,
+              `candidate cleanup was ${cleanup.termination}`,
+            );
+          } else if (cleanup.exitCode !== 0 || cleanup.truncated) {
+            this.recordCleanupFailure(
+              project,
+              lease,
+              candidatePath,
+              cleanup.truncated
+                ? "candidate cleanup output was truncated"
+                : gitFailure("candidate cleanup", cleanup),
+            );
+          }
+        } catch (error) {
+          this.recordCleanupFailure(project, lease, candidatePath, errorMessage(error));
+        }
+      }
+      if (candidateRoot !== null && candidateRootCreated && !preserveCandidate) {
+        await removeEmptyDirectory(candidateRoot);
+      }
+    }
+  }
+
+  private recordCleanupFailure(
+    project: ProjectConfig,
+    lease: WorkspaceLease,
+    candidatePath: string,
+    reason: string,
+  ): void {
+    this.cleanupFailures.push({
+      projectId: project.projectId,
+      taskId: lease.taskId,
+      candidatePath,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+async function withProjectLock<T>(
+  projectId: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const previous = projectTails.get(projectId) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  projectTails.set(projectId, tail);
+
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+    if (projectTails.get(projectId) === tail) {
+      projectTails.delete(projectId);
+    }
+  }
+}
+
+function unavailableValidation(
+  project: ProjectConfig,
+  outcome: "cancelled" | "timed_out" | "failed",
+  reason: string,
+): ValidationReport {
+  const command = [...project.validations.full] as readonly [string, ...string[]];
+  const timestamp = new Date().toISOString();
+  return {
+    name: "full",
+    outcome,
+    exitCode: null,
+    stdout: "",
+    stderr: reason,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    command,
+    argvSha256: sha256(JSON.stringify(command)),
+    outputSha256: sha256(JSON.stringify({ stdout: "", stderr: reason })),
+  };
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function gitFailure(
+  operation: string,
+  result: {
+    readonly exitCode: number;
+    readonly stderr: string;
+    readonly truncated?: boolean;
+  },
+): string {
+  if (result.truncated === true) {
+    return `${operation} failed because Git output was truncated`;
+  }
+  const stderr = result.stderr.trim();
+  return `${operation} failed with exit code ${result.exitCode}${stderr === "" ? "" : `: ${stderr}`}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function removeEmptyDirectory(directory: string): Promise<void> {
+  try {
+    await rmdir(directory);
+  } catch {
+    // Another project may share the root, or cleanup may need later reconciliation.
+  }
+}

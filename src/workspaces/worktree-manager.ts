@@ -97,6 +97,8 @@ export class WorktreeManager {
       "-c",
       "core.quotepath=off",
       "diff",
+      "--no-ext-diff",
+      "--no-textconv",
       "--name-only",
     ]);
     const changedPaths = new Set(
@@ -151,6 +153,8 @@ export class WorktreeManager {
       "core.quotepath=off",
       "diff",
       "--binary",
+      "--no-ext-diff",
+      "--no-textconv",
     ]);
     if (diff.truncated) {
       throw new Error(

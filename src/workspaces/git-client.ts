@@ -10,6 +10,12 @@ export interface CommandResult {
   readonly exitCode: number;
   /** True when captured output exceeded the per-stream limit and was cut off. */
   readonly truncated: boolean;
+  readonly termination: "cancelled" | "timed_out" | null;
+}
+
+export interface GitRunOptions {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
 }
 
 function minimalEnvironment(): Record<string, string> {
@@ -22,6 +28,9 @@ function minimalEnvironment(): Record<string, string> {
   }
   // Git must never hang waiting for interactive credentials.
   env["GIT_TERMINAL_PROMPT"] = "0";
+  env["GIT_MERGE_AUTOEDIT"] = "no";
+  env["GIT_EDITOR"] = "false";
+  env["GIT_SEQUENCE_EDITOR"] = "false";
   return env;
 }
 
@@ -56,11 +65,26 @@ class BoundedCollector {
 }
 
 export class GitClient {
-  run(cwd: string, args: readonly string[]): Promise<CommandResult> {
+  run(
+    cwd: string,
+    args: readonly string[],
+    options: GitRunOptions = {},
+  ): Promise<CommandResult> {
     return new Promise<CommandResult>((resolve, reject) => {
+      if (options.signal?.aborted) {
+        resolve({
+          stdout: "",
+          stderr: "Git execution cancelled before start",
+          exitCode: -1,
+          truncated: false,
+          termination: "cancelled",
+        });
+        return;
+      }
       const child = spawn("git", [...args], {
         cwd,
         shell: false,
+        detached: process.platform !== "win32",
         env: minimalEnvironment(),
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -70,13 +94,55 @@ export class GitClient {
       child.stdout.on("data", (chunk: Buffer) => stdout.append(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderr.append(chunk));
 
-      child.on("error", (error) => reject(error));
+      let termination: CommandResult["termination"] = null;
+      let timeout: NodeJS.Timeout | undefined;
+      let forceKill: NodeJS.Timeout | undefined;
+      let settled = false;
+      const killGroup = (signal: NodeJS.Signals): void => {
+        if (child.pid === undefined) return;
+        try {
+          if (process.platform === "win32") child.kill(signal);
+          else process.kill(-child.pid, signal);
+        } catch {
+          // The process may have exited between observation and termination.
+        }
+      };
+      const terminate = (reason: Exclude<CommandResult["termination"], null>): void => {
+        if (termination !== null) return;
+        termination = reason;
+        killGroup("SIGTERM");
+        forceKill = setTimeout(() => killGroup("SIGKILL"), 1_000);
+        forceKill.unref();
+      };
+      const onAbort = (): void => terminate("cancelled");
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.timeoutMs !== undefined) {
+        timeout = setTimeout(() => terminate("timed_out"), options.timeoutMs);
+        timeout.unref();
+      }
+      const cleanup = (): void => {
+        if (timeout !== undefined) clearTimeout(timeout);
+        if (forceKill !== undefined) clearTimeout(forceKill);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+
+      child.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
       child.on("close", (code) => {
+        if (settled) return;
+        settled = true;
+        if (termination !== null) killGroup("SIGKILL");
+        cleanup();
         resolve({
           stdout: stdout.toString(),
           stderr: stderr.toString(),
-          exitCode: code ?? -1,
+          exitCode: termination === null ? (code ?? -1) : -1,
           truncated: stdout.truncated || stderr.truncated,
+          termination,
         });
       });
     });
