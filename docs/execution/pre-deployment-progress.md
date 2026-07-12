@@ -134,7 +134,11 @@ Integrated into fix/pre-deployment (each --no-ff, full baseline test/check/build
 - **001** (Critical) merge b94cba9 -> 512 tests. Confirmation re-review: INTEGRATE, no blocking findings. Accepted risk: replaced-executable TOCTOU (named acceptor Md Talib).
 - **009** (High) merge c0ae7b2 -> 529 tests. Confirmation re-review: INTEGRATE. Deterministic reviewer moved to tests/ (test-only). Packaging exclusion delegated to 019/016.
 - Integration branch head after Wave-1 merges + prompts: 2cd2a31 (pushed to origin).
-- **011** (High): fix round 3 RUNNING (2 Important findings: completion must reject consumer-rejectable protocol output; inherited-stream test must prove grace-wait after leader exit). Not yet integrated.
+- **011** (High): rounds 1-3 fixed; re-review r2 returned BLOCK on 1 Important finding - `validateProtocolOutput()` inferred invocation kind from user-controlled taskId/args (a worker task named "validation" could bypass worker-artifact validation). Round-4 coordinated fix RUNNING: explicit trusted invocation-kind param on ProcessSupervisor.execute() + updated call sites (tracer-bullet worker, validation-runner, reviewer-adapter). 011 branch first merged current integration head (d4eb289) to carry 001/009/013 so the call-site edits sit on integrated code. Not yet integrated.
+
+### Wave 1 Packaging Chain started
+
+- **016** (Critical, Pod C1): writer RUNNING on fix/predeploy-c1-package (branched from f61a6e4). Production build + package lifecycle + tarball install e2e. Authorized by 008 NOT_REPRODUCED. Owns package.json build/lifecycle/bin only; files-allowlist deferred to 019; os/cpu/engines/license to 020/021/018. Running in parallel with 011-fix4 (disjoint files).
 
 Closed with evidence so far: 3 Critical target -> 1 (001). 7 High -> 1 (009). Plus 013 (Low) and 008 (Low, not-reproduced disposition, evidence-only; integrate its doc separately).
 

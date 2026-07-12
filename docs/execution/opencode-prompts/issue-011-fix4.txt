@@ -1,0 +1,24 @@
+You are the OpenCode fix agent for Zentra issue 011, round 4, addressing the final Important review finding: the supervisor infers the invocation/protocol type from the user-controlled taskId and executable args, so a worker task named "validation" (or a `-e` invocation) can bypass worker-artifact protocol validation and still report `completed`.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011 (this branch already contains the integrated issue 001/009/013 changes via merge)
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+The fix (make the protocol discriminator explicit and trusted, not derived from user data):
+1. In src/workers/process-supervisor.ts, change execute() so the caller passes an EXPLICIT, required invocation/protocol kind (for example an enum 'worker' | 'validation' | 'reviewer', or an injected protocol-validator). Remove the logic at approximately lines 390-401 that infers the kind from taskId or args[0]. Validate the protocol output strictly for the caller-supplied kind: a worker invocation must have emitted a valid `artifact.ready` (worker completion) event; a reviewer invocation must satisfy the exported ReviewDecisionSchema; a validation invocation must satisfy its own protocol. Reporting `completed` requires the correct protocol output for the explicitly declared kind.
+2. Update the three call sites to pass their known kind explicitly:
+   - src/orchestration/tracer-bullet.ts (this.worker.execute at ~line 163) -> worker kind.
+   - src/capabilities/validation-runner.ts (this.supervisor.execute at ~line 141) -> validation kind.
+   - src/reviews/reviewer-adapter.ts (this.execute at ~line 157) -> reviewer kind.
+   Keep these edits minimal and confined to passing the discriminator (and any tiny plumbing needed). Do not change unrelated behavior in those files.
+3. Add regression tests proving: a worker task whose taskId is literally "validation" still requires a valid artifact.ready event and is NOT reported completed without one; a worker invocation with args[0]==="-e" and no valid completion event is NOT reported completed; reviewer and validation kinds still validate their respective protocols; the kind can no longer be spoofed via taskId/args.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build. Run focused worker-supervision, tracer, validation-runner, and reviewer tests.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-a-011
+- Update docs/execution/issue-011-implementation-report.md with this fix and new commit ids.
+
+Owned files for this fix (these issues are already integrated; no concurrent writer holds them): src/workers/process-supervisor.ts, src/orchestration/tracer-bullet.ts (worker call site only), src/capabilities/validation-runner.ts (supervisor.execute call only), src/reviews/reviewer-adapter.ts (execute call only), and related test files, plus the report. Do not make unrelated changes to those files.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

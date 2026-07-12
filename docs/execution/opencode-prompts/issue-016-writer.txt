@@ -1,0 +1,33 @@
+You are the OpenCode implementation agent for Zentra issue 016 (Critical, Pod C1).
+
+Repository worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-package
+Branch: fix/predeploy-c1-package
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: AGENTS.md, docs/design/orchestrator.md, docs/issues/016-critical-build-and-test-publishable-cli-package.md.
+
+Context evidence: issue 008 (Pod C0) recorded NOT_REPRODUCED for the url.parse deprecation from the built CLI (clean stderr), so C1 is authorized to proceed. Node engine is currently >=24; the package is currently private:true and has no `files` allowlist (issue 019 owns the files allowlist; do NOT add it here).
+
+Implement issue 016: make the package produce a runnable CLI from a clean checkout.
+Acceptance criteria:
+- Add a dedicated production build that emits the runtime CLI and required modules in a deterministic layout (the `zentra` bin at ./dist/src/cli/main.js must exist after build).
+- Configure package lifecycle scripts (e.g. prepack/prepare) so a clean `npm pack` builds before tarball contents are selected.
+- Fail package creation when the binary target or a required bundled fixture is missing.
+- Provide a test that installs the generated tarball into an EMPTY temporary consumer project and runs the package binary without repository-relative files.
+- Test real operational execution (not only --help) from the installed tarball, including a SQLite-backed command; verify shebang, executable mode, ESM imports, native better-sqlite3 load, and bundled fixture lookup from the installed package.
+- Add a negative test proving packaging fails when required production output is absent or stale.
+
+Required tests: clean-checkout package e2e (remove generated output, pack, install into empty dir, invoke binary + one deterministic task); negative missing-bin/missing-fixture test.
+
+Final verification: run a frozen install, production build, `npm pack --dry-run`, real pack, empty-directory install, `zentra --help`, and one deterministic task command; run pnpm test, pnpm check, and pnpm build. Inspect the tarball rather than the source tree.
+
+Non-goals: do NOT choose a distribution channel (issue 017), do NOT publish, do NOT add the `files` allowlist (issue 019), do NOT include tests/planning docs in the tarball unless required.
+
+Owned files: package.json (build/lifecycle/bin/scripts ONLY - do not add `files`, `os`, `cpu`, `engines` bounds, or `license`; those belong to issues 019/020/021/018), tsconfig or a dedicated production build config, any new build/packaging scripts under scripts/, and new packaging test files. Do NOT edit src/ application logic, src/workers/process-supervisor.ts, src/capabilities/validation-runner.ts, src/reviews/reviewer-adapter.ts, src/orchestration/tracer-bullet.ts, or docs/issues/ briefs.
+
+Commit only after verification passes (concise message, no co-author trailer). Push: git push -u origin fix/predeploy-c1-package.
+
+Create docs/execution/issue-016-implementation-report.md with: Status, Root cause, Files changed, Tests added, Commands and results, Acceptance criteria evidence, Security boundary, Remaining concerns, Commit identity.
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.
