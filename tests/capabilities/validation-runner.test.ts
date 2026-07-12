@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import {
+  access,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ValidationRunner,
   ValidationReportSchema,
@@ -43,6 +51,40 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function withDotSegment(executable: string): string {
+  const directory = path.dirname(executable);
+  return `${directory}${path.sep}.${path.sep}${path.basename(executable)}`;
+}
+
+function withCaseVariant(executable: string): string {
+  return executable.replace(/[A-Za-z]/, (character) =>
+    character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase(),
+  );
+}
+
+async function withTemporaryApprovedExecutable(
+  test: (approvedExecutable: string, replacement: string) => Promise<void>,
+): Promise<void> {
+  const directory = await workspace();
+  const approvedExecutable = path.join(directory, "approved-node");
+  const replacement = path.join(directory, "replacement-node");
+  await writeFile(approvedExecutable, "approved", { mode: 0o755 });
+  await writeFile(replacement, "replaced", { mode: 0o755 });
+  const canonicalApprovedExecutable = await realpath(approvedExecutable);
+  const originalExecPath = process.execPath;
+
+  try {
+    process.execPath = canonicalApprovedExecutable;
+    vi.resetModules();
+    await test(canonicalApprovedExecutable, replacement);
+  } finally {
+    process.execPath = originalExecPath;
+    vi.resetModules();
+  }
+}
+
 class CountingSupervisor extends ProcessSupervisor {
   readonly requests: WorkerRequest[] = [];
 
@@ -67,6 +109,9 @@ describe("ValidationRunner", () => {
     const deniedCommands = [
       ["/bin/echo", "unapproved"],
       ["node", "--version"],
+      [withDotSegment(process.execPath), "--version"],
+      [`${process.execPath}${path.sep}`, "--version"],
+      [withCaseVariant(process.execPath), "--version"],
       [executableLink, "--version"],
       ["/usr/bin/env", process.execPath, "--version"],
     ] as const;
@@ -83,6 +128,47 @@ describe("ValidationRunner", () => {
       ).rejects.toThrow(/approved canonical absolute path/);
       expect(supervisor.requests).toHaveLength(0);
     }
+  });
+
+  it("rejects an approved executable replaced at the same pathname", async () => {
+    await withTemporaryApprovedExecutable(async (approvedExecutable) => {
+      const { ValidationRunner: IsolatedValidationRunner } = await import(
+        "../../src/capabilities/validation-runner.js"
+      );
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      await writeFile(approvedExecutable, "replaced", { mode: 0o755 });
+
+      await expect(
+        new IsolatedValidationRunner(supervisor).run(
+          project([approvedExecutable, "--version"]),
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+        ),
+      ).rejects.toThrow(/identity changed/);
+      expect(supervisor.requests).toHaveLength(0);
+    });
+  });
+
+  it("rejects replacement between initial validation and process creation", async () => {
+    await withTemporaryApprovedExecutable(async (approvedExecutable, replacement) => {
+      const { ValidationRunner: IsolatedValidationRunner } = await import(
+        "../../src/capabilities/validation-runner.js"
+      );
+      const cwd = await workspace();
+      const supervisor = new CountingSupervisor();
+      const pending = new IsolatedValidationRunner(supervisor).run(
+        project([approvedExecutable, "--version"]),
+        "focused",
+        cwd,
+        AbortSignal.timeout(5_000),
+      );
+      renameSync(replacement, approvedExecutable);
+
+      await expect(pending).rejects.toThrow(/identity changed/);
+      expect(supervisor.requests).toHaveLength(0);
+    });
   });
 
   it.each(["focused", "full"] as const)(

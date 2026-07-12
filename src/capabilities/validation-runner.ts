@@ -3,6 +3,7 @@ import { realpath } from "node:fs/promises";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
 import {
   assertApprovedValidationExecutable,
+  assertApprovedValidationExecutableIdentity,
   type ProjectConfig,
 } from "../projects/project-config.js";
 import { z } from "zod";
@@ -135,6 +136,7 @@ export class ValidationRunner {
     usedInvocationIds.add(invocationId);
     const canonicalCwd = await realpath(cwd);
     const startedAt = new Date().toISOString();
+    await assertApprovedValidationExecutableIdentity(command[0]);
 
     const result = await this.supervisor.execute(
       {

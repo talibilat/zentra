@@ -19,6 +19,19 @@ const validConfig = {
   },
 };
 
+function withDotSegment(executable: string): string {
+  const directory = path.dirname(executable);
+  return `${directory}${path.sep}.${path.sep}${path.basename(executable)}`;
+}
+
+function withCaseVariant(executable: string): string {
+  return executable.replace(/[A-Za-z]/, (character) =>
+    character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase(),
+  );
+}
+
 describe("ProjectConfigSchema", () => {
   it("accepts the supported configuration", () => {
     const parsed = ProjectConfigSchema.parse(validConfig);
@@ -189,6 +202,9 @@ describe("ProjectConfigSchema", () => {
   it.each([
     ["absolute executable outside the allowlist", "/bin/echo"],
     ["relative executable", "node"],
+    ["dot-segment executable", withDotSegment(process.execPath)],
+    ["trailing-slash executable", `${process.execPath}${path.sep}`],
+    ["case-variant executable", withCaseVariant(process.execPath)],
     ["env-prefixed executable", "/usr/bin/env"],
   ])("rejects an %s", (_case, executable) => {
     expect(() =>
