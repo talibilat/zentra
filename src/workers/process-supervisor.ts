@@ -4,23 +4,37 @@ import type { WorkerAdapter, WorkerRequest, WorkerResult } from "./worker-adapte
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
 
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_STREAM_GRACE_MS = 1_000;
+const DEFAULT_TERMINATION_GRACE_MS = 250;
+const DEFAULT_FORCED_TERMINATION_MS = 1_000;
+const GROUP_EXIT_POLL_MS = 10;
 
 type Decision =
   | { readonly kind: "exit"; readonly code: number | null }
   | { readonly kind: "timed_out" }
   | { readonly kind: "cancelled" }
   | { readonly kind: "output_limit" }
+  | { readonly kind: "descendant_survived"; readonly code: number | null }
   | { readonly kind: "spawn_error"; readonly message: string };
 
 export interface ProcessSupervisorOptions {
   readonly maxOutputBytes?: number;
+  readonly streamGraceMs?: number;
+  readonly terminationGraceMs?: number;
+  readonly forcedTerminationMs?: number;
 }
 
 export class ProcessSupervisor implements WorkerAdapter {
   private readonly maxOutputBytes: number;
+  private readonly streamGraceMs: number;
+  private readonly terminationGraceMs: number;
+  private readonly forcedTerminationMs: number;
 
   constructor(options: ProcessSupervisorOptions = {}) {
     this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.streamGraceMs = options.streamGraceMs ?? DEFAULT_STREAM_GRACE_MS;
+    this.terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+    this.forcedTerminationMs = options.forcedTerminationMs ?? DEFAULT_FORCED_TERMINATION_MS;
   }
 
   execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
@@ -58,6 +72,7 @@ export class ProcessSupervisor implements WorkerAdapter {
       let decision: Decision | undefined;
       let exited = false;
       let settled = false;
+      let terminationStarted = false;
       let graceTimer: NodeJS.Timeout | undefined;
 
       const timer = setTimeout(() => decide({ kind: "timed_out" }), request.timeoutMs);
@@ -65,21 +80,76 @@ export class ProcessSupervisor implements WorkerAdapter {
       const onAbort = (): void => decide({ kind: "cancelled" });
       signal.addEventListener("abort", onAbort, { once: true });
 
-      const killProcessGroup = (): void => {
+      const processGroupExists = (): boolean => {
+        const pid = child.pid;
+        if (pid === undefined) {
+          return false;
+        }
+        try {
+          process.kill(-pid, 0);
+          return true;
+        } catch (error) {
+          // Only ESRCH proves that the owned group no longer exists.
+          return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      };
+
+      const signalProcessGroup = (signalName: NodeJS.Signals): void => {
         const pid = child.pid;
         if (pid === undefined) {
           return;
         }
         try {
-          // detached:true puts the child in its own process group; kill the whole group.
-          process.kill(-pid, "SIGKILL");
-        } catch {
+          // detached:true makes the leader the process-group owner on macOS.
+          process.kill(-pid, signalName);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+            return;
+          }
           try {
-            child.kill("SIGKILL");
+            child.kill(signalName);
           } catch {
             // Process already gone.
           }
         }
+      };
+
+      const waitForProcessGroupExit = async (timeoutMs: number): Promise<boolean> => {
+        const deadline = Date.now() + timeoutMs;
+        while (processGroupExists()) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            return false;
+          }
+          await new Promise((resolveSleep) =>
+            setTimeout(resolveSleep, Math.min(GROUP_EXIT_POLL_MS, remaining)),
+          );
+        }
+        return true;
+      };
+
+      const terminateAndSettle = async (graceful: boolean): Promise<void> => {
+        if (terminationStarted || settled) {
+          return;
+        }
+        terminationStarted = true;
+
+        if (graceful && processGroupExists()) {
+          signalProcessGroup("SIGTERM");
+          if (await waitForProcessGroupExit(this.terminationGraceMs)) {
+            settle();
+            return;
+          }
+        }
+
+        if (processGroupExists()) {
+          signalProcessGroup("SIGKILL");
+        }
+        if (!(await waitForProcessGroupExit(this.forcedTerminationMs))) {
+          const exitCode = decision?.kind === "exit" ? decision.code : null;
+          decision = { kind: "descendant_survived", code: exitCode };
+        }
+        settle();
       };
 
       const decide = (candidate: Decision): void => {
@@ -90,10 +160,10 @@ export class ProcessSupervisor implements WorkerAdapter {
         }
         decision = candidate;
         if (candidate.kind !== "exit") {
-          killProcessGroup();
+          signalProcessGroup("SIGKILL");
         }
         if (exited) {
-          settle();
+          void terminateAndSettle(false);
         }
       };
 
@@ -147,16 +217,16 @@ export class ProcessSupervisor implements WorkerAdapter {
         if (decision === undefined) {
           decision = { kind: "exit", code };
         }
-        // A descendant that escaped the process group can hold the stdio pipes
-        // open past the child's exit; give the streams a short flush window
-        // instead of waiting on "close" indefinitely.
-        graceTimer = setTimeout(settle, 1_000);
+        graceTimer = setTimeout(
+          () => void terminateAndSettle(decision?.kind === "exit"),
+          this.streamGraceMs,
+        );
       });
 
       child.on("close", (code) => {
         exited = true;
         decide({ kind: "exit", code });
-        settle();
+        void terminateAndSettle(decision?.kind === "exit");
       });
     });
   }
@@ -208,6 +278,15 @@ function buildResult(
         stdout: rawStdout,
         rawStdout,
         stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: ${decision.message}\n`,
+      };
+    case "descendant_survived":
+      return {
+        outcome: "failed",
+        exitCode: decision.code,
+        events: [],
+        stdout: rawStdout,
+        rawStdout,
+        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: process group survived bounded termination\n`,
       };
     case "exit": {
       if (decision.code === 0) {

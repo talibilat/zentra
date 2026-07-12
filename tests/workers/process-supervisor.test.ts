@@ -10,6 +10,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const workerFixture = path.resolve(here, "../../fixtures/deterministic-worker.mjs");
 const printEnvFixture = path.resolve(here, "fixtures/print-env.mjs");
 const spawnGrandchildFixture = path.resolve(here, "fixtures/spawn-grandchild.mjs");
+const successWithLiveDescendantFixture = path.resolve(
+  here,
+  "fixtures/success-with-live-descendant.mjs",
+);
+const successWithInheritedStreamsFixture = path.resolve(
+  here,
+  "fixtures/success-with-inherited-streams.mjs",
+);
+const successWithTermResistantDescendantFixture = path.resolve(
+  here,
+  "fixtures/success-with-term-resistant-descendant.mjs",
+);
+const successWithEscapedSessionFixture = path.resolve(
+  here,
+  "fixtures/success-with-escaped-session.mjs",
+);
 const exitBeforeDescendantOutputFixture = path.resolve(
   here,
   "fixtures/exit-before-descendant-output.mjs",
@@ -53,6 +69,15 @@ async function waitForProcessExit(pid: number, timeoutMs = 5_000): Promise<void>
   }
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let workspace: string;
 
 beforeEach(async () => {
@@ -93,6 +118,99 @@ describe("ProcessSupervisor", () => {
     expect(event.type).toBe("artifact.ready");
     expect(event.path).toBe("out.txt");
     await expect(readFile(path.join(workspace, "out.txt"), "utf8")).resolves.toBe("hello");
+  });
+
+  it("terminates a same-group descendant before reporting successful completion", async () => {
+    const pidFile = path.join(workspace, "descendant.pid");
+    let descendantPid: number | undefined;
+
+    try {
+      const result = await new ProcessSupervisor().execute(
+        request({ args: [successWithLiveDescendantFixture, pidFile] }),
+        new AbortController().signal,
+      );
+      descendantPid = Number(await readFile(pidFile, "utf8"));
+
+      expect(result.outcome).toBe("completed");
+      expect(descendantPid).toBeGreaterThan(0);
+      expect(processExists(descendantPid)).toBe(false);
+    } finally {
+      if (descendantPid !== undefined && processExists(descendantPid)) {
+        process.kill(descendantPid, "SIGKILL");
+      }
+    }
+  });
+
+  it("bounds stream flushing before terminating a descendant with inherited streams", async () => {
+    const pidFile = path.join(workspace, "inherited-stream-descendant.pid");
+    const startedAt = Date.now();
+    const result = await new ProcessSupervisor({
+      streamGraceMs: 75,
+      terminationGraceMs: 100,
+      forcedTerminationMs: 500,
+    }).execute(
+      request({ args: [successWithInheritedStreamsFixture, pidFile] }),
+      new AbortController().signal,
+    );
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+
+    expect(result.outcome).toBe("completed");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(50);
+    expect(processExists(descendantPid)).toBe(false);
+  });
+
+  it("forces and confirms termination when a descendant ignores SIGTERM", async () => {
+    const pidFile = path.join(workspace, "term-resistant-descendant.pid");
+    const startedAt = Date.now();
+    const result = await new ProcessSupervisor({
+      terminationGraceMs: 75,
+      forcedTerminationMs: 500,
+    }).execute(
+      request({ args: [successWithTermResistantDescendantFixture, pidFile] }),
+      new AbortController().signal,
+    );
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+
+    expect(result.outcome).toBe("completed");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(50);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(processExists(descendantPid)).toBe(false);
+  });
+
+  it("fails when group absence cannot be confirmed inside the forced termination bound", async () => {
+    const pidFile = path.join(workspace, "unconfirmed-descendant.pid");
+    const result = await new ProcessSupervisor({
+      terminationGraceMs: 25,
+      forcedTerminationMs: 0,
+    }).execute(
+      request({ args: [successWithTermResistantDescendantFixture, pidFile] }),
+      new AbortController().signal,
+    );
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+
+    expect(result.outcome).toBe("failed");
+    expect(result.stderr).toContain("process group survived bounded termination");
+    await waitForProcessExit(descendantPid);
+  });
+
+  it("documents deliberate session escape as outside macOS process-group containment", async () => {
+    const pidFile = path.join(workspace, "escaped-session.pid");
+    let escapedPid: number | undefined;
+
+    try {
+      const result = await new ProcessSupervisor().execute(
+        request({ args: [successWithEscapedSessionFixture, pidFile] }),
+        new AbortController().signal,
+      );
+      escapedPid = Number(await readFile(pidFile, "utf8"));
+
+      expect(result.outcome).toBe("completed");
+      expect(processExists(escapedPid)).toBe(true);
+    } finally {
+      if (escapedPid !== undefined && processExists(escapedPid)) {
+        process.kill(escapedPid, "SIGKILL");
+      }
+    }
   });
 
   it("refuses to follow a symlink target outside the workspace", async () => {
@@ -167,13 +285,13 @@ describe("ProcessSupervisor", () => {
   });
 
   it("maps output beyond the byte limit to failed", async () => {
-    const supervisor = new ProcessSupervisor({ maxOutputBytes: 1024 });
-    const result = await supervisor.execute(
-      request({
-        args: ["-e", 'process.stdout.write("x".repeat(1024 * 1024)); setInterval(() => {}, 1000);'],
-      }),
+    const pidFile = path.join(workspace, "output-limit-descendant.pid");
+    const pending = new ProcessSupervisor({ maxOutputBytes: 1024 }).execute(
+      request({ args: [spawnGrandchildFixture, pidFile, "exceed-output"] }),
       new AbortController().signal,
     );
+    const descendantPid = Number(await waitForFile(pidFile));
+    const result = await pending;
 
     expect(result.outcome).toBe("failed");
     expect(result.exitCode).toBeNull();
@@ -181,6 +299,7 @@ describe("ProcessSupervisor", () => {
       1024 + Buffer.byteLength("process supervisor: output limit of 1024 bytes exceeded\n"),
     );
     expect(result.stderr).toContain("output limit");
+    expect(processExists(descendantPid)).toBe(false);
   });
 
   it("retains at most the shared output byte limit across multiple stdout and stderr chunks", async () => {
@@ -217,11 +336,13 @@ describe("ProcessSupervisor", () => {
   });
 
   it("maps deadline expiry to timed_out", async () => {
-    const supervisor = new ProcessSupervisor();
-    const result = await supervisor.execute(
-      request({ args: workerArgs("never.txt", "__WAIT__"), timeoutMs: 250 }),
+    const pidFile = path.join(workspace, "timed-out-descendant.pid");
+    const pending = new ProcessSupervisor().execute(
+      request({ args: [spawnGrandchildFixture, pidFile], timeoutMs: 250 }),
       new AbortController().signal,
     );
+    const descendantPid = Number(await waitForFile(pidFile));
+    const result = await pending;
 
     expect(result.outcome).toBe("timed_out");
     expect(result.exitCode).toBeNull();
@@ -229,16 +350,19 @@ describe("ProcessSupervisor", () => {
     expect(result.events).toEqual([]);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+    expect(processExists(descendantPid)).toBe(false);
   });
 
   it("maps abort to cancelled without stale worker output", async () => {
     const supervisor = new ProcessSupervisor();
     const controller = new AbortController();
+    const pidFile = path.join(workspace, "cancelled-descendant.pid");
     const pending = supervisor.execute(
-      request({ args: workerArgs("never.txt", "__WAIT__") }),
+      request({ args: [spawnGrandchildFixture, pidFile] }),
       controller.signal,
     );
-    setTimeout(() => controller.abort(), 100);
+    const descendantPid = Number(await waitForFile(pidFile));
+    controller.abort();
     const result = await pending;
 
     expect(result.outcome).toBe("cancelled");
@@ -247,26 +371,7 @@ describe("ProcessSupervisor", () => {
     expect(result.events).toEqual([]);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
-  });
-
-  it("terminates the whole process group, including grandchildren", async () => {
-    const supervisor = new ProcessSupervisor();
-    const controller = new AbortController();
-    const pidFile = path.join(workspace, "grandchild.pid");
-    const pending = supervisor.execute(
-      request({ args: [spawnGrandchildFixture, pidFile] }),
-      controller.signal,
-    );
-
-    const grandchildPid = Number(await waitForFile(pidFile));
-    expect(Number.isInteger(grandchildPid)).toBe(true);
-    controller.abort();
-    const result = await pending;
-
-    expect(result.outcome).toBe("cancelled");
-    expect(result.events).toEqual([]);
-    expect(result.stdout).toBe("");
-    await waitForProcessExit(grandchildPid);
+    expect(processExists(descendantPid)).toBe(false);
   });
 
   it("maps a nonzero exit to failed", async () => {
