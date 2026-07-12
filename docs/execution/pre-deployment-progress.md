@@ -1,0 +1,111 @@
+# Pre-Deployment Remediation Progress Ledger
+
+Integration steward: Claude Code (orchestration controller only; no product-code edits).
+All implementation, testing, review, and documentation edits are performed by separate OpenCode processes.
+
+## Environment
+
+- Repository: `/Users/talibilat/Documents/Projects/zentra`
+- Integration branch: `fix/pre-deployment`
+- Integration worktree: `.worktrees/predeploy-integration` (reserved for merges, progress records, final verification only)
+- Issue corpus base commit: `f54ba31` (`docs/pre-deployment-issues`, pushed to origin)
+- Current integration commit: `f54ba31` (baseline; no merges yet)
+- Node: v24.2.0
+- pnpm: 10.0.0
+- OpenCode: 1.17.18 (`/Users/talibilat/.opencode/bin/opencode`)
+
+## Severity Totals (deployment closure scope)
+
+- Critical: 3 (001, 002, 016)
+- High: 7 (003, 004, 009, 011, 014, 017, 018)
+- Medium: 9 (006, 007, 010, 019, 020, 021, 022, 023, 024)
+- Low: 8 (008, 012, 013, 015, 025, 026, 027, 028)
+- Deferred enhancement (excluded from closure): 005
+
+## Human Decisions Required (agents must not answer)
+
+| Issue | Decision | Status |
+| --- | --- | --- |
+| 001 | Select Contained Mode or Trusted-Project MVP Mode | PENDING |
+| 017 | Select distribution model (public npm / GitHub release tarball / private) | PENDING |
+| 018 | Select software license | PENDING |
+| 027 | Approve private security reporting route | PENDING |
+
+## Issue Inventory
+
+| ID | Title | Sev | Status | Wave/Pod | Owned paths (primary) | Depends on | Serialization/conflict | Human decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 001 | Contain configured validation execution | Critical | Blocked (human) | W1 Pod A | src/projects/project-config.ts, src/capabilities/validation-runner.ts, security docs | Human trust-model decision | Serialize project-config.ts + validation-runner.ts with 023; 011 owns process-supervisor.ts | Yes (trust model) |
+| 002 | Reconcile uncertain worktree creation | Critical | Blocked (deps) | W2 Pod E | src/workspaces/worktree-manager.ts, src/orchestration/recovery.ts | W1 (incl 006), 014 | Recovery writer; finish recovery.ts before 003; separate from 010 candidate worktrees | No |
+| 003 | Make recovery completion race-safe | High | Blocked (deps) | W2 Pod E | src/orchestration/recovery.ts | 014, 002 | Same recovery writer as 002 or strict sequential worktree after 002 integrated | No |
+| 004 | Expose authorized recovery completion | High | Blocked (deps) | W3 Pod G | src/cli/main.ts, recovery CLI protocol, docs | 003, 014 | Serialize main.ts with 022, 025 | No |
+| 006 | Record typed artifacts | Medium | Blocked (deps) | W1 Pod B | src/contracts/artifact.ts, src/orchestration/tracer-bullet.ts, task events | 009 | After 009; preserve artifact path semantics for future 005 | No |
+| 007 | Centralize task chain invariants | Medium | Blocked (deps) | W4 Pod I | src/tasks/task-projection.ts, src/orchestration/recovery.ts (shared validator) | 002, 003, 004 (recovery settled) | No external lifecycle behavior change | No |
+| 008 | Trace url.parse deprecation | Low | Needs reproduction | W1 Pod C0 | Investigation only; focused remediation gated on reproduced evidence | None | C0 records reproduced/not-reproduced; C1 starts after either | No |
+| 009 | Require content-aware independent review | High | Ready | W1 Pod B | src/reviews/reviewer-adapter.ts, src/cli/main.ts (reviewer composition), fixtures/deterministic-reviewer.mjs | None | Implement before 006; serialize shared CLI composition with packaging writer | No |
+| 010 | Reject grafts before integration effects | Medium | Blocked (deps) | W2 Pod E | src/integration/integration-queue.ts | 014 | No overlap with 014 edits to integration-queue.ts | No |
+| 011 | Terminate descendants after successful parent exit | High | Ready | W1 Pod A | src/workers/process-supervisor.ts | None | Exclusive owner of process-supervisor.ts; 001/023 wait | No |
+| 012 | Eliminate fixture attestation TOCTOU | Low | Blocked (deps) | W1 Fixture pod | src/fixtures/bundled-fixtures.ts | 009, 016 | Runs after 009 + 016 integrated | No |
+| 013 | Bound SQLite read work before aggregate scan | Low | Ready | W1 Pod D | src/journal/sqlite-journal.ts | None | Exclusive owner of sqlite-journal.ts in W1 | No |
+| 014 | Add cross-process integration lease | High | Blocked (deps) | W2 Pod E | src/integration/integration-queue.ts | Reviewed W1 prerequisites | First in Pod E; serialize integration-queue.ts with 010, 028 | No |
+| 015 | Bound validation invocation ID lifetime | Low | Blocked (deps) | W2 Pod F | src/capabilities/validation-runner.ts | 001 | After 001 settles invocation boundary | No |
+| 016 | Build and test publishable CLI package | Critical | Blocked (deps) | W1 Pod C1 | production build config, package lifecycle, tarball tests | C0 evidence recorded | C1 writer; before 019; gates 012, 024 | No |
+| 017 | Decide and enable distribution model | High | Blocked (human+deps) | W1 Pod C4 | package metadata, release automation, install docs | Human distribution decision, 016, 019, 024 | Agent must not select model | Yes (distribution) |
+| 018 | Add license | High | Blocked (human) | W1 Pod C2 | LICENSE, package.json SPDX, README | Human license selection | C2 metadata writer; 019 verifies inclusion after | Yes (license) |
+| 019 | Make package contents deterministic | Medium | Blocked (deps) | W1 Pod C1 | package.json files allowlist, package-content verification | 016 | C1 writer; after 016; feeds 024 | No |
+| 020 | Restrict unsupported platform installation | Medium | Ready (C2) | W1 Pod C2 | package.json os/cpu, install docs | None (starts after C1) | C2 metadata writer; serialize package.json with 021 | No |
+| 021 | Bound node engine compatibility | Medium | Ready (C2) | W1 Pod C2 | package.json engines, docs, CI matrix | None (starts after C1) | C2 metadata writer; serialize package.json with 020; prereq of 024 | No |
+| 022 | Add operator diagnostics | Medium | Blocked (deps) | W3 Pod G | src/tasks/task-projection.ts, src/cli/main.ts | 003, 014 | Serialize main.ts with 004, 025; reuse 006 artifacts | No |
+| 023 | Configure validation timeouts | Medium | Blocked (human) | W1 Pod A | src/projects/project-config.ts, src/capabilities/validation-runner.ts | 001 trust-model decision | Serialize shared edits with 001; consistent with 011 | Gated by 001 |
+| 024 | Add CI and release package gates | Medium | Blocked (deps) | W1 Pod C3 | .github/workflows/ | 016, 019, 020, 021 | CI must not publish (017 follows) | No |
+| 025 | Preserve signal exit codes | Low | Blocked (deps) | W3 Pod G | src/cli/main.ts | 003, 014 | Serialize main.ts with 004, 022 | No |
+| 026 | Update stale execution documents | Low | Ready (doc-only) | W1 Pod C2 | docs/execution/HANDOFF.md, docs/execution/mvp-final-report.md | None | Doc-only; parallel if no report-file overlap | No |
+| 027 | Add security reporting policy | Low | Blocked (human) | W1 Pod C2 | SECURITY.md, supported-version docs | Human reporting route | Serialize supported-version docs with 017, 020 | Yes (reporting route) |
+| 028 | Persist and bound integration cleanup failures | Low | Blocked (deps) | W2 Pod F | src/integration/integration-queue.ts | 014 | Serialize integration-queue.ts with other integration writers | No |
+
+## Deferred (not counted toward closure)
+
+| ID | Title | Status |
+| --- | --- | --- |
+| 005 | Deferred safe nested relative paths | Deferred post-MVP; excluded from closure gate and active waves |
+
+## Baseline Verification
+
+Executed from `.worktrees/predeploy-integration` on branch `fix/pre-deployment` at base commit `f54ba31`. Node v24.2.0, pnpm 10.0.0.
+
+| # | Command | Started (UTC) | Exit | Result |
+| --- | --- | --- | --- | --- |
+| 1 | `pnpm install --frozen-lockfile` | 2026-07-12T22:37:02Z | 0 | Lockfile up to date; 95 packages, done in 540ms. DEP0169 warning emitted by pnpm wrapper, not Zentra. |
+| 2 | `pnpm test` | 2026-07-12T22:37:12Z | 0 | 15 test files, 478 tests passed; duration 33.12s. |
+| 3 | `pnpm check` | 2026-07-12T22:37:52Z | 0 | `tsc --noEmit` clean, no diagnostics. |
+| 4 | `pnpm build` | 2026-07-12T22:37:52Z | 0 | `tsc -p tsconfig.json` emitted dist, no errors. |
+| 5 | `pnpm start -- --help` | 2026-07-12T22:38:01Z | 0 | CLI help printed (project, task, recover, help commands); stderr empty. |
+| 6 | `pnpm audit --prod` | 2026-07-12T22:38:02Z | 0 | "No known vulnerabilities found". DEP0169 from pnpm wrapper only. |
+
+Baseline note for issue 008 (C0): `node --trace-deprecation dist/src/cli/main.js --help` exited 0 with **empty stderr and no DEP0169** — the built Zentra CLI does not reproduce the deprecation. The DEP0169 warning is produced by the pnpm invocation wrapper (`node:6886`/`node:12641`), not Zentra source. This is preliminary not-reproduced evidence; the C0 OpenCode reproducer will formally record the disposition.
+
+Baseline verdict: all six commands green at `f54ba31`. Safe to begin Wave 1.
+
+## Active OpenCode Processes
+
+| PID | Title | Worktree | Issue(s) | Log path | Started (UTC) | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| (none yet) | | | | | | |
+
+## Writer Branch / Worktree Registry
+
+| Branch | Worktree | Issue(s) | Owned paths | OpenCode session title | Writer status | Review status | Integration status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| (none yet) | | | | | | | |
+
+## Accepted Risks
+
+(none recorded)
+
+## Blockers
+
+- Human decisions pending for issues 001, 017, 018, 027 (see table above).
+
+## Exact Next Action
+
+Run baseline verification (pnpm install --frozen-lockfile, pnpm test, pnpm check, pnpm build, pnpm start -- --help, pnpm audit --prod) from the integration worktree and record results, then launch Wave 1 ready writers (011, 009, 013) via OpenCode.
