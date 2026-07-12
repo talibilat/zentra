@@ -163,6 +163,7 @@ export class TracerBulletOrchestrator {
       const workerResult = await this.worker.execute(
         workerRequest(input.taskId, lease, input.workerRequest, workerInput),
         input.signal,
+        "worker",
       );
       if (workerResult.outcome !== "completed") {
         return this.terminate(

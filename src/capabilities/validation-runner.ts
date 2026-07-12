@@ -146,7 +146,8 @@ export class ValidationRunner {
         cwd: canonicalCwd,
         timeoutMs: this.timeoutMs,
       },
-      signal
+      signal,
+      "validation",
     );
 
     const finishedAt = new Date().toISOString();

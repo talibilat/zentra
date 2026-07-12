@@ -121,6 +121,7 @@ describe("ProcessSupervisor", () => {
     const result = await supervisor.execute(
       request({ args: workerArgs("out.txt", "hello") }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("completed");
@@ -142,6 +143,7 @@ describe("ProcessSupervisor", () => {
       const pending = new ProcessSupervisor().execute(
         request({ args: [successWithLiveDescendantFixture, pidFile] }),
         new AbortController().signal,
+        "worker",
       );
       void pending.finally(() => {
         settled = true;
@@ -187,6 +189,7 @@ describe("ProcessSupervisor", () => {
         ],
       }),
       new AbortController().signal,
+      "worker",
     );
     void pending.finally(() => {
       settled = true;
@@ -218,6 +221,7 @@ describe("ProcessSupervisor", () => {
     }).execute(
       request({ args: [successWithTermResistantDescendantFixture, pidFile] }),
       new AbortController().signal,
+      "worker",
     );
     void pending.finally(() => {
       settled = true;
@@ -243,6 +247,7 @@ describe("ProcessSupervisor", () => {
     }).execute(
       request({ args: [successWithTermResistantDescendantFixture, pidFile] }),
       new AbortController().signal,
+      "worker",
     );
     const descendantPid = Number(await readFile(pidFile, "utf8"));
 
@@ -259,6 +264,7 @@ describe("ProcessSupervisor", () => {
       const result = await new ProcessSupervisor().execute(
         request({ args: [successWithEscapedSessionFixture, pidFile] }),
         new AbortController().signal,
+        "worker",
       );
       escapedPid = Number(await readFile(pidFile, "utf8"));
 
@@ -279,6 +285,7 @@ describe("ProcessSupervisor", () => {
       const result = await new ProcessSupervisor().execute(
         request({ args: workerArgs("out.txt", "changed") }),
         new AbortController().signal,
+        "worker",
       );
 
       expect(result.outcome).toBe("failed");
@@ -297,6 +304,7 @@ describe("ProcessSupervisor", () => {
       const result = await new ProcessSupervisor().execute(
         request({ args: workerArgs("linked/out.txt", "changed") }),
         new AbortController().signal,
+        "worker",
       );
 
       expect(result.outcome).toBe("failed");
@@ -310,6 +318,7 @@ describe("ProcessSupervisor", () => {
     const result = await new ProcessSupervisor().execute(
       request({ args: workerArgs("nested/out.txt", "changed") }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("failed");
@@ -324,6 +333,7 @@ describe("ProcessSupervisor", () => {
       const result = await supervisor.execute(
         request({ args: [printEnvFixture] }),
         new AbortController().signal,
+        "worker",
       );
 
       expect(result.outcome).toBe("completed");
@@ -349,6 +359,7 @@ describe("ProcessSupervisor", () => {
     const pending = new ProcessSupervisor({ maxOutputBytes: 1024 }).execute(
       request({ args: [spawnGrandchildFixture, pidFile, "exceed-output"] }),
       new AbortController().signal,
+      "worker",
     );
     const descendantPid = Number(await waitForFile(pidFile));
     const result = await pending;
@@ -372,6 +383,7 @@ describe("ProcessSupervisor", () => {
         ],
       }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("failed");
@@ -387,6 +399,7 @@ describe("ProcessSupervisor", () => {
     const result = await supervisor.execute(
       request({ args: [exitBeforeDescendantOutputFixture] }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("failed");
@@ -400,6 +413,7 @@ describe("ProcessSupervisor", () => {
     const pending = new ProcessSupervisor().execute(
       request({ args: [spawnGrandchildFixture, pidFile], timeoutMs: 250 }),
       new AbortController().signal,
+      "worker",
     );
     const descendantPid = Number(await waitForFile(pidFile));
     const result = await pending;
@@ -420,6 +434,7 @@ describe("ProcessSupervisor", () => {
     const pending = supervisor.execute(
       request({ args: [spawnGrandchildFixture, pidFile] }),
       controller.signal,
+      "worker",
     );
     const descendantPid = Number(await waitForFile(pidFile));
     controller.abort();
@@ -439,6 +454,7 @@ describe("ProcessSupervisor", () => {
     const result = await supervisor.execute(
       request({ args: [workerFixture, "--bogus", "flag"] }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("failed");
@@ -450,10 +466,33 @@ describe("ProcessSupervisor", () => {
     const result = await new ProcessSupervisor().execute(
       request({ args: ["-e", 'console.log(JSON.stringify({ type: "worker.completed" }))'] }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("failed");
     expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("worker protocol");
+  });
+
+  it("does not let a worker task named validation bypass artifact validation", async () => {
+    const result = await new ProcessSupervisor().execute(
+      request({ taskId: "validation", args: ["-e", 'console.log("no artifact")'] }),
+      new AbortController().signal,
+      "worker",
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.stderr).toContain("worker protocol");
+  });
+
+  it("does not let worker inline arguments bypass artifact validation", async () => {
+    const result = await new ProcessSupervisor().execute(
+      request({ args: ["-e", 'console.log("no artifact")'] }),
+      new AbortController().signal,
+      "worker",
+    );
+
+    expect(result.outcome).toBe("failed");
     expect(result.stderr).toContain("worker protocol");
   });
 
@@ -469,6 +508,7 @@ describe("ProcessSupervisor", () => {
     const result = await new ProcessSupervisor().execute(
       request({ taskId: "review", args: ["-e", `console.log(${JSON.stringify(invalidDecision)})`] }),
       new AbortController().signal,
+      "reviewer",
     );
 
     expect(result.outcome).toBe("failed");
@@ -477,10 +517,38 @@ describe("ProcessSupervisor", () => {
     expect(result.stderr).toContain("reviewer protocol");
   });
 
+  it("validates the reviewer protocol from the explicit kind instead of taskId", async () => {
+    const artifact = JSON.stringify({
+      type: "artifact.ready",
+      path: "out.txt",
+      sha256: "0".repeat(64),
+    });
+    const result = await new ProcessSupervisor().execute(
+      request({ taskId: "validation", args: ["-e", `console.log(${JSON.stringify(artifact)})`] }),
+      new AbortController().signal,
+      "reviewer",
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.stderr).toContain("reviewer protocol");
+  });
+
   it("accepts exit zero without worker events for validation invocations", async () => {
     const result = await new ProcessSupervisor().execute(
       request({ taskId: "validation", args: ["-e", 'console.log("validation passed")'] }),
       new AbortController().signal,
+      "validation",
+    );
+
+    expect(result.outcome).toBe("completed");
+    expect(result.stdout).toContain("validation passed");
+  });
+
+  it("uses the validation protocol even when taskId and args resemble other kinds", async () => {
+    const result = await new ProcessSupervisor().execute(
+      request({ taskId: "review", args: ["-e", 'console.log("validation passed")'] }),
+      new AbortController().signal,
+      "validation",
     );
 
     expect(result.outcome).toBe("completed");
@@ -509,6 +577,7 @@ describe("ProcessSupervisor", () => {
       }).execute(
         request({ args: [successWithLiveDescendantFixture, pidFile] }),
         new AbortController().signal,
+        "worker",
       );
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       descendantPid = Number(await readFile(pidFile, "utf8"));
@@ -542,6 +611,7 @@ describe("ProcessSupervisor", () => {
       const pending = new ProcessSupervisor({ forcedTerminationMs: 60 }).execute(
         request({ args: [waitingLeaderFixture, pidFile] }),
         controller.signal,
+        "worker",
       );
       leaderPid = Number(await waitForFile(pidFile));
       const startedAt = process.hrtime.bigint();
@@ -582,6 +652,7 @@ describe("ProcessSupervisor", () => {
         ],
       }),
       controller.signal,
+      "worker",
     );
     const descendantPid = Number(await waitForFile(pidFile));
     await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
@@ -613,6 +684,7 @@ describe("ProcessSupervisor", () => {
         timeoutMs: 100,
       }),
       new AbortController().signal,
+      "worker",
     );
     const descendantPid = Number(await waitForFile(pidFile));
 
@@ -635,6 +707,7 @@ describe("ProcessSupervisor", () => {
       new ProcessSupervisor().execute(
         request({ args: ["-e", `console.log(${JSON.stringify(VALID_ARTIFACT_EVENT)})`], timeoutMs: -1 }),
         new AbortController().signal,
+        "worker",
       ),
     ).rejects.toThrow(RangeError);
   });
@@ -644,6 +717,7 @@ describe("ProcessSupervisor", () => {
     const result = await supervisor.execute(
       request({ executable: path.join(workspace, "missing-executable"), args: [] }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result).toMatchObject({
@@ -663,6 +737,7 @@ describe("ProcessSupervisor", () => {
     const result = await supervisor.execute(
       request({ args: workerArgs("out.txt", "hello") }),
       controller.signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("cancelled");
@@ -681,6 +756,7 @@ describe("ProcessSupervisor", () => {
         ],
       }),
       new AbortController().signal,
+      "worker",
     );
 
     expect(result.outcome).toBe("completed");

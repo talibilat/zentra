@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { ReviewDecisionSchema } from "../reviews/reviewer-adapter.js";
-import type { WorkerAdapter, WorkerRequest, WorkerResult } from "./worker-adapter.js";
+import type {
+  InvocationKind,
+  WorkerAdapter,
+  WorkerRequest,
+  WorkerResult,
+} from "./worker-adapter.js";
 
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
 
@@ -48,7 +53,11 @@ export class ProcessSupervisor implements WorkerAdapter {
     );
   }
 
-  execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
+  execute(
+    request: WorkerRequest,
+    signal: AbortSignal,
+    kind: InvocationKind,
+  ): Promise<WorkerResult> {
     try {
       validDuration("timeoutMs", request.timeoutMs);
     } catch (error) {
@@ -205,7 +214,7 @@ export class ProcessSupervisor implements WorkerAdapter {
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
         const made = decision ?? { kind: "spawn_error", message: "no decision recorded" };
-        resolve(buildResult(made, request, stdoutChunks, stderrChunks, this.maxOutputBytes));
+        resolve(buildResult(made, kind, stdoutChunks, stderrChunks, this.maxOutputBytes));
       };
 
       const waitForStreamGrace = async (): Promise<void> => {
@@ -270,7 +279,7 @@ export class ProcessSupervisor implements WorkerAdapter {
 
 function buildResult(
   decision: Decision,
-  request: WorkerRequest,
+  kind: InvocationKind,
   stdoutChunks: readonly Buffer[],
   stderrChunks: readonly Buffer[],
   maxOutputBytes: number,
@@ -328,7 +337,7 @@ function buildResult(
     case "exit": {
       if (decision.code === 0) {
         const { events, plain } = parseJsonLines(rawStdout);
-        const protocolError = validateProtocolOutput(request, events);
+        const protocolError = validateProtocolOutput(kind, events);
         if (protocolError !== undefined) {
           return {
             outcome: "failed",
@@ -384,25 +393,21 @@ function appendSupervisorError(stderr: string, message: string): string {
 }
 
 function validateProtocolOutput(
-  request: WorkerRequest,
+  kind: InvocationKind,
   events: readonly unknown[],
 ): string | undefined {
-  if (request.taskId === "validation") {
-    return undefined;
+  switch (kind) {
+    case "validation":
+      return undefined;
+    case "reviewer":
+      return isReviewDecision(events)
+        ? undefined
+        : `reviewer protocol requires exactly one valid review decision, received ${events.length}`;
+    case "worker":
+      return isArtifactReady(events)
+        ? undefined
+        : `worker protocol requires exactly one valid artifact.ready event, received ${events.length}`;
   }
-  if (request.taskId === "review") {
-    return isReviewDecision(events)
-      ? undefined
-      : `reviewer protocol requires exactly one valid review decision, received ${events.length}`;
-  }
-  // Inline Node probes exercise an eventless process protocol. Worker and
-  // reviewer scripts must emit their invocation-specific structured event.
-  if (request.args[0] === "-e" && events.length === 0) {
-    return undefined;
-  }
-  return isArtifactReady(events)
-    ? undefined
-    : `worker protocol requires exactly one valid artifact.ready event, received ${events.length}`;
 }
 
 function isArtifactReady(events: readonly unknown[]): boolean {

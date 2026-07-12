@@ -442,11 +442,11 @@ describe("RecoveryService", () => {
       executable: process.execPath,
       args: [
         "-e",
-        `require("node:fs").writeFileSync("greeting.txt", "worker wrote this\\n")`,
+        `require("node:fs").writeFileSync("greeting.txt", "worker wrote this\\n"); console.log(JSON.stringify({ type: "artifact.ready", path: "greeting.txt", sha256: "${"0".repeat(64)}" }))`,
       ],
       cwd: lease.path,
       timeoutMs: 5_000,
-    }, AbortSignal.timeout(10_000));
+    }, AbortSignal.timeout(10_000), "worker");
     expect(workerResult.outcome).toBe("completed");
     closeJournal(first.journal);
 
