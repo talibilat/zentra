@@ -15,6 +15,12 @@ export interface WorkerResult {
   readonly stderr: string;
 }
 
+export type InvocationKind = "worker" | "validation" | "reviewer";
+
 export interface WorkerAdapter {
-  execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult>;
+  execute(
+    request: WorkerRequest,
+    signal: AbortSignal,
+    kind: InvocationKind,
+  ): Promise<WorkerResult>;
 }

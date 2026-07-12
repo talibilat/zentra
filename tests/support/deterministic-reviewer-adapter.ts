@@ -41,6 +41,7 @@ export class DeterministicReviewerAdapter implements ReviewerAdapter {
         timeoutMs: 30_000,
       },
       signal,
+      "reviewer",
     );
 
     if (result.outcome !== "completed") {
