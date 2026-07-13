@@ -1,0 +1,23 @@
+You are a fresh independent OpenCode reviewer performing the confirmation re-review of Zentra issue 016 (Critical) after fixes. READ-ONLY. Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-package
+Branch: fix/predeploy-c1-package
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run state-changing commands (npm pack --dry-run in a temp copy is acceptable but do not install globally or publish).
+
+Read:
+- docs/issues/016-critical-build-and-test-publishable-cli-package.md
+- docs/execution/issue-016-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+The two prior blocking findings were:
+1. The negative test only invoked package:verify and did not exercise the real npm pack lifecycle fail-closed for missing/stale output.
+2. scripts/package-files.mjs omitted inherited tsconfig.json and package.json from its hashed inputs and hard-coded the bin path instead of deriving it from package.json bin.
+
+Confirm both are fixed: the negative test now proves the actual package-creation lifecycle FAILS for a missing/stale/invalid binary or fixture; the stale-output hash now covers all build-defining inputs (tsconfig.json, tsconfig.build.json, package.json, fixtures, src) and the bin path is derived from package.json.
+
+OUT OF SCOPE (do NOT block): files allowlist (019), os/cpu (020), engines (021), license (018), distribution (017), CI (024).
+
+Give a decisive verdict: INTEGRATE (both findings resolved, no new blocking defect in owned scope) or BLOCK (exact file:line). Return your verdict as your final text output.

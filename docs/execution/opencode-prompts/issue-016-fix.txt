@@ -1,0 +1,19 @@
+You are the OpenCode fix agent for Zentra issue 016, addressing the two blocking review findings.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-package
+Branch: fix/predeploy-c1-package
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+Fix these findings:
+1. The negative packaging test currently only invokes `npm run package:verify`; it does not prove the actual `npm pack` lifecycle fails for missing/stale output (prepack rebuilds first). Rewrite/add a negative test that exercises the real package-creation fail-closed path: after removing or invalidating required production output (or the required fixture / bin target) in a way prepack does NOT silently repair, run the actual `npm pack` (or the prepack-invoked verification in the pack lifecycle) and assert package creation FAILS with a clear error. The test must prove packaging cannot produce a tarball with a missing/stale binary or fixture.
+2. scripts/package-files.mjs binds stale-output verification to an incomplete input set and hard-codes the binary path. Fix it to: (a) hash ALL build-defining inputs including the inherited tsconfig.json and package.json (in addition to tsconfig.build.json, fixtures, and src); (b) derive the binary/bin path from package.json `bin` rather than a duplicated hard-coded constant, so a changed bin target cannot pass verification while producing a tarball whose declared executable is absent.
+
+Then:
+- Run pnpm check, pnpm build, pnpm package:verify, npm pack --dry-run, a real npm pack + tarball inspection, and pnpm test; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-c1-package
+- Update docs/execution/issue-016-implementation-report.md with the fixes and new commit ids.
+
+Owned files: package.json (scripts/bin/lifecycle only), scripts/*.mjs, tsconfig.build.json, tests/package/*, and the report. Do NOT add a `files` allowlist, `os`, `cpu`, `engines`, or `license` (other issues). Do NOT edit application src.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether all verification passed and the branch is pushed.

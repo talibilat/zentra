@@ -1,0 +1,30 @@
+You are the OpenCode implementation agent for Zentra issue 012 (Low, Fixture Integrity pod).
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-fixture-012
+Branch: fix/predeploy-fixture-012
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: AGENTS.md, docs/issues/012-low-eliminate-fixture-attestation-toctou.md, src/fixtures/bundled-fixtures.ts, and how fixtures flow into worker/reviewer adapters (src/cli/main.ts, src/reviews/reviewer-adapter.ts).
+
+Context: issue 009 (content-aware review; deterministic reviewer moved to tests/) and issue 016 (packaged fixture layout) are integrated in this base. Use the same byte-binding guarantee for both packaged and source layouts.
+
+Implement issue 012: eliminate the fixture attestation time-of-check/time-of-use gap.
+Acceptance criteria:
+- Execution uses immutable private copied bytes or a descriptor-bound mechanism referring to the EXACT bytes that were hashed (not a re-opened pathname).
+- Document the chosen mechanism for macOS (atomicity, permissions, cleanup, executable invocation).
+- Private copies created under an owned 0700 directory, not writable by untrusted repository content.
+- Replacement, symlink, hard-link, and rename races cannot substitute executed bytes after attestation.
+- Packaged and source-layout fixture resolution use the same byte-binding guarantee.
+
+Required tests: deterministic race test that replaces the source pathname immediately after hashing and proves only attested bytes execute or execution fails closed; symlink, hard-link, permission, rename, and cleanup tests on macOS; packed-tarball execution coverage for the chosen mechanism.
+
+Anticipate reviewer criteria: the executed path must be the private copied/descriptor-bound bytes, not the original pathname; the 0700 temp dir must be created safely (no predictable name races); cleanup must be bounded and not leave executables behind; must work from the installed tarball layout too.
+
+Final verification: pnpm test, pnpm check, pnpm build on macOS; run with repeated fixture-replacement attempts and verify no unattested bytes execute.
+
+Owned files ONLY: src/fixtures/bundled-fixtures.ts, minimal fixture-resolution call-site plumbing if strictly required (keep edits confined), and related test files, plus the report. Do NOT change reviewer decision logic (009), package.json (016/019), or docs/issues/ briefs. If you must touch src/cli/main.ts fixture wiring, keep it to the minimal change to pass the byte-bound path.
+
+Commit after verification (concise message, no co-author trailer). Push -u origin fix/predeploy-fixture-012.
+Create docs/execution/issue-012-implementation-report.md (standard sections).
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED.
