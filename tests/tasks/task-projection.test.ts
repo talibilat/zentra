@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { artifactEvidenceSha256 } from "../../src/contracts/artifact.js";
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
@@ -492,6 +494,106 @@ describe("TaskService", () => {
     expect(stored[1]?.causationId).toBe("cause-1");
   });
 
+  it("appends a validated nonempty event batch in one journal transaction", () => {
+    const appendedBatches: string[][] = [];
+    class RecordingJournal extends SqliteEventJournal {
+      override append(
+        ...args: Parameters<SqliteEventJournal["append"]>
+      ): ReturnType<SqliteEventJournal["append"]> {
+        appendedBatches.push(args[2].map((event) => event.type));
+        return super.append(...args);
+      }
+    }
+    const journal = new RecordingJournal(":memory:");
+    journals.push(journal);
+    const service = new TaskService(journal);
+    service.create(createInput);
+    appendedBatches.length = 0;
+
+    const view = service.appendBatch("task-1", [
+      { type: "task.leased", payload: { leaseOwner: "worker-1" }, causationId: null },
+      { type: "task.started", payload: { workerId: "worker-1" }, causationId: "cause-2" },
+    ]);
+
+    expect(view).toMatchObject({ lifecycle: "running", streamVersion: 3 });
+    expect(journal.readStream("task-1").map((stored) => stored.type)).toEqual([
+      "task.created",
+      "task.leased",
+      "task.started",
+    ]);
+    expect(journal.readStream("task-1")[2]?.causationId).toBe("cause-2");
+    expect(appendedBatches).toEqual([["task.leased", "task.started"]]);
+  });
+
+  it("delegates a single append through appendBatch", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    let batchCalls = 0;
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batchCalls += 1;
+        return super.appendBatch(...args);
+      }
+    }
+    const service = new RecordingTaskService(journal);
+    service.create(createInput);
+
+    service.append("task-1", "task.leased", { leaseOwner: "worker-1" }, null);
+
+    expect(batchCalls).toBe(1);
+  });
+
+  it("rejects an empty batch without persistence", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+
+    expect(() => service.appendBatch("task-1", [])).toThrow("event batch must not be empty");
+    expect(journal.readStream("task-1")).toHaveLength(1);
+  });
+
+  it("validates the full prospective batch before persisting any event", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+
+    expect(() => service.appendBatch("task-1", [
+      { type: "task.leased", payload: { leaseOwner: "worker-1" }, causationId: null },
+      { type: "task.review_requested", payload: {}, causationId: null },
+    ])).toThrow("invalid transition from leased via task.review_requested");
+    expect(journal.readStream("task-1").map((stored) => stored.type)).toEqual(["task.created"]);
+  });
+
+  it.each(taskServiceArtifactBoundaries())(
+    "rolls back an incomplete marked $name artifact batch",
+    ({ prefix, marker, recorded }) => {
+      const { service, journal } = makeService();
+      service.create(createInput);
+      service.appendBatch("task-1", prefix);
+      const before = journal.readStream("task-1");
+
+      expect(() => service.appendBatch("task-1", [marker, recorded])).toThrow(
+        "requires an immediate consuming lifecycle event",
+      );
+      expect(journal.readStream("task-1")).toEqual(before);
+    },
+  );
+
+  it.each(taskServiceArtifactBoundaries())(
+    "rolls back a marked $name artifact batch with the wrong consumer",
+    ({ prefix, marker, recorded, wrongConsumer }) => {
+      const { service, journal } = makeService();
+      service.create(createInput);
+      service.appendBatch("task-1", prefix);
+      const before = journal.readStream("task-1");
+
+      expect(() => service.appendBatch("task-1", [marker, recorded, wrongConsumer])).toThrow(
+        "requires an immediate consuming lifecycle event",
+      );
+      expect(journal.readStream("task-1")).toEqual(before);
+    },
+  );
+
   it("rejects appending to an unknown task", () => {
     const { service } = makeService();
     expect(() => service.append("nope", "task.leased", {}, null)).toThrow();
@@ -625,3 +727,166 @@ describe("TaskService", () => {
     expect(journal.readStream("task-1")).toHaveLength(11);
   });
 });
+
+const artifactDigest = (value: string): string =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
+const servicePatch = {
+  diff: "diff",
+  diffSha256: artifactDigest("diff"),
+  changedPath: "greeting.txt",
+  changedContentSha256: artifactDigest("hello\n"),
+};
+const serviceValidation = {
+  name: "focused",
+  outcome: "completed" as const,
+  exitCode: 0,
+  stdout: "ok\n",
+  stderr: "",
+  startedAt: "2026-07-13T00:00:00.000Z",
+  finishedAt: "2026-07-13T00:00:01.000Z",
+  command: ["/usr/bin/node", "--test"],
+  argvSha256: artifactDigest(JSON.stringify(["/usr/bin/node", "--test"])),
+  outputSha256: artifactDigest(JSON.stringify({ stdout: "ok\n", stderr: "" })),
+  provenance: {
+    invocationId: "validation-1",
+    canonicalCwd: "/workspace",
+    subjectSha256: servicePatch.diffSha256,
+  },
+};
+const serviceReview = {
+  reviewerId: "reviewer-1",
+  approved: true,
+  diffSha256: servicePatch.diffSha256,
+  validationSha256: artifactEvidenceSha256("validation_report", serviceValidation),
+  decidedAt: "2026-07-13T00:00:02.000Z",
+  reason: "approved",
+};
+const serviceFullValidation = {
+  ...serviceValidation,
+  name: "full",
+  provenance: { ...serviceValidation.provenance, subjectSha256: "c".repeat(40) },
+};
+const serviceReceipt = {
+  taskId: "task-1",
+  projectId: "project-1",
+  sourceCommit: "a".repeat(40),
+  originalIntegrationCommit: "b".repeat(40),
+  resultCommit: "c".repeat(40),
+  review: serviceReview,
+  validation: serviceFullValidation,
+  outcome: "completed" as const,
+};
+
+type ServiceInput = {
+  type: string;
+  payload: unknown;
+  causationId: null;
+};
+
+function serviceArtifact(kind: "patch" | "validation_report" | "review_report" | "integration_receipt", evidence: unknown, phase?: "prepared" | "final"): ServiceInput {
+  const sha256 = artifactEvidenceSha256(kind, evidence);
+  return {
+    type: `artifact.${kind}_recorded`,
+    payload: {
+      artifact: {
+        artifactId: `artifact-${kind}-${phase ?? "only"}`,
+        taskId: "task-1",
+        kind,
+        path: `artifacts/${kind}.json`,
+        sha256,
+        createdAt: "2026-07-13T00:00:03.000Z",
+      },
+      evidence,
+      ...(phase === undefined ? {} : { phase }),
+    },
+    causationId: null,
+  };
+}
+
+function serviceMarker(recorded: ServiceInput): ServiceInput {
+  const artifact = (recorded.payload as { artifact: { artifactId: string; kind: string; sha256: string } }).artifact;
+  return {
+    type: "task.artifact_recording",
+    payload: {
+      artifactProtocolVersion: 1,
+      artifactId: artifact.artifactId,
+      kind: artifact.kind,
+      sha256: artifact.sha256,
+    },
+    causationId: null,
+  };
+}
+
+function taskServiceArtifactBoundaries(): readonly {
+  name: string;
+  prefix: ServiceInput[];
+  marker: ServiceInput;
+  recorded: ServiceInput;
+  wrongConsumer: ServiceInput;
+}[] {
+  const lifecycle = (type: string, payload: unknown = {}): ServiceInput => ({ type, payload, causationId: null });
+  const patchArtifact = serviceArtifact("patch", servicePatch);
+  const throughValidation = [
+    lifecycle("task.leased", { leaseOwner: "worker-1" }),
+    lifecycle("task.started", { workerId: "worker-1" }),
+    patchArtifact,
+    lifecycle("task.validation_started", {
+      diffSha256: servicePatch.diffSha256,
+      patch: { path: servicePatch.changedPath, sha256: servicePatch.changedContentSha256 },
+    }),
+  ];
+  const validationArtifact = serviceArtifact("validation_report", serviceValidation);
+  const throughReviewRequest = [
+    ...throughValidation,
+    validationArtifact,
+    lifecycle("task.review_requested", { reviewerId: "reviewer-1", validation: serviceValidation }),
+  ];
+  const reviewArtifact = serviceArtifact("review_report", serviceReview);
+  const throughIntegration = [
+    ...throughReviewRequest,
+    reviewArtifact,
+    lifecycle("task.review_approved", { review: serviceReview }),
+    lifecycle("task.integration_started", { sourceCommit: serviceReceipt.sourceCommit, review: serviceReview }),
+  ];
+  const preparedArtifact = serviceArtifact("integration_receipt", serviceReceipt, "prepared");
+  const failedReceipt = { ...serviceReceipt, outcome: "failed" as const };
+  const failedArtifact = serviceArtifact("integration_receipt", failedReceipt, "final");
+  return [
+    {
+      name: "patch",
+      prefix: throughValidation.slice(0, 2),
+      marker: serviceMarker(patchArtifact),
+      recorded: patchArtifact,
+      wrongConsumer: lifecycle("task.failed"),
+    },
+    {
+      name: "focused validation",
+      prefix: throughValidation,
+      marker: serviceMarker(validationArtifact),
+      recorded: validationArtifact,
+      wrongConsumer: lifecycle("task.denied", { validation: serviceValidation }),
+    },
+    {
+      name: "review",
+      prefix: throughReviewRequest,
+      marker: serviceMarker(reviewArtifact),
+      recorded: reviewArtifact,
+      wrongConsumer: lifecycle("task.denied", { review: serviceReview }),
+    },
+    {
+      name: "prepared integration receipt",
+      prefix: throughIntegration,
+      marker: serviceMarker(preparedArtifact),
+      recorded: preparedArtifact,
+      wrongConsumer: lifecycle("task.failed", { receipt: serviceReceipt }),
+    },
+    {
+      name: "final failure integration receipt",
+      prefix: throughIntegration,
+      marker: serviceMarker(failedArtifact),
+      recorded: failedArtifact,
+      wrongConsumer: lifecycle("task.cancelled", { receipt: failedReceipt }),
+    },
+  ];
+}
