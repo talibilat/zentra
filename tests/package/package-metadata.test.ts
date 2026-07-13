@@ -33,6 +33,7 @@ const npmInstallChecks = require(path.resolve(
     force: boolean,
     environment: { readonly os: string; readonly cpu: string },
   ): void;
+  checkEngine(target: PackageMetadata, npmVersion: string, nodeVersion: string): void;
 };
 const temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-metadata-test-")));
 const commandEnvironment = {
@@ -49,6 +50,9 @@ const commandEnvironment = {
 
 interface PackageMetadata {
   readonly _id?: string;
+  readonly name?: string;
+  readonly version?: string;
+  readonly engines?: { readonly node?: string };
   readonly os?: readonly string[];
   readonly cpu?: readonly string[];
 }
@@ -174,5 +178,42 @@ describe("MVP package platform metadata", () => {
       required: expect.objectContaining({ os: ["darwin"], cpu: ["arm64"] }),
     }));
     expect(existsSync(path.join(temporaryRoot, "node_modules", "zentra"))).toBe(false);
+  });
+});
+
+describe("MVP package Node.js metadata", () => {
+  it("declares the exact supported Node.js range", () => {
+    const metadata = readMetadata(path.join(repositoryRoot, "package.json"));
+
+    expect(metadata.engines?.node).toBe(">=24 <27");
+  });
+
+  it("retains the exact Node.js range in the packed package", async () => {
+    const metadata = await readPackedMetadata(await tarball);
+
+    expect(metadata.engines?.node).toBe(">=24 <27");
+  });
+
+  it("aligns the selected better-sqlite3 release with Node.js 24, 25, and 26", () => {
+    const dependencyMetadata = readMetadata(require.resolve("better-sqlite3/package.json"));
+
+    expect(dependencyMetadata.version).toBe("12.11.1");
+    expect(dependencyMetadata.engines?.node).toBe("20.x || 22.x || 23.x || 24.x || 25.x || 26.x");
+    for (const nodeVersion of ["24.0.0", "25.0.0", "26.0.0"]) {
+      expect(() => npmInstallChecks.checkEngine(dependencyMetadata, "11.8.0", nodeVersion)).not.toThrow();
+    }
+    expect(() => npmInstallChecks.checkEngine(dependencyMetadata, "11.8.0", "27.0.0"))
+      .toThrow(expect.objectContaining({ code: "EBADENGINE" }));
+  });
+
+  it("makes strict engine enforcement reject Node.js 27 for the packed package", async () => {
+    const metadata = await readPackedMetadata(await tarball);
+
+    expect(() => npmInstallChecks.checkEngine(metadata, "11.8.0", "27.0.0"))
+      .toThrow(expect.objectContaining({
+        code: "EBADENGINE",
+        current: { node: "27.0.0", npm: "11.8.0" },
+        required: { node: ">=24 <27" },
+      }));
   });
 });

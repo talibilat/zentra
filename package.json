@@ -23,7 +23,7 @@
     "start": "node dist/src/cli/main.js"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24 <27"
   },
   "os": [
     "darwin"

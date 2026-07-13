@@ -23,7 +23,8 @@ The MVP supports only macOS on Apple Silicon (`darwin`/`arm64`).
 The current local conformance evidence was produced on macOS 26.6 arm64.
 That observation is not a claim that untested macOS versions work, and Intel (`x64`) macOS, Linux, and Windows remain unsupported.
 
-Install Node.js 24 or newer and pnpm 10 on a supported host.
+Install Node.js 24, 25, or 26 and pnpm 10 on a supported host.
+The exact package engine range is `>=24 <27`; Node.js 27 and later are unsupported until an explicit compatibility review widens that bound.
 
 The package declares its supported operating system and CPU through npm `os` and `cpu` metadata.
 npm rejects other targets with `EBADPLATFORM` before installing Zentra, rather than allowing an operator to reach operational commands with an untested process, filesystem, Git, SQLite, or native-addon stack.
