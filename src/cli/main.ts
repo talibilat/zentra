@@ -9,6 +9,7 @@ import { Command, CommanderError } from "commander";
 import { ValidationRunner } from "../capabilities/validation-runner.js";
 import {
   resolveBundledFixture,
+  type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
@@ -223,29 +224,33 @@ function createProgram(
         return;
       }
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
-      const result = await withSystem(options.database, configs, "read-write", async (system) => {
-        const taskView = await system.execution(workerFixture, reviewer.adapter).orchestrator.run({
-          taskId: options.taskId,
-          projectId: projectConfig.projectId,
-          title: options.title,
-          workerId: WORKER_ID,
-          reviewerId: reviewer.reviewerId,
-          workerRequest: {
-            executable: process.execPath,
-            args: [
-              workerFixture,
-              "--file",
-              options.file,
-              "--content",
-              options.content,
-            ],
-            timeoutMs: WORKER_TIMEOUT_MS,
-          },
-          signal,
+      try {
+        const result = await withSystem(options.database, configs, "read-write", async (system) => {
+          const taskView = await system.execution(workerFixture.path, reviewer.adapter).orchestrator.run({
+            taskId: options.taskId,
+            projectId: projectConfig.projectId,
+            title: options.title,
+            workerId: WORKER_ID,
+            reviewerId: reviewer.reviewerId,
+            workerRequest: {
+              executable: process.execPath,
+              args: [
+                workerFixture.path,
+                "--file",
+                options.file,
+                "--content",
+                options.content,
+              ],
+              timeoutMs: WORKER_TIMEOUT_MS,
+            },
+            signal,
+          });
+          return taskView;
         });
-        return taskView;
-      });
-      setResult(taskRunResult(result));
+        setResult(taskRunResult(result));
+      } finally {
+        workerFixture.cleanup();
+      }
     });
 
   task
@@ -357,6 +362,7 @@ function composeSystem(
           reviewer,
           new ReviewGate(),
           new IntegrationQueue(git, validations),
+          workerFixture,
         ),
       };
     },
@@ -397,7 +403,7 @@ function loadProjects(configPath: string): readonly ProjectConfig[] {
   }
 }
 
-function attestedWorkerFixture(anchor?: string | URL): string {
+function attestedWorkerFixture(anchor?: string | URL): BundledFixture {
   try {
     return anchor === undefined
       ? resolveBundledFixture("deterministic-worker.mjs")

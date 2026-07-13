@@ -1,9 +1,16 @@
+import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
+  existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
+  renameSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -61,15 +68,97 @@ function copiedLayout(
 
 describe("resolveBundledFixture", () => {
   it.each(["source", "built"] as const)(
-    "returns the canonical attested worker path from the exact %s layout",
+    "returns a private byte-bound worker from the exact %s layout",
     (layout) => {
       const copied = copiedLayout(layout);
 
       for (const name of fixtureNames) {
-        expect(resolveBundledFixture(name, copied.anchor)).toBe(realpathSync(copied.fixtures[name]));
+        const fixture = resolveBundledFixture(name, copied.anchor);
+        try {
+          expect(fixture.path).not.toBe(realpathSync(copied.fixtures[name]));
+          expect(statSync(path.dirname(fixture.path)).mode & 0o777).toBe(0o700);
+          expect(statSync(fixture.path).mode & 0o777).toBe(0o500);
+        } finally {
+          fixture.cleanup();
+        }
       }
     },
   );
+
+  it.each(["replacement", "rename"] as const)(
+    "executes only attested bytes after a source %s race",
+    (race) => {
+      const copied = copiedLayout("source");
+      const source = copied.fixtures["deterministic-worker.mjs"];
+      const fixture = resolveBundledFixture("deterministic-worker.mjs", copied.anchor);
+      const malicious = path.join(copied.root, "malicious-worker.mjs");
+      writeFileSync(malicious, 'throw new Error("UNATTESTED_MARKER");\n', "utf8");
+      if (race === "replacement") {
+        rmSync(source);
+        copyFileSync(malicious, source);
+      } else {
+        renameSync(source, `${source}.attested`);
+        renameSync(malicious, source);
+      }
+
+      try {
+        const workspace = path.join(copied.root, "workspace");
+        mkdirSync(workspace);
+        const result = spawnSync(process.execPath, [
+          fixture.path,
+          "--workspace",
+          workspace,
+          "--file",
+          "greeting.txt",
+          "--content",
+          "attested bytes executed\n",
+        ], { encoding: "utf8", shell: false });
+        expect(result.status).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).not.toContain("UNATTESTED_MARKER");
+        expect(readFileSync(path.join(workspace, "greeting.txt"), "utf8"))
+          .toBe("attested bytes executed\n");
+      } finally {
+        fixture.cleanup();
+      }
+    },
+  );
+
+  it("copies bytes onto a distinct inode so later hard-link writes cannot alter execution", () => {
+    const copied = copiedLayout("source");
+    const source = copied.fixtures["deterministic-worker.mjs"];
+    const linked = path.join(copied.root, "linked-worker.mjs");
+    linkSync(source, linked);
+    const fixture = resolveBundledFixture("deterministic-worker.mjs", copied.anchor);
+
+    try {
+      writeFileSync(linked, 'throw new Error("UNATTESTED_MARKER");\n', "utf8");
+      expect(readFileSync(fixture.path, "utf8")).not.toContain("UNATTESTED_MARKER");
+      expect(statSync(fixture.path).ino).not.toBe(statSync(source).ino);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when source permissions prevent reading", () => {
+    const copied = copiedLayout("source");
+    const source = copied.fixtures["deterministic-worker.mjs"];
+    chmodSync(source, 0o000);
+
+    expect(() => resolveBundledFixture("deterministic-worker.mjs", copied.anchor))
+      .toThrow(/unavailable|read|permission/i);
+  });
+
+  it("removes the private executable and directory during bounded cleanup", () => {
+    const copied = copiedLayout("source");
+    const fixture = resolveBundledFixture("deterministic-worker.mjs", copied.anchor);
+    const directory = path.dirname(fixture.path);
+
+    fixture.cleanup();
+    fixture.cleanup();
+
+    expect(existsSync(fixture.path)).toBe(false);
+    expect(existsSync(directory)).toBe(false);
+  });
 
   it.each(fixtureNames)("rejects modified bytes for %s", (name) => {
     const copied = copiedLayout("source");

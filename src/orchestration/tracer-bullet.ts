@@ -10,7 +10,6 @@ import type {
 } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
 import type { TerminalOutcome } from "../contracts/task.js";
-import { resolveBundledFixture } from "../fixtures/bundled-fixtures.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -88,6 +87,7 @@ export class TracerBulletOrchestrator {
     private readonly reviewer: ReviewerAdapter,
     private readonly reviews: ReviewGate,
     private readonly integrations: IntegrationQueue,
+    private readonly workerFixture: string,
   ) {}
 
   async run(input: {
@@ -136,7 +136,7 @@ export class TracerBulletOrchestrator {
           "worker args must contain a fixture entry point and omit --workspace",
         );
       }
-      const workerInput = await validateWorkerAuthority(input.workerRequest);
+      const workerInput = await validateWorkerAuthority(input.workerRequest, this.workerFixture);
       const gitOptions: GitRunOptions = {
         signal: input.signal,
         timeoutMs: workerTimeoutMs,
@@ -490,6 +490,7 @@ export class TracerBulletOrchestrator {
 
 async function validateWorkerAuthority(
   request: Omit<WorkerRequest, "taskId" | "cwd">,
+  expectedFixture: string,
 ): Promise<DeterministicWorkerInput> {
   const executable = await realpath(request.executable);
   const nodeExecutable = await realpath(process.execPath);
@@ -500,7 +501,7 @@ async function validateWorkerAuthority(
   const parsedInput = parseWorkerInput(request.args);
   const fixture = parsedInput.fixture;
   const fixturePath = await realpath(fixture);
-  const bundledFixture = resolveBundledFixture("deterministic-worker.mjs");
+  const bundledFixture = await realpath(expectedFixture);
   if (fixturePath !== bundledFixture) {
     throw new Error("tracer worker script must be Zentra's bundled deterministic fixture");
   }

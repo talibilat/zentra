@@ -171,6 +171,7 @@ function system(configPath: string, overrides: SystemOverrides = {}) {
     overrides.reviewer ?? new DeterministicReviewerAdapter(supervisor, reviewerFixture),
     new ReviewGate(),
     overrides.integrations ?? new IntegrationQueue(new GitClient(), validations),
+    workerFixture,
   );
   return { journal, orchestrator, tasks };
 }
@@ -481,6 +482,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new GitClient(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({
@@ -566,6 +568,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new CandidateCleanupFailingGit(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({
@@ -615,6 +618,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new GitClient(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -34,10 +35,15 @@ afterEach(() => {
   }
 });
 
-async function run(executable: string, args: readonly string[], cwd: string) {
+async function run(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+) {
   return execFileAsync(executable, [...args], {
     cwd,
-    env: process.env,
+    env,
     maxBuffer: 10 * 1_024 * 1_024,
   });
 }
@@ -145,6 +151,8 @@ describe("publishable CLI package", () => {
     const reviewer = path.join(consumer, "reviewer.mjs");
     copyFileSync(path.join(repositoryRoot, "tests", "fixtures", "content-aware-reviewer.mjs"), reviewer);
     const project = await initializeProject(consumer);
+    const fixtureTemp = path.join(consumer, "fixture-temp");
+    mkdirSync(fixtureTemp, { mode: 0o700 });
     const operational = await run(binary, [
       "task", "run",
       "--config", project.config,
@@ -156,7 +164,7 @@ describe("publishable CLI package", () => {
       "--reviewer-executable", realpathSync(process.execPath),
       "--reviewer-argument", reviewer,
       "--reviewer-id", "package-reviewer",
-    ], consumer);
+    ], consumer, { ...process.env, TMPDIR: fixtureTemp });
     expect(operational.stderr).toBe("");
     expect(JSON.parse(operational.stdout)).toMatchObject({
       command: "task.run",
@@ -166,6 +174,44 @@ describe("publishable CLI package", () => {
     expect(existsSync(project.database)).toBe(true);
     expect((await run("git", ["show", "zentra/integration:greeting.txt"], project.repository)).stdout)
       .toBe("hello from package\n");
+
+    const installedFixtureModule = await import(pathToFileURL(
+      path.join(installedRoot, "dist", "src", "fixtures", "bundled-fixtures.js"),
+    ).href) as {
+      resolveBundledFixture(name: "deterministic-worker.mjs"): {
+        readonly path: string;
+        cleanup(): void;
+      };
+    };
+    const installedSource = path.join(installedRoot, "fixtures", "deterministic-worker.mjs");
+    const attestedBytes = readFileSync(installedSource);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      writeFileSync(installedSource, attestedBytes);
+      const fixture = installedFixtureModule.resolveBundledFixture("deterministic-worker.mjs");
+      const privateDirectory = path.dirname(fixture.path);
+      try {
+        writeFileSync(installedSource, 'throw new Error("UNATTESTED_PACKAGE_MARKER");\n', "utf8");
+        const workspace = path.join(consumer, `replacement-workspace-${attempt}`);
+        mkdirSync(workspace);
+        const result = spawnSync(process.execPath, [
+          fixture.path,
+          "--workspace",
+          workspace,
+          "--file",
+          "greeting.txt",
+          "--content",
+          `attested package attempt ${attempt}\n`,
+        ], { encoding: "utf8", shell: false });
+        expect(result.status).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).not.toContain("UNATTESTED_PACKAGE_MARKER");
+      } finally {
+        fixture.cleanup();
+      }
+      expect(existsSync(fixture.path)).toBe(false);
+      expect(existsSync(privateDirectory)).toBe(false);
+    }
+    writeFileSync(installedSource, attestedBytes);
+    expect(readdirSync(fixtureTemp)).toEqual([]);
   }, 120_000);
 
   it("fails npm pack when the declared binary target is not produced", async () => {
