@@ -18,9 +18,17 @@ import {
 import { isVerifiedReviewDecision } from "../reviews/review-gate.js";
 import type { CommandResult, GitClient } from "../workspaces/git-client.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
+import {
+  IntegrationLeaseStore,
+  type IntegrationLease,
+  type IntegrationLeaseKey,
+} from "./integration-lease.js";
 
-const projectTails = new Map<string, Promise<void>>();
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
+const INTEGRATION_LEASE_MS = 10_000;
+const INTEGRATION_LEASE_RENEWAL_MS = 3_000;
+const INTEGRATION_LEASE_RETRY_MS = 50;
+const INTEGRATION_LEASE_DATABASE = ".zentra-integration-leases.sqlite";
 const verifiedIntegrationReceipts = new WeakSet<IntegrationReceipt>();
 
 export interface IntegrationReceipt {
@@ -62,6 +70,14 @@ export class IntegrationUncertainError extends Error {
   }
 }
 
+export class IntegrationLeaseLostError extends Error {
+  override readonly name = "IntegrationLeaseLostError";
+
+  constructor() {
+    super("integration lease ownership was lost");
+  }
+}
+
 class IntegrationPreparationError extends Error {
   override readonly name = "IntegrationPreparationError";
 }
@@ -86,15 +102,24 @@ export class IntegrationQueue {
     return [...this.cleanupFailures];
   }
 
-  integrate(input: {
+  async integrate(input: {
     project: ProjectConfig;
     lease: WorkspaceLease;
     review: ReviewDecision;
     signal: AbortSignal;
     onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
   }): Promise<IntegrationReceipt> {
-    return withProjectLock(input.project.projectId, () =>
-      this.integrateUnderLock(input),
+    const integrationRef = `refs/heads/${input.project.integrationBranch}`;
+    const commonDirectory = await canonicalGitCommonDirectory(
+      this.git,
+      input.project.repositoryPath,
+    );
+    const key = { commonDirectory, integrationRef };
+    return withIntegrationLease(key, input.signal, (assertLease, leaseSignal) =>
+      this.integrateUnderLock(
+        { ...input, signal: AbortSignal.any([input.signal, leaseSignal]) },
+        assertLease,
+      ),
     );
   }
 
@@ -104,7 +129,7 @@ export class IntegrationQueue {
     review: ReviewDecision;
     signal: AbortSignal;
     onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
-  }): Promise<IntegrationReceipt> {
+  }, assertLease: () => void): Promise<IntegrationReceipt> {
     const { project, lease, review, signal } = input;
     const integrationRef = `refs/heads/${project.integrationBranch}`;
     let candidatePath: string | null = null;
@@ -116,6 +141,7 @@ export class IntegrationQueue {
 
     let source: CommandResult;
     try {
+      assertLease();
       source = await this.git.run(
         project.repositoryPath,
         ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
@@ -296,6 +322,7 @@ export class IntegrationQueue {
         );
       }
 
+      assertLease();
       const canonicalWorktreeRoot = await realpath(project.worktreeRoot);
       candidateRoot = await mkdtemp(
         path.join(canonicalWorktreeRoot, ".zentra-integration-"),
@@ -444,6 +471,7 @@ export class IntegrationQueue {
       let validation: ValidationReport;
       const validationInvocationId = randomUUID();
       const canonicalCandidatePath = await realpath(candidatePath);
+      assertLease();
       try {
         validation = await this.validations.run(
           project,
@@ -519,6 +547,7 @@ export class IntegrationQueue {
           unavailableValidation(project, "failed", "full validation lacks verified provenance"),
         );
       }
+      assertLease();
       const preparedReceipt = prepareCompletedReceipt({
         taskId: lease.taskId,
         projectId: project.projectId,
@@ -538,6 +567,7 @@ export class IntegrationQueue {
 
       let update: CommandResult;
       let uncertainUpdateReason: string | null = null;
+      assertLease();
       try {
         update = await this.git.run(
           project.repositoryPath,
@@ -568,6 +598,7 @@ export class IntegrationQueue {
       if (uncertainUpdateReason !== null) {
         let reconciled: CommandResult;
         try {
+          assertLease();
           reconciled = await this.git.run(
             project.repositoryPath,
             [
@@ -796,27 +827,91 @@ function validCompletedFullValidation(
   }
 }
 
-async function withProjectLock<T>(
-  projectId: string,
-  action: () => Promise<T>,
+async function withIntegrationLease<T>(
+  key: IntegrationLeaseKey,
+  signal: AbortSignal,
+  action: (assertLease: () => void, leaseSignal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  const previous = projectTails.get(projectId) ?? Promise.resolve();
-  let release = (): void => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.then(() => current);
-  projectTails.set(projectId, tail);
-
-  await previous;
+  const store = new IntegrationLeaseStore(
+    path.join(key.commonDirectory, INTEGRATION_LEASE_DATABASE),
+  );
+  let lease: IntegrationLease | null = null;
   try {
-    return await action();
-  } finally {
-    release();
-    if (projectTails.get(projectId) === tail) {
-      projectTails.delete(projectId);
+    lease = store.acquire(key, INTEGRATION_LEASE_MS);
+    while (lease === null) {
+      if (signal.aborted) {
+        throw new IntegrationExecutionError("cancelled", "lease acquisition");
+      }
+      await new Promise((resolve) => setTimeout(resolve, INTEGRATION_LEASE_RETRY_MS));
+      if (signal.aborted) {
+        throw new IntegrationExecutionError("cancelled", "lease acquisition");
+      }
+      lease = store.acquire(key, INTEGRATION_LEASE_MS);
     }
+
+    const acquiredLease = lease;
+    if (acquiredLease === null) throw new Error("integration lease acquisition failed");
+    let currentLease = acquiredLease;
+    let lost = false;
+    const leaseController = new AbortController();
+    const renew = (): void => {
+      if (lost) throw new IntegrationLeaseLostError();
+      const renewed = store.renew(currentLease, INTEGRATION_LEASE_MS);
+      if (renewed === null) {
+        lost = true;
+        leaseController.abort();
+        throw new IntegrationLeaseLostError();
+      }
+      currentLease = renewed;
+    };
+    const renewal = setInterval(() => {
+      try {
+        renew();
+      } catch {
+        lost = true;
+        leaseController.abort();
+      }
+    }, INTEGRATION_LEASE_RENEWAL_MS);
+    renewal.unref();
+    try {
+      const result = await action(renew, leaseController.signal);
+      if (lost) throw new IntegrationLeaseLostError();
+      return result;
+    } finally {
+      clearInterval(renewal);
+      if (!store.release(currentLease) && !lost) {
+        throw new IntegrationLeaseLostError();
+      }
+    }
+  } finally {
+    store.close();
   }
+}
+
+async function canonicalGitCommonDirectory(
+  git: GitClient,
+  repositoryPath: string,
+): Promise<string> {
+  const result = await git.run(repositoryPath, [
+    "--no-optional-locks",
+    "--no-replace-objects",
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ], { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+  if (result.termination !== null) {
+    throw new IntegrationExecutionError(result.termination, "Git common directory inspection");
+  }
+  const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+  if (
+    result.exitCode !== 0 ||
+    result.truncated ||
+    lines.length !== 1 ||
+    !path.isAbsolute(lines[0]!)
+  ) {
+    throw new IntegrationExecutionError("failed", "Git common directory inspection");
+  }
+  return realpath(lines[0]!);
 }
 
 function unavailableValidation(
