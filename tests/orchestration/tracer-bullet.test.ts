@@ -18,7 +18,6 @@ import {
   ValidationRunner,
   type ValidationReport,
 } from "../../src/capabilities/validation-runner.js";
-import { projectArtifacts } from "../../src/contracts/artifact.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -250,7 +249,7 @@ describe("TracerBulletOrchestrator", () => {
       title: "Update greeting",
       lifecycle: "terminal",
       terminalOutcome: "completed",
-      streamVersion: 16,
+      streamVersion: 12,
       leaseOwner: "worker-1",
     });
     expect(tasks.get("task-greeting")).toEqual(result);
@@ -266,38 +265,30 @@ describe("TracerBulletOrchestrator", () => {
       "task.created",
       "task.leased",
       "task.started",
-      "artifact.patch_recorded",
       "task.validation_started",
-      "artifact.validation_report_recorded",
       "task.review_requested",
-      "artifact.review_report_recorded",
       "task.review_approved",
       "task.integration_started",
-      "artifact.integration_receipt_recorded",
       "task.integration_prepared",
       "task.integration_observed",
       "task.cleanup_started",
       "task.cleanup_completed",
       "task.completed",
     ]);
-    const validationStarted = events.find((event) => event.type === "task.validation_started");
-    expect(validationStarted?.payload).toMatchObject({
+    expect(events[3]?.payload).toMatchObject({
       patch: { path: "greeting.txt", sha256: sha256("hello from Zentra\n") },
       diffSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    const reviewRequested = events.find((event) => event.type === "task.review_requested");
-    expect(reviewRequested?.payload).toMatchObject({
+    expect(events[4]?.payload).toMatchObject({
       validation: { name: "focused", outcome: "completed", exitCode: 0 },
     });
-    const approved = events.find((event) => event.type === "task.review_approved")?.payload as {
-      review: unknown;
-    };
-    expect(events.find((event) => event.type === "task.integration_observed")?.payload).toMatchObject({
+    const approved = events[5]?.payload as { review: unknown };
+    expect(events[8]?.payload).toMatchObject({
       verification: "verified",
       receipt: { outcome: "completed" },
       cleanupFailures: [],
     });
-    const completed = events.find((event) => event.type === "task.completed")?.payload as {
+    const completed = events[11]?.payload as {
       receipt: { outcome: string; resultCommit: string; review: unknown };
     };
     expect(completed.receipt).toMatchObject({
@@ -310,23 +301,6 @@ describe("TracerBulletOrchestrator", () => {
         "rev-parse",
         "refs/heads/zentra/integration",
       ]),
-    );
-    const artifactView = projectArtifacts(events);
-    expect(artifactView.artifacts.map((artifact) => artifact.kind)).toEqual([
-      "patch",
-      "validation_report",
-      "review_report",
-      "integration_receipt",
-    ]);
-    const patchArtifact = artifactView.artifacts.find((artifact) => artifact.kind === "patch")!;
-    const review = approved.review as { diffSha256: string };
-    expect(patchArtifact.sha256).toBe(review.diffSha256);
-    const receiptArtifact = artifactView.artifacts.find(
-      (artifact) => artifact.kind === "integration_receipt",
-    )!;
-    expect(receiptArtifact.sha256).toBe(sha256(JSON.stringify(completed.receipt)));
-    expect(artifactView.artifacts.every((artifact) => artifact.path.startsWith("artifacts/"))).toBe(
-      true,
     );
     expect(existsSync(path.join(fixture.worktreeRoot, runInput.taskId))).toBe(false);
     const ticketRef = await new GitClient().run(fixture.repositoryPath, [
@@ -764,7 +738,6 @@ describe("TracerBulletOrchestrator", () => {
       ],
     });
     expect(result.terminalOutcome).toBe("cancelled");
-    expect(projectArtifacts(journal.readStream(runInput.taskId)).artifacts).toEqual([]);
     expect(journal.readStream(runInput.taskId).map((event) => event.type)).toEqual([
       "task.created",
       "task.leased",
@@ -1065,15 +1038,11 @@ describe("TracerBulletOrchestrator", () => {
       });
 
       expect(result.terminalOutcome).toBe(outcome);
-      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
-        artifact.kind)).toEqual(["patch", "validation_report"]);
       expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
         "task.created",
         "task.leased",
         "task.started",
-        "artifact.patch_recorded",
         "task.validation_started",
-        "artifact.validation_report_recorded",
         `task.${outcome}`,
       ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
@@ -1214,21 +1183,12 @@ describe("TracerBulletOrchestrator", () => {
     });
 
     expect(result.terminalOutcome).toBe(outcome);
-    expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
-      artifact.kind)).toEqual(
-        kind === "valid"
-          ? ["patch", "validation_report", "review_report"]
-          : ["patch", "validation_report"],
-      );
     expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
       "task.created",
       "task.leased",
       "task.started",
-      "artifact.patch_recorded",
       "task.validation_started",
-      "artifact.validation_report_recorded",
       "task.review_requested",
-      ...(kind === "valid" ? ["artifact.review_report_recorded"] : []),
       `task.${outcome}`,
     ]);
   });
@@ -1294,7 +1254,7 @@ describe("TracerBulletOrchestrator", () => {
         }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
-      const { journal, orchestrator } = system(fixture.configPath, {
+      const { orchestrator } = system(fixture.configPath, {
         worktrees: new TerminatingWorktrees(),
         integrations: new RecordingIntegration(new GitClient(), validations),
       });
@@ -1307,8 +1267,6 @@ describe("TracerBulletOrchestrator", () => {
 
       expect(result.terminalOutcome).toBe(outcome);
       expect(integrationCalls).toBe(0);
-      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
-        artifact.kind)).toEqual(["patch", "validation_report", "review_report"]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
     },
   );
@@ -1368,13 +1326,6 @@ describe("TracerBulletOrchestrator", () => {
       });
 
       expect(result.terminalOutcome).toBe(outcome);
-      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
-        artifact.kind)).toEqual([
-          "patch",
-          "validation_report",
-          "review_report",
-          "integration_receipt",
-        ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
       const terminalPayload = journal.readStream(result.taskId).at(-1)?.payload as {
         candidateCleanupFailures: readonly CleanupFailure[];
@@ -1472,18 +1423,11 @@ describe("TracerBulletOrchestrator", () => {
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
     expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.integration_observed");
-    const observation = journal.readStream(result.taskId).at(-1)?.payload;
-    if (_case === "review provenance") {
-      expect(observation).toMatchObject({
-        verification: "failed",
-        receipt: { outcome: "completed" },
-        reason: expect.any(String),
-      });
-    } else {
-      expect(observation).toMatchObject({
-        error: { message: expect.stringContaining("contradictory integration receipt") },
-      });
-    }
+    expect(journal.readStream(result.taskId).at(-1)?.payload).toMatchObject({
+      verification: "failed",
+      receipt: { outcome: "completed" },
+      reason: expect.any(String),
+    });
   });
 
   it("rejects a symbolic integration ref in an otherwise completed receipt", async () => {
