@@ -492,6 +492,46 @@ describe("projectArtifacts", () => {
     ])).toThrow("task.review_requested requires successful validation evidence");
   });
 
+  it("rejects a review request backed by successful non-focused validation", () => {
+    const nonFocused = { ...validation, name: "full" };
+    expect(() => projectArtifacts([
+      event("task.created", 1, { projectId: "project-1", title: "task" }),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch),
+      event("task.validation_started", 5, validationStartedPayload),
+      artifactEvent("validation_report", 6, nonFocused),
+      event("task.review_requested", 7, {
+        reviewerId: "reviewer-1",
+        validation: nonFocused,
+      }),
+    ])).toThrow("task.review_requested requires successful focused validation evidence");
+  });
+
+  it.each([
+    ["task.completed", "failed"],
+    ["task.cancelled", "completed"],
+    ["task.timed_out", "completed"],
+    ["task.failed", "completed"],
+  ] as const)(
+    "rejects %s with a contradictory %s receipt outcome",
+    (terminalType, receiptOutcome) => {
+      const events = completeArtifactChain();
+      const contradictoryReceipt = { ...receipt, outcome: receiptOutcome };
+      events[12] = artifactEvent(
+        "integration_receipt",
+        13,
+        contradictoryReceipt,
+        "artifact-integration-final",
+        "final",
+      );
+      events.push(event(terminalType, 14, { receipt: contradictoryReceipt }));
+      expect(() => projectArtifacts(events)).toThrow(
+        `${terminalType} contradicts integration receipt outcome`,
+      );
+    },
+  );
+
   it.each(["task.review_approved", "task.integration_started"])(
     "rejects %s when the retained review is denied",
     (boundary) => {

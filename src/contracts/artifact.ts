@@ -377,6 +377,9 @@ function validateLifecycleArtifactReference(
       }
       if (event.type === "task.review_requested") {
         const report = ValidationEvidenceSchema.parse(payload.validation);
+        if (report.name !== "focused") {
+          throw new Error("task.review_requested requires successful focused validation evidence");
+        }
         if (report.outcome !== "completed" || report.exitCode !== 0) {
           throw new Error("task.review_requested requires successful validation evidence");
         }
@@ -438,6 +441,12 @@ function validateLifecycleArtifactReference(
       const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
       if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
         throw new Error("lifecycle event references contradictory integration receipt evidence");
+      }
+      if (
+        isTerminalEvent(event.type) &&
+        IntegrationReceiptEvidenceSchema.parse(payload.receipt).outcome !== event.type.slice(5)
+      ) {
+        throw new Error(`${event.type} contradicts integration receipt outcome`);
       }
     }
   }
