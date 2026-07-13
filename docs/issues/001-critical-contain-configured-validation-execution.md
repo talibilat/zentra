@@ -1,8 +1,7 @@
 # 001 - Contain Configured Validation Execution
 
 Severity: Critical.
-Initial status: Blocked on trust-model decision.
-Current disposition: Implemented and verified under the accepted Trusted-Project MVP authority model; see `docs/execution/issue-001-implementation-report.md`.
+Status: Blocked on trust-model decision.
 Execution wave: Wave 1, Pod A.
 Suggested owner scope: Validation policy, project configuration, validation runner, and security documentation.
 Dependencies: A named human trust-model decision.

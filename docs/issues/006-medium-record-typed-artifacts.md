@@ -1,8 +1,7 @@
 # 006 - Record Typed Artifacts
 
 Severity: Medium.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-006-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod B.
 Suggested owner scope: Artifact contracts, task events, tracer evidence, integration receipts, and replay tests.
 Dependencies: Issue 009.

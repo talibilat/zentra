@@ -1,8 +1,7 @@
 # 009 - Require Content-Aware Independent Review
 
 Severity: High.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-009-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod B.
 Suggested owner scope: Reviewer protocol, CLI reviewer configuration, review evidence, and fail-closed defaults.
 Dependencies: None.

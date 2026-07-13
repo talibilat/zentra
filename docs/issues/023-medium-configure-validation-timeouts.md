@@ -1,8 +1,7 @@
 # 023 - Configure Validation Timeouts
 
 Severity: Medium.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-023-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod A.
 Suggested owner scope: Project timeout schema, validation runner policy, defaults, maximums, and documentation.
 Dependencies: The named-human issue 001 trust-model decision.

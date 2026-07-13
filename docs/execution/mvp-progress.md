@@ -1,15 +1,12 @@
 # Zentra MVP Execution Progress
 
-Immutable historical snapshot: This document preserves the original MVP execution state through commit `5060c2f` on 2026-07-12.
-The MVP was subsequently merged into `main` by commit `b49f17a`; later remediation is recorded separately.
+## Current State
 
-## Historical State At `5060c2f`
-
-- Phase at snapshot: MVP implementation and completion gate complete.
-- Active task at snapshot: none.
-- Last verified implementation commit at snapshot: `5060c2f` on `feature/zentra-mvp`.
-- Blocking issue at snapshot: none.
-- Then-current next action: keep `feature/zentra-mvp` available for human review without merging it to `main`.
+- Current phase: MVP implementation and completion gate are complete.
+- Active task: none.
+- Last verified implementation commit: `5060c2f` on `feature/zentra-mvp`.
+- Blocking issue: none.
+- Next action: keep `feature/zentra-mvp` available for human review without merging it to `main`.
 
 ## Task Ledger
 

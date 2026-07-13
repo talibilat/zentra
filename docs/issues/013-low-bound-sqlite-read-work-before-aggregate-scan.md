@@ -1,8 +1,7 @@
 # 013 - Bound SQLite Read Work Before Aggregate Scan
 
 Severity: Low.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-013-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod D.
 Suggested owner scope: SQLite journal admission limits, bounded queries, and malicious database tests.
 Dependencies: None.

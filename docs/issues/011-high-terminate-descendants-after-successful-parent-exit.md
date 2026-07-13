@@ -1,8 +1,7 @@
 # 011 - Terminate Descendants After Successful Parent Exit
 
 Severity: High.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-011-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod A.
 Suggested owner scope: Process supervision, process-group termination, stream grace, and child-lifetime tests.
 Dependencies: None.

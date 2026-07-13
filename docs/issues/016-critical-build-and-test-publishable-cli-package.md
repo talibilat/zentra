@@ -1,8 +1,7 @@
 # 016 - Build And Test Publishable CLI Package
 
 Severity: Critical.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-016-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod C.
 Suggested owner scope: Production build, package lifecycle, tarball installation, and binary end-to-end testing.
 Dependencies: None.

@@ -1,8 +1,7 @@
 # 008 - Trace URL Parse Deprecation
 
 Severity: Low.
-Initial status: Needs reproduction.
-Current disposition: Closed as not reproduced; see `docs/execution/issue-008-reproduction-report.md`.
+Status: Needs reproduction.
 Execution wave: Wave 1, Pod C.
 Suggested owner scope: CLI dependency tracing before any dependency remediation is proposed.
 Dependencies: None.

@@ -1,8 +1,7 @@
 # 026 - Update Stale Execution Documents
 
 Severity: Low.
-Initial status: Open.
-Current disposition: Implemented and verified; see `docs/execution/issue-026-implementation-report.md`.
+Status: Open.
 Execution wave: Wave 1, Pod C.
 Suggested owner scope: Historical execution documents and current repository-state labeling.
 Dependencies: None.
