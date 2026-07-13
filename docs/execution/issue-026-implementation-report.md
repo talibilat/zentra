@@ -18,7 +18,7 @@ After pull request #1 merged the MVP into `main` at `b49f17a`, readers could int
 ## Changes Made
 
 Both execution reports now identify themselves as historical snapshots as of commit `5060c2f` on 2026-07-12.
-Both reports state that commit `b49f17a` subsequently merged the MVP into `main` through pull request #1 and link to the pre-deployment remediation progress ledger for current remediation status.
+Both reports state that commit `b49f17a` subsequently merged the MVP into `main` through pull request #1 and link to the pre-deployment remediation progress ledger for the later historical execution record.
 The handoff's obsolete merge prohibition and other imperative restrictions are now descriptions of constraints that governed the historical execution.
 Original commit identities, verification results, evidence, risks, and execution decisions remain unchanged.
 
@@ -33,7 +33,7 @@ Original commit identities, verification results, evidence, risks, and execution
 ## Acceptance Criteria Evidence
 
 The reports explicitly distinguish the immutable `5060c2f` execution snapshot from the subsequent `b49f17a` merge state.
-The current merge state is stated near the top of each report and is unambiguous without changing historical verification evidence.
+The post-snapshot merge state is stated near the top of each report and is unambiguous without changing historical verification evidence.
 All formerly current-looking merge instructions are qualified as historical execution constraints.
 
 ## Remaining Concerns

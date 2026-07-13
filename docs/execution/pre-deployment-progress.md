@@ -1,5 +1,11 @@
 # Pre-Deployment Remediation Progress Ledger
 
+Status: Historical execution ledger.
+Present-tense process, inventory, blocker, and next-action fields below are frozen execution records and are not current operator instructions.
+
+Snapshot update at `0221e052c64c6ad91e4cdbb39259c5893ec4e4f1`: issues 001, 006, 009, 011, 013, 016, 023, and 026 were implemented and verified; issue 008 was closed as not reproduced.
+The remaining issue files retain their original dispositions and must be evaluated against later history before execution.
+
 Integration steward: Claude Code (orchestration controller only; no product-code edits).
 All implementation, testing, review, and documentation edits are performed by separate OpenCode processes.
 
@@ -9,7 +15,7 @@ All implementation, testing, review, and documentation edits are performed by se
 - Integration branch: `fix/pre-deployment`
 - Integration worktree: `.worktrees/predeploy-integration` (reserved for merges, progress records, final verification only)
 - Issue corpus base commit: `f54ba31` (`docs/pre-deployment-issues`, pushed to origin)
-- Current integration commit: `f674bf8` (adds 026 + 016). Closed (7): 001+016(Crit), 009+011(High), 008+013+026(Low). In flight: 023 (review), 006 (review), 019+012 (writers).
+- Last integration checkpoint captured by the live ledger: `f674bf8` (adds 026 + 016). At that checkpoint, 023 and 006 were in review and 019 and 012 had writers.
 - Node: v24.2.0
 - pnpm: 10.0.0
 - OpenCode: 1.17.18 (`/Users/talibilat/.opencode/bin/opencode`)
@@ -88,7 +94,7 @@ Baseline note for issue 008 (C0): `node --trace-deprecation dist/src/cli/main.js
 
 Baseline verdict: all six commands green at `f54ba31`. Safe to begin Wave 1.
 
-## Active OpenCode Processes
+## Historical OpenCode Processes At The Recorded Checkpoint
 
 Model: azure/gpt-5.6-sol. Launched without `--auto`. Logs under docs/execution/opencode-logs/.
 
@@ -165,10 +171,10 @@ OpenCode's plugin/built-in skills (superpowers TDD, code-review, requesting-code
 - **001 packaged denied-executable canary** test is delegated to **issue 016** packaged CLI testing + final package gate.
 - **013 hard statement interrupt**: better-sqlite3 exposes no async statement interrupt/progress handler; bounded-work guarantee is STRUCTURAL (db/WAL/shm size admission + indexed limit-plus-one). Documented residual; acceptable for this LOW issue.
 
-## Blockers
+## Historical Blockers At The Recorded Checkpoint
 
-- Human decisions pending for issues 001, 017, 018, 027 (see table above).
+- At this checkpoint, follow-up remained for issues 017, 018, and 027; the issue 001 Trusted-Project decision had already been recorded above.
 
-## Exact Next Action
+## Historical Next Action At The Recorded Checkpoint
 
 Monitor the 4 running writers (013, 011, 009, 001-retry1) to completion. On each writer DONE: verify git state + implementation report, dispatch a fresh read-only OpenCode spec reviewer and a separate code-quality/security reviewer, resolve Critical/Important findings via fresh fix sessions, then integrate with --no-ff into fix/pre-deployment from the integration worktree and re-run the baseline. Separately, spec-review the 008 NOT_REPRODUCED evidence and integrate its doc to formally release Pod C1 (016). Human decisions all recorded (001 Trusted-Project MVP, 017 GitHub release tarball, 018 MIT [holder TBC], 027 GitHub private advisories).

@@ -5,7 +5,7 @@ Date: 2026-07-12
 Status: Immutable historical snapshot, complete on `feature/zentra-mvp` as of commit `5060c2f` on 2026-07-12.
 
 The MVP was subsequently merged into `main` by commit `b49f17a` through pull request #1 on 2026-07-12.
-See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for current remediation status.
+See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for the historical execution record that followed this snapshot.
 
 ## Outcome
 

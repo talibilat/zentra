@@ -6,7 +6,8 @@
 
 ## Plans
 
-- `plans/mvp.md` defines the first local tracer-bullet implementation.
+- `plans/mvp.md` preserves the completed historical plan for the first local tracer-bullet implementation.
+- Its code snippets and exact interfaces describe the task-time target, not the current operator or public API contract after remediation.
 
 ## Context
 
@@ -22,7 +23,8 @@
 When documents conflict, use this order:
 
 1. Approved Zentra design.
-2. Current approved Zentra implementation plan.
-3. Zentra repository instructions.
-4. Zoe client context.
-5. Imported process references.
+2. Zentra repository instructions and current source contracts.
+3. Current operator documentation in the repository README.
+4. Active approved implementation plans, when present.
+5. Zoe client context.
+6. Completed historical plans, execution records, and imported process references.

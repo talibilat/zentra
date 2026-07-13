@@ -189,7 +189,7 @@ Every task reaches exactly one terminal outcome:
 - `completed`
 - `cancelled`
 - `denied`
-- `timed out`
+- `timed_out`
 - `failed`
 
 Blocked, interrupted, awaiting approval, and process exited are lifecycle states or causes rather than terminal outcomes.
@@ -321,9 +321,10 @@ Individual agents do not independently interrupt the user.
 
 ### Integration Queue
 
-Each project has an ordered integration queue.
+Each project has an ordered integration queue in the target architecture.
 
-The queue rebases, checks conflicts, runs focused and required full validation, integrates accepted changes, and retains post-integration evidence.
+The long-term queue may rebase according to project policy, check conflicts, run focused and required full validation, integrate accepted changes, and retain post-integration evidence.
+The current MVP instead validates a detached merge candidate and updates the integration ref through compare-and-swap.
 
 ## Authority Separation
 
@@ -422,6 +423,9 @@ Import one approved coding ticket
 This workflow exercises every core abstraction without requiring broad personal-assistant scope.
 
 ## Initial Deployment
+
+This section describes the target post-MVP local deployment, not the current deterministic tracer-bullet implementation.
+The current MVP is a CLI process without a daemon or multi-agent pod.
 
 The first version is local-first and single-user.
 

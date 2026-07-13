@@ -45,7 +45,7 @@ Artifact creation timestamps are persisted ISO timestamps created immediately be
 
 `projectArtifacts` rebuilds artifact metadata and retained evidence exclusively from stored events.
 Replay hashes the retained exact patch diff bytes and rejects the artifact if either `artifact.sha256` or `evidence.diffSha256` contradicts that independently computed digest.
-Replay rejects malformed event payloads, unsafe paths, duplicate artifact IDs, duplicate artifact kinds, contradictory evidence digests, invalid artifact ordering, events after terminalization, and lifecycle evidence without the required prior artifact.
+Replay rejects malformed event payloads, unsafe paths, duplicate artifact IDs, duplicate artifact kinds except the defined final-receipt replacement of one prepared receipt, contradictory evidence digests, invalid artifact ordering, events after terminalization, and lifecycle evidence without the required prior artifact.
 Replay also rejects a lifecycle stream after every artifact event has been deleted because the retained immutable stream versions reveal the removed records.
 Replay also binds the review artifact to the exact patch and focused-validation artifacts and binds the integration receipt to the exact review artifact.
 Identity, path, timestamp, command, output, diff, review, and receipt strings now have explicit contract bounds.
@@ -54,7 +54,8 @@ Contiguous legacy streams without artifact events remain readable, while streams
 
 Every newly recorded artifact is preceded by a `task.artifact_recording` marker that binds protocol version, artifact identity, kind, and digest.
 The artifact projection requires the exact marked artifact next and therefore detects deletion of a trailing artifact even when no surviving adjacency reveals a stream-version gap.
-Task projection permits the marker's bounded in-flight state between the two journal appends, while direct artifact replay fails closed on a marker without its artifact.
+Marker, artifact, and any immediately consuming lifecycle event are validated and persisted atomically in one journal batch.
+Task projection permits a tail marker only for prospective batch validation and legacy or tampered stream handling, while direct artifact replay fails closed on a durable marker without its artifact.
 
 Lifecycle replay now requires `task.review_requested.validation`, `task.review_approved.review`, `task.integration_started.review`, and `task.integration_prepared.receipt` rather than validating those properties only when present.
 Focused validation provenance must name the exact patch digest, review evidence must use the requested reviewer, and receipt evidence must match the stream task, created project, integration source, retained review, candidate result, and full-validation subject.
@@ -66,6 +67,7 @@ Legacy pre-CAS receipt events without an explicit phase are inferred as prepared
 
 Validation artifact evidence now enforces the canonical outcome and exit-code combinations and requires `finishedAt` not to precede `startedAt`.
 Historical reports that predate timeout fields remain accepted, while reports that contain timeout fields must retain matching bounded top-level and provenance values.
+Final HEAD hardening also requires success-only lifecycle evidence at review and preparation boundaries, preserves prepared receipt provenance in a later failed final receipt, uses prototype-safe replay maps, and atomically records artifact batches.
 
 ## Tests Added
 
@@ -82,7 +84,7 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - Failure-stage artifact enumeration for worker cancellation, validation failure, review denial or rejection, commit termination, and integration failure.
 - End-to-end deletion of every `artifact.*_recorded` event followed by replay rejection for the missing patch artifact.
 - Acceptance and bounded mismatch rejection for issue 023 validation timeout evidence.
-- Crash-after-append deletion tests for patch, validation, review, and integration-receipt artifacts.
+- Post-batch deletion tests for patch, validation, review, and integration-receipt artifacts.
 - Missing-property tamper tests for every evidence-bearing lifecycle event.
 - Substitution tests for focused subject, requested reviewer, receipt task, project, source, result, and full-validation provenance.
 - A real-Git tracer test where the integration ref moves after preparation and CAS returns a final terminal failure.
@@ -104,6 +106,7 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - `pnpm check` after the independent-review fixes: passed with no TypeScript errors.
 - `pnpm build` after the independent-review fixes: passed.
 - `git diff --check` after the independent-review fixes: passed with no output.
+- Fresh verification at final target `0221e05`: `pnpm test` passed 18 test files and 629 tests; `pnpm check`, `pnpm build`, `pnpm package:verify`, built CLI help, and `git diff --check` all passed.
 
 ## Acceptance Criteria Evidence
 
@@ -113,7 +116,7 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - `projectArtifacts(journal.readStream(taskId))` enumerates all artifacts after the worktree has been removed.
 - Tampered replay fails closed for identity, digest, order, individual missing-reference violations, and deletion of all artifact events with deterministic bounded errors.
 - Changing both recorded patch digest fields cannot defeat replay because the retained exact diff bytes provide an independent digest source.
-- A surviving artifact-protocol marker makes every trailing artifact deletion detectable without relying on a following event or version gap.
+- A surviving artifact-protocol marker makes every trailing artifact deletion detectable after an atomically recorded batch without relying on a following event or version gap.
 - Prepared integration evidence remains restart-recoverable, while final failed CAS evidence is exact, typed, terminal, and non-contradictory.
 - Validation, review, and receipt artifacts are bound through the full task, project, identity, digest, commit, result, and validation-provenance chain.
 
@@ -125,11 +128,11 @@ Historical reports that predate timeout fields remain accepted, while reports th
 
 ## Self-Review
 
-The Standards review compared `57d812c...984ae1d` against `AGENTS.md` and the approved orchestrator design.
+The original Standards review compared `57d812c...984ae1d` against `AGENTS.md` and the approved orchestrator design.
 No standards findings remained.
 The implementation keeps the event journal authoritative, keeps projections rebuildable, introduces no shell or external authority, and changes only issue-owned paths.
 
-The Spec review compared the same range against every acceptance criterion, required test, final verification item, and non-goal in `docs/issues/006-medium-record-typed-artifacts.md`.
+The original Spec review compared the same range against every acceptance criterion, required test, final verification item, and non-goal in `docs/issues/006-medium-record-typed-artifacts.md`.
 No specification findings remained.
 The four schemas, durable metadata, exact digest bindings, journal-only projection, fail-closed replay checks, required malformed and failure-stage tests, and explicit delete-all tamper test are present.
 No remote blob store was added, bounded retained evidence remains bounded, and lifecycle events were not replaced.
@@ -157,4 +160,6 @@ A future artifact store can extend the safe logical path semantics without chang
 - Safety revert: `57d812c` (`Revert "merge: integrate issue 006 - typed artifact recording with journal replay"`).
 - Recovery: `e237ee0` (`Reapply "merge: integrate issue 006 - typed artifact recording with journal replay"`).
 - Delete-all replay and timeout compatibility fix: `984ae1d` (`fix: reject deleted artifact event streams`).
+- Independent-review fixes: `afa8773` (`fix: harden artifact evidence replay`).
+- Final review hardening: `0221e05` (`no-mistakes(review): Harden artifact replay, recovery, and reviewer containment`).
 - Recovery report update: the commit containing this report.

@@ -1,5 +1,10 @@
 # Pre-Deployment Issue Corpus
 
+Status: Historical issue corpus created at `f54ba31`.
+Individual issue status fields, scheduling instructions, and unchecked acceptance criteria record the initial remediation state unless a `Current disposition` line says otherwise.
+At snapshot `0221e052c64c6ad91e4cdbb39259c5893ec4e4f1`, issues 001, 006, 009, 011, 013, 016, 023, and 026 were implemented and verified, while issue 008 was closed as not reproduced.
+Use implementation reports and later Git history before acting on any remaining issue.
+
 This corpus contains exactly 28 issue files: 27 deployment findings and one deferred enhancement.
 The deployment findings comprise 3 Critical, 7 High, 9 Medium, and 8 Low issues.
 Issue 005 is the deferred enhancement and is excluded from deployment closure.
