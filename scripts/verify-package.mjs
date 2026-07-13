@@ -1,27 +1,25 @@
-import { lstatSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 
 import {
   collectBuildInputs,
   collectBuildOutputs,
   digestFiles,
-  manifestPath,
-  packageRoot,
   requiredBinaries,
   requiredFixture,
+  validatePackageFile,
 } from "./package-files.mjs";
 
 try {
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const validatedManifest = validatePackageFile("dist/package-manifest.json");
+  const manifest = JSON.parse(readFileSync(validatedManifest.absolutePath, "utf8"));
   if (manifest.schemaVersion !== 1) throw new Error("unsupported production manifest");
-  assertRegularFile(requiredFixture);
+  validatePackageFile(requiredFixture);
   for (const requiredBinary of requiredBinaries) {
-    assertRegularFile(requiredBinary);
-    const binary = path.join(packageRoot, requiredBinary);
+    const { absolutePath: binary, stat } = validatePackageFile(requiredBinary);
     if (!readFileSync(binary, "utf8").startsWith("#!/usr/bin/env node\n")) {
       throw new Error(`${requiredBinary} has no Node.js shebang`);
     }
-    if ((lstatSync(binary).mode & 0o111) === 0) {
+    if ((stat.mode & 0o111) === 0) {
       throw new Error(`${requiredBinary} is not executable`);
     }
   }
@@ -31,13 +29,6 @@ try {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Package verification failed: ${message}`);
   process.exitCode = 1;
-}
-
-function assertRegularFile(file) {
-  const stat = lstatSync(path.join(packageRoot, file));
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`${file} must be a regular non-symlink file`);
-  }
 }
 
 function assertExactHashes(kind, expected, actual) {
