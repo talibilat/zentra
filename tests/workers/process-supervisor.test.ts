@@ -593,7 +593,7 @@ describe("ProcessSupervisor", () => {
     }
   });
 
-  it("settles within the forced bound when group and leader signaling are denied", async () => {
+  it("fails after cancellation when group exit cannot be confirmed", async () => {
     const pidFile = path.join(workspace, "denied-leader.pid");
     const controller = new AbortController();
     const realKill = process.kill.bind(process);
@@ -624,7 +624,49 @@ describe("ProcessSupervisor", () => {
       ]);
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 
-      expect(result.outcome).toBe("cancelled");
+      expect(result.outcome).toBe("failed");
+      expect(result.stderr).toContain("process group survived bounded termination");
+      expect(elapsedMs).toBeLessThan(500);
+      expect(processExists(leaderPid)).toBe(true);
+    } finally {
+      kill.mockRestore();
+      if (leaderPid !== undefined && processExists(leaderPid)) {
+        process.kill(leaderPid, "SIGKILL");
+      }
+    }
+  });
+
+  it("fails after timeout when group exit cannot be confirmed", async () => {
+    const pidFile = path.join(workspace, "timed-out-denied-leader.pid");
+    const realKill = process.kill.bind(process);
+    let leaderPid: number | undefined;
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signalName) => {
+      if (signalName !== 0) {
+        const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      return realKill(pid, signalName);
+    });
+
+    try {
+      const startedAt = process.hrtime.bigint();
+      const pending = new ProcessSupervisor({ forcedTerminationMs: 60 }).execute(
+        request({ args: [waitingLeaderFixture, pidFile], timeoutMs: 100 }),
+        new AbortController().signal,
+        "worker",
+      );
+      leaderPid = Number(await waitForFile(pidFile));
+      const result = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("supervisor did not settle after timeout")), 500),
+        ),
+      ]);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+
+      expect(result.outcome).toBe("failed");
+      expect(result.stderr).toContain("process group survived bounded termination");
       expect(elapsedMs).toBeLessThan(500);
       expect(processExists(leaderPid)).toBe(true);
     } finally {
