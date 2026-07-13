@@ -66,6 +66,14 @@ async function waitForFile(filePath: string): Promise<void> {
   }
 }
 
+async function waitForCondition(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 function terminatedGitResult(
   termination: "cancelled" | "timed_out",
 ): CommandResult {
@@ -848,7 +856,7 @@ describe("IntegrationQueue", () => {
     expect(existsSync(path.join(worktreeRoot, ".integration-candidates"))).toBe(false);
   });
 
-  it("runs only one integration at a time per project across queue instances", async () => {
+  it("runs only one integration at a time for one common directory and ref", async () => {
     const lockPath = path.join(baseDir, "validation.lock");
     const overlapPath = path.join(baseDir, "validation.overlap");
     project.validations.full = [
@@ -885,6 +893,95 @@ describe("IntegrationQueue", () => {
         `${project.integrationBranch}:second.txt`,
       ]),
     ).toBe("second");
+  });
+
+  it("does not serialize a reused project ID across canonical repositories", async () => {
+    const otherRepository = path.join(baseDir, "other-repository");
+    mkdirSync(otherRepository);
+    const reviewed = await ticket("task-reused-project", "reused.txt", "change\n");
+    const sourceResolvers: Array<() => void> = [];
+    let concurrentSourceReads = 0;
+
+    class ConcurrentSourceGitClient extends GitClient {
+      override run(cwd: string, args: readonly string[]): Promise<CommandResult> {
+        if (args.includes("--git-common-dir")) {
+          return Promise.resolve({
+            stdout: `${cwd}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
+          });
+        }
+        if (args[0] === "rev-parse" && args[1] === "--verify") {
+          concurrentSourceReads += 1;
+          return new Promise((resolve) => sourceResolvers.push(() => resolve({
+            stdout: `${"a".repeat(40)}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
+          })));
+        }
+        throw new Error(`unexpected Git call: ${args.join(" ")}`);
+      }
+    }
+
+    const fakeReview = { ...reviewed.review };
+    const otherProject = { ...project, repositoryPath: otherRepository };
+    const pending = [project, otherProject].map((selectedProject, index) =>
+      new IntegrationQueue(
+        new ConcurrentSourceGitClient(),
+        new ValidationRunner(new ProcessSupervisor()),
+      ).integrate({
+        project: selectedProject,
+        lease: { taskId: `reuse-${index}`, branch: `ticket/reuse-${index}`, path: repositoryPath },
+        review: fakeReview,
+        signal: AbortSignal.timeout(10_000),
+      })
+    );
+
+    await waitForCondition(() => concurrentSourceReads === 2);
+    for (const resolve of sourceResolvers) resolve();
+    await expect(Promise.all(pending)).resolves.toEqual([
+      expect.objectContaining({ outcome: "failed" }),
+      expect.objectContaining({ outcome: "failed" }),
+    ]);
+  });
+
+  it("does not serialize different exact refs in one canonical repository", async () => {
+    const reviewed = await ticket("task-different-refs", "refs.txt", "change\n");
+    const sourceResolvers: Array<() => void> = [];
+    let concurrentSourceReads = 0;
+
+    class ConcurrentRefGitClient extends GitClient {
+      override run(cwd: string, args: readonly string[]): Promise<CommandResult> {
+        if (args.includes("--git-common-dir")) {
+          return Promise.resolve({
+            stdout: `${repositoryPath}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
+          });
+        }
+        if (args[0] === "rev-parse" && args[1] === "--verify") {
+          concurrentSourceReads += 1;
+          return new Promise((resolve) => sourceResolvers.push(() => resolve({
+            stdout: `${"b".repeat(40)}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
+          })));
+        }
+        throw new Error(`unexpected Git call: ${args.join(" ")}`);
+      }
+    }
+
+    const fakeReview = { ...reviewed.review };
+    const pending = [project, { ...project, integrationBranch: "release" }].map(
+      (selectedProject, index) => new IntegrationQueue(
+        new ConcurrentRefGitClient(),
+        new ValidationRunner(new ProcessSupervisor()),
+      ).integrate({
+        project: selectedProject,
+        lease: { taskId: `ref-${index}`, branch: `ticket/ref-${index}`, path: repositoryPath },
+        review: fakeReview,
+        signal: AbortSignal.timeout(10_000),
+      }),
+    );
+
+    await waitForCondition(() => concurrentSourceReads === 2);
+    for (const resolve of sourceResolvers) resolve();
+    await expect(Promise.all(pending)).resolves.toEqual([
+      expect.objectContaining({ outcome: "failed" }),
+      expect.objectContaining({ outcome: "failed" }),
+    ]);
   });
 
   it("fails CAS when the integration ref moves after candidate validation", async () => {
