@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import {
   canonicalValidationDigest,
@@ -8,7 +8,7 @@ import {
 import { DeterministicReviewerAdapter } from "../support/deterministic-reviewer-adapter.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
 import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -59,6 +59,30 @@ function reviewerScript(source: string): string {
   const fixture = path.join(makeTempDir(), "reviewer.mjs");
   writeFileSync(fixture, source, "utf8");
   return fixture;
+}
+
+async function waitForFile(filePath: string, timeoutMs = 5_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const content = readFileSync(filePath, "utf8");
+      if (content.length > 0) return content;
+    } catch {
+      // Not written yet.
+    }
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
 }
 
 describe("DeterministicReviewerAdapter", () => {
@@ -484,6 +508,54 @@ describe("ProcessReviewerAdapter", () => {
     await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
       .rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
     expect(performance.now() - startedAt).toBeLessThan(750);
+  });
+
+  // Covers same-process-group descendants, not re-detached sessions (a documented residual risk).
+  it("does not accept a review while its owned process group still has a surviving descendant", async () => {
+    const pidFile = path.join(makeTempDir(), "descendant.pid");
+    const fixture = reviewerScript(`
+      import { createHash } from "node:crypto";
+      import { spawn } from "node:child_process";
+      import { writeFileSync } from "node:fs";
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) body += chunk;
+      const request = JSON.parse(body);
+      const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+        stdio: "ignore"
+      });
+      writeFileSync(${JSON.stringify(pidFile)}, String(descendant.pid));
+      descendant.unref();
+      console.log(JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(body).digest("hex"), diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "reviewed" }));
+    `);
+    const realKill = process.kill.bind(process);
+    let groupKillAttempted = false;
+    let descendantPid: number | undefined;
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signalName) => {
+      if (pid < 0 && signalName === "SIGKILL") {
+        groupKillAttempted = true;
+        const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      return realKill(pid, signalName);
+    });
+
+    try {
+      const review = processReviewer(fixture).review(input, AbortSignal.timeout(5_000));
+      descendantPid = Number(await waitForFile(pidFile));
+
+      await expect(review).rejects.toEqual(
+        expect.objectContaining({ outcome: "failed" }),
+      );
+      expect(groupKillAttempted).toBe(true);
+      expect(processExists(descendantPid)).toBe(true);
+    } finally {
+      kill.mockRestore();
+      if (descendantPid !== undefined && processExists(descendantPid)) {
+        process.kill(descendantPid, "SIGKILL");
+      }
+    }
   });
 
   it("fails closed when the reviewer times out", async () => {
