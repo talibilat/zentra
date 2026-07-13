@@ -25,9 +25,9 @@ import {
 } from "./integration-lease.js";
 
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
-const INTEGRATION_LEASE_MS = 10_000;
-const INTEGRATION_LEASE_RENEWAL_MS = 3_000;
-const INTEGRATION_LEASE_RETRY_MS = 50;
+const DEFAULT_INTEGRATION_LEASE_MS = 10_000;
+const DEFAULT_INTEGRATION_LEASE_RENEWAL_MS = 3_000;
+const DEFAULT_INTEGRATION_LEASE_RETRY_MS = 50;
 const INTEGRATION_LEASE_DATABASE = ".zentra-integration-leases.sqlite";
 const verifiedIntegrationReceipts = new WeakSet<IntegrationReceipt>();
 
@@ -90,16 +90,47 @@ export interface CleanupFailure {
   readonly timestamp: string;
 }
 
+export interface LeaseAnomaly {
+  readonly commonDirectory: string;
+  readonly integrationRef: string;
+  readonly reason: string;
+  readonly timestamp: string;
+}
+
+export interface IntegrationQueueOptions {
+  /** Test-only seam: overrides the lease acquisition/renewal duration in milliseconds. */
+  readonly integrationLeaseMs?: number;
+  /** Test-only seam: overrides the lease renewal interval in milliseconds. */
+  readonly integrationLeaseRenewalMs?: number;
+  /** Test-only seam: overrides the lease acquisition retry interval in milliseconds. */
+  readonly integrationLeaseRetryMs?: number;
+}
+
 export class IntegrationQueue {
   private readonly cleanupFailures: CleanupFailure[] = [];
+  private readonly leaseAnomalies: LeaseAnomaly[] = [];
+  private readonly integrationLeaseMs: number;
+  private readonly integrationLeaseRenewalMs: number;
+  private readonly integrationLeaseRetryMs: number;
 
   constructor(
     private readonly git: GitClient,
     private readonly validations: ValidationRunner,
-  ) {}
+    options: IntegrationQueueOptions = {},
+  ) {
+    this.integrationLeaseMs = options.integrationLeaseMs ?? DEFAULT_INTEGRATION_LEASE_MS;
+    this.integrationLeaseRenewalMs =
+      options.integrationLeaseRenewalMs ?? DEFAULT_INTEGRATION_LEASE_RENEWAL_MS;
+    this.integrationLeaseRetryMs =
+      options.integrationLeaseRetryMs ?? DEFAULT_INTEGRATION_LEASE_RETRY_MS;
+  }
 
   getCleanupFailures(): readonly CleanupFailure[] {
     return [...this.cleanupFailures];
+  }
+
+  getLeaseAnomalies(): readonly LeaseAnomaly[] {
+    return [...this.leaseAnomalies];
   }
 
   async integrate(input: {
@@ -115,11 +146,27 @@ export class IntegrationQueue {
       input.project.repositoryPath,
     );
     const key = { commonDirectory, integrationRef };
-    return withIntegrationLease(key, input.signal, (assertLease, leaseSignal) =>
-      this.integrateUnderLock(
-        { ...input, signal: AbortSignal.any([input.signal, leaseSignal]) },
-        assertLease,
-      ),
+    return withIntegrationLease(
+      key,
+      input.signal,
+      (assertLease, leaseSignal) =>
+        this.integrateUnderLock(
+          { ...input, signal: AbortSignal.any([input.signal, leaseSignal]) },
+          assertLease,
+        ),
+      (reason) => {
+        this.leaseAnomalies.push({
+          commonDirectory: key.commonDirectory,
+          integrationRef: key.integrationRef,
+          reason,
+          timestamp: new Date().toISOString(),
+        });
+      },
+      {
+        leaseMs: this.integrationLeaseMs,
+        renewalMs: this.integrationLeaseRenewalMs,
+        retryMs: this.integrationLeaseRetryMs,
+      },
     );
   }
 
@@ -691,7 +738,8 @@ export class IntegrationQueue {
       if (
         error instanceof IntegrationExecutionError ||
         error instanceof IntegrationUncertainError ||
-        error instanceof IntegrationPreparationError
+        error instanceof IntegrationPreparationError ||
+        error instanceof IntegrationLeaseLostError
       ) {
         throw error;
       }
@@ -827,26 +875,45 @@ function validCompletedFullValidation(
   }
 }
 
+interface IntegrationLeaseTimings {
+  readonly leaseMs: number;
+  readonly renewalMs: number;
+  readonly retryMs: number;
+}
+
 async function withIntegrationLease<T>(
   key: IntegrationLeaseKey,
   signal: AbortSignal,
   action: (assertLease: () => void, leaseSignal: AbortSignal) => Promise<T>,
+  onLeaseAnomaly?: (reason: string) => void,
+  timings: IntegrationLeaseTimings = {
+    leaseMs: DEFAULT_INTEGRATION_LEASE_MS,
+    renewalMs: DEFAULT_INTEGRATION_LEASE_RENEWAL_MS,
+    retryMs: DEFAULT_INTEGRATION_LEASE_RETRY_MS,
+  },
 ): Promise<T> {
   const store = new IntegrationLeaseStore(
     path.join(key.commonDirectory, INTEGRATION_LEASE_DATABASE),
   );
+  const recordAnomaly = (reason: string): void => {
+    try {
+      onLeaseAnomaly?.(reason);
+    } catch {
+      // Diagnostics recording must never mask the real outcome of the critical section.
+    }
+  };
   let lease: IntegrationLease | null = null;
   try {
-    lease = store.acquire(key, INTEGRATION_LEASE_MS);
+    lease = store.acquire(key, timings.leaseMs);
     while (lease === null) {
       if (signal.aborted) {
         throw new IntegrationExecutionError("cancelled", "lease acquisition");
       }
-      await new Promise((resolve) => setTimeout(resolve, INTEGRATION_LEASE_RETRY_MS));
+      await new Promise((resolve) => setTimeout(resolve, timings.retryMs));
       if (signal.aborted) {
         throw new IntegrationExecutionError("cancelled", "lease acquisition");
       }
-      lease = store.acquire(key, INTEGRATION_LEASE_MS);
+      lease = store.acquire(key, timings.leaseMs);
     }
 
     const acquiredLease = lease;
@@ -856,7 +923,7 @@ async function withIntegrationLease<T>(
     const leaseController = new AbortController();
     const renew = (): void => {
       if (lost) throw new IntegrationLeaseLostError();
-      const renewed = store.renew(currentLease, INTEGRATION_LEASE_MS);
+      const renewed = store.renew(currentLease, timings.leaseMs);
       if (renewed === null) {
         lost = true;
         leaseController.abort();
@@ -871,18 +938,41 @@ async function withIntegrationLease<T>(
         lost = true;
         leaseController.abort();
       }
-    }, INTEGRATION_LEASE_RENEWAL_MS);
+    }, timings.renewalMs);
     renewal.unref();
+
+    // Settle the try-block outcome (success value or thrown error) before doing
+    // any lease-release bookkeeping. A real completed result, or a real thrown
+    // error with its evidence, must survive whatever happens while releasing
+    // the lease: a `finally` throw would otherwise silently replace it.
+    let outcome:
+      | { readonly kind: "value"; readonly value: T }
+      | { readonly kind: "error"; readonly error: unknown };
     try {
       const result = await action(renew, leaseController.signal);
-      if (lost) throw new IntegrationLeaseLostError();
-      return result;
+      outcome = { kind: "value", value: result };
+    } catch (error) {
+      outcome = { kind: "error", error };
     } finally {
       clearInterval(renewal);
-      if (!store.release(currentLease) && !lost) {
-        throw new IntegrationLeaseLostError();
-      }
     }
+
+    if (outcome.kind === "value" && lost) {
+      // action() already returned its real, durable result (the update-ref CAS
+      // already reflects reality by the time action() resolves). Losing the
+      // lease afterward, while wrapping up, is evidence to record - it is not
+      // grounds to synthesize a false failed/cancelled terminal outcome for a
+      // completed integration.
+      recordAnomaly("integration lease was lost after action() already completed successfully");
+    }
+
+    const released = store.release(currentLease);
+    if (!released && !lost) {
+      recordAnomaly("integration lease release failed for a reason other than prior loss");
+    }
+
+    if (outcome.kind === "error") throw outcome.error;
+    return outcome.value;
   } finally {
     store.close();
   }

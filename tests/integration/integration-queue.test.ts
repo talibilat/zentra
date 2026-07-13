@@ -25,6 +25,7 @@ import {
   IntegrationQueue,
   isVerifiedIntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
+import { IntegrationLeaseStore } from "../../src/integration/integration-lease.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
 import {
@@ -147,6 +148,24 @@ describe("IntegrationQueue", () => {
       "rev-parse",
       `refs/heads/${project.integrationBranch}`,
     ]);
+  }
+
+  // Mirrors the private INTEGRATION_LEASE_DATABASE filename and location
+  // (inside the canonical Git common directory) used by IntegrationQueue.
+  async function leaseDatabasePath(): Promise<string> {
+    const commonDirectory = await gitOk(repositoryPath, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    return path.join(commonDirectory, ".zentra-integration-leases.sqlite");
+  }
+
+  function leaseKeyFor(): { commonDirectory: string; integrationRef: string } {
+    return {
+      commonDirectory: realpathSync(path.join(repositoryPath, ".git")),
+      integrationRef: `refs/heads/${project.integrationBranch}`,
+    };
   }
 
   async function ticket(
@@ -1506,5 +1525,180 @@ describe("IntegrationQueue", () => {
     expect(integrationQueue.getCleanupFailures()[0]).toEqual(
       expect.objectContaining({ candidatePath, reason: expect.stringContaining("exit code 1") }),
     );
+  });
+
+  it("preserves a completed result when the lease is discovered lost only after update-ref already succeeded", async () => {
+    const key = leaseKeyFor();
+    const databasePath = await leaseDatabasePath();
+    let stolen = false;
+
+    class LeaseStealingGitClient extends GitClient {
+      override async run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (!stolen && args.includes("update-ref") && args.includes("--no-deref")) {
+          stolen = true;
+          // Simulate a competing process reclaiming the lease the instant after
+          // this process's own assertLease() checkpoint has already passed, but
+          // before the periodic renewal timer notices. The real update-ref below
+          // still runs and succeeds under this process's ownership.
+          const thief = new IntegrationLeaseStore(databasePath);
+          try {
+            thief.acquire(key, 1_000, Date.now() + 1_000_000);
+          } finally {
+            thief.close();
+          }
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+
+    const reviewed = await ticket("task-lease-lost-after-success", "lease-lost.txt", "change\n");
+    const integrationQueue = new IntegrationQueue(
+      new LeaseStealingGitClient(),
+      new ValidationRunner(new ProcessSupervisor()),
+      { integrationLeaseRenewalMs: 20 },
+    );
+
+    const receipt = await integrate(reviewed, integrationQueue);
+
+    expect(stolen).toBe(true);
+    expect(receipt.outcome).toBe("completed");
+    expect(receipt.resultCommit).toBe(await integrationHead());
+    expect(isVerifiedIntegrationReceipt(receipt)).toBe(true);
+    await waitForCondition(() => integrationQueue.getLeaseAnomalies().length > 0);
+    expect(integrationQueue.getLeaseAnomalies()[0]).toEqual(
+      expect.objectContaining({
+        commonDirectory: key.commonDirectory,
+        integrationRef: key.integrationRef,
+        reason: expect.stringContaining("lost after action() already completed successfully"),
+      }),
+    );
+  });
+
+  it("preserves a thrown action() error and its evidence even when lease release also fails", async () => {
+    const key = leaseKeyFor();
+    const databasePath = await leaseDatabasePath();
+
+    class ReconciliationFailureGitClient extends GitClient {
+      private stoleAfterUpdate = false;
+
+      override async run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        const updateIndex = args.indexOf("update-ref");
+        if (updateIndex !== -1 && args[updateIndex + 1] === "--no-deref") {
+          return terminatedGitResult("timed_out");
+        }
+        if (!this.stoleAfterUpdate && args[0] === "for-each-ref") {
+          this.stoleAfterUpdate = true;
+          // Corrupt the owner token directly in the durable lease store so the
+          // eventual release() call (owner-token compare-and-swap) fails for a
+          // reason unrelated to the real IntegrationUncertainError below.
+          const saboteur = new IntegrationLeaseStore(databasePath);
+          try {
+            const current = saboteur.read(key);
+            if (current !== null) {
+              saboteur.release(current);
+              saboteur.acquire(key, 1_000);
+            }
+          } finally {
+            saboteur.close();
+          }
+          return {
+            stdout: "",
+            stderr: "inspection unavailable",
+            exitCode: 1,
+            truncated: false,
+            termination: null,
+          };
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+
+    const reviewed = await ticket(
+      "task-lease-release-fails",
+      "lease-release-fails.txt",
+      "change\n",
+    );
+    const integrationQueue = new IntegrationQueue(
+      new ReconciliationFailureGitClient(),
+      new ValidationRunner(new ProcessSupervisor()),
+      { integrationLeaseRenewalMs: 60_000 },
+    );
+
+    await expect(integrate(reviewed, integrationQueue)).rejects.toMatchObject({
+      name: "IntegrationUncertainError",
+      message: expect.stringContaining("update-ref reconciliation unresolved"),
+      evidence: expect.objectContaining({
+        reconciliationIssue: expect.stringContaining("inspection unavailable"),
+      }),
+    });
+    expect(integrationQueue.getLeaseAnomalies()[0]).toEqual(
+      expect.objectContaining({
+        commonDirectory: key.commonDirectory,
+        integrationRef: key.integrationRef,
+        reason: expect.stringContaining("release failed"),
+      }),
+    );
+  });
+
+  it("fails closed and never attempts update-ref when the lease was reclaimed during a long onPrepared callback", async () => {
+    const key = leaseKeyFor();
+    const databasePath = await leaseDatabasePath();
+    let updateRefAttempted = false;
+
+    class SpyGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (args.includes("update-ref") && args.includes("--no-deref")) {
+          updateRefAttempted = true;
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+
+    const reviewed = await ticket(
+      "task-reclaimed-during-onprepared",
+      "reclaimed.txt",
+      "change\n",
+    );
+    const integrationQueue = new IntegrationQueue(
+      new SpyGitClient(),
+      new ValidationRunner(new ProcessSupervisor()),
+      { integrationLeaseRenewalMs: 60_000 },
+    );
+
+    await expect(
+      integrationQueue.integrate({
+        project,
+        lease: reviewed.lease,
+        review: reviewed.review,
+        signal: AbortSignal.timeout(10_000),
+        onPrepared() {
+          // A long-running caller-supplied callback during which another
+          // process reclaims the lease after it (legitimately) expired.
+          const thief = new IntegrationLeaseStore(databasePath);
+          try {
+            const current = thief.read(key);
+            if (current !== null) thief.release(current);
+            thief.acquire(key, 1_000);
+          } finally {
+            thief.close();
+          }
+        },
+      }),
+    ).rejects.toThrow("integration lease ownership was lost");
+
+    expect(updateRefAttempted).toBe(false);
+    expect(await integrationHead()).toBe(originalIntegrationHead);
   });
 });
