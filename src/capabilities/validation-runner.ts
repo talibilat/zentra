@@ -87,7 +87,11 @@ export const ValidationReportSchema = z.strictObject({
 });
 
 const verifiedValidationReports = new WeakMap<ValidationReport, DurableValidationProvenance>();
-const usedInvocationIds = new Set<string>();
+const activeInvocationIds = new Set<string>();
+
+export function activeValidationInvocationCount(): number {
+  return activeInvocationIds.size;
+}
 
 export function isVerifiedValidationReport(
   report: ValidationReport,
@@ -138,67 +142,71 @@ export class ValidationRunner {
     ];
     assertApprovedValidationExecutable(command[0]);
     const invocationId = context?.invocationId ?? randomUUID();
-    if (invocationId === "" || usedInvocationIds.has(invocationId)) {
-      throw new Error("validation invocationId must be nonempty and single-use");
+    if (invocationId === "" || activeInvocationIds.has(invocationId)) {
+      throw new Error("validation invocationId must be nonempty and not already active");
     }
     if (context !== undefined && context.subjectSha256 === "") {
       throw new Error("validation subjectSha256 must be nonempty");
     }
-    usedInvocationIds.add(invocationId);
-    const canonicalCwd = await realpath(cwd);
-    const startedAt = new Date().toISOString();
-    await assertApprovedValidationExecutableIdentity(command[0]);
+    activeInvocationIds.add(invocationId);
+    try {
+      const canonicalCwd = await realpath(cwd);
+      const startedAt = new Date().toISOString();
+      await assertApprovedValidationExecutableIdentity(command[0]);
 
-    const result = await this.supervisor.execute(
-      {
-        taskId: "validation",
-        executable: command[0],
-        args: command.slice(1),
-        cwd: canonicalCwd,
+      const result = await this.supervisor.execute(
+        {
+          taskId: "validation",
+          executable: command[0],
+          args: command.slice(1),
+          cwd: canonicalCwd,
+          timeoutMs,
+        },
+        signal,
+        "validation",
+      );
+
+      const finishedAt = new Date().toISOString();
+
+      const argvSha256 = createHash("sha256")
+        .update(JSON.stringify(command), "utf8")
+        .digest("hex");
+
+      const stdout = result.rawStdout;
+      const outputContent = JSON.stringify({ stdout, stderr: result.stderr });
+      const outputSha256 = createHash("sha256")
+        .update(outputContent, "utf8")
+        .digest("hex");
+      const provenance: DurableValidationProvenance = Object.freeze({
+        invocationId,
+        canonicalCwd,
+        subjectSha256: context?.subjectSha256 ?? null,
         timeoutMs,
-      },
-      signal,
-      "validation",
-    );
+      });
 
-    const finishedAt = new Date().toISOString();
-
-    const argvSha256 = createHash("sha256")
-      .update(JSON.stringify(command), "utf8")
-      .digest("hex");
-
-    const stdout = result.rawStdout;
-    const outputContent = JSON.stringify({ stdout, stderr: result.stderr });
-    const outputSha256 = createHash("sha256")
-      .update(outputContent, "utf8")
-      .digest("hex");
-    const provenance: DurableValidationProvenance = Object.freeze({
-      invocationId,
-      canonicalCwd,
-      subjectSha256: context?.subjectSha256 ?? null,
-      timeoutMs,
-    });
-
-    const parsed = ValidationReportSchema.parse({
-      name,
-      outcome: result.outcome,
-      exitCode: result.exitCode,
-      stdout,
-      stderr: result.stderr,
-      startedAt,
-      finishedAt,
-      command,
-      argvSha256,
-      outputSha256,
-      timeoutMs,
-      provenance,
-    });
-    const frozen: ValidationReport = Object.freeze({
-      ...parsed,
-      command: Object.freeze([...parsed.command]),
-      provenance: Object.freeze({ ...parsed.provenance }),
-    });
-    verifiedValidationReports.set(frozen, frozen.provenance);
-    return frozen;
+      const parsed = ValidationReportSchema.parse({
+        name,
+        outcome: result.outcome,
+        exitCode: result.exitCode,
+        stdout,
+        stderr: result.stderr,
+        startedAt,
+        finishedAt,
+        command,
+        argvSha256,
+        outputSha256,
+        timeoutMs,
+        provenance,
+      });
+      const frozen: ValidationReport = Object.freeze({
+        ...parsed,
+        command: Object.freeze([...parsed.command]),
+        provenance: Object.freeze({ ...parsed.provenance }),
+      });
+      verifiedValidationReports.set(frozen, frozen.provenance);
+      return frozen;
+    } finally {
+      activeInvocationIds.delete(invocationId);
+    }
   }
 }

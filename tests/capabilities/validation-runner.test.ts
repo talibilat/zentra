@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ValidationRunner,
   ValidationReportSchema,
+  activeValidationInvocationCount,
   isVerifiedValidationReport,
 } from "../../src/capabilities/validation-runner.js";
 import {
@@ -138,7 +139,104 @@ class CountingSupervisor extends ProcessSupervisor {
   }
 }
 
+const completedWorkerResult: WorkerResult = {
+  outcome: "completed",
+  exitCode: 0,
+  events: [],
+  stdout: "",
+  rawStdout: "",
+  stderr: "",
+};
+
+class BlockingSupervisor extends ProcessSupervisor {
+  readonly started = Promise.withResolvers<void>();
+  readonly result = Promise.withResolvers<WorkerResult>();
+
+  override execute(_request: WorkerRequest, _signal: AbortSignal): Promise<WorkerResult> {
+    this.started.resolve();
+    return this.result.promise;
+  }
+}
+
+class AlternatingSupervisor extends ProcessSupervisor {
+  private invocationCount = 0;
+
+  override execute(_request: WorkerRequest, _signal: AbortSignal): Promise<WorkerResult> {
+    return this.invocationCount++ % 2 === 0
+      ? Promise.resolve(completedWorkerResult)
+      : Promise.reject(new Error("spawn failed"));
+  }
+}
+
 describe("ValidationRunner", () => {
+  it("rejects duplicate invocation IDs only while they are active across runner instances", async () => {
+    const cwd = await workspace();
+    const supervisor = new BlockingSupervisor();
+    const first = new ValidationRunner(supervisor).run(
+      project([process.execPath, "--version"]),
+      "focused",
+      cwd,
+      AbortSignal.timeout(5_000),
+      { invocationId: "active-duplicate", subjectSha256: "subject" },
+    );
+    await supervisor.started.promise;
+
+    expect(activeValidationInvocationCount()).toBe(1);
+    await expect(
+      new ValidationRunner(new CountingSupervisor()).run(
+        project([process.execPath, "--version"]),
+        "focused",
+        cwd,
+        AbortSignal.timeout(5_000),
+        { invocationId: "active-duplicate", subjectSha256: "subject" },
+      ),
+    ).rejects.toThrowError(/^validation invocationId must be nonempty and not already active$/);
+    expect(activeValidationInvocationCount()).toBe(1);
+
+    supervisor.result.resolve(completedWorkerResult);
+    await expect(first).resolves.toMatchObject({ outcome: "completed" });
+    expect(activeValidationInvocationCount()).toBe(0);
+  });
+
+  it("releases invocation IDs after sequential success and rejection", async () => {
+    await withTemporaryApprovedExecutable(async (approvedExecutable) => {
+      const {
+        ValidationRunner: IsolatedValidationRunner,
+        activeValidationInvocationCount: isolatedActiveValidationInvocationCount,
+      } = await import("../../src/capabilities/validation-runner.js");
+      const cwd = await workspace();
+      const runner = new IsolatedValidationRunner(new AlternatingSupervisor());
+      const configured = project([approvedExecutable, "--version"]);
+
+      for (let index = 0; index < 100; index += 1) {
+        const pending = runner.run(
+          configured,
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+          { invocationId: `stress-${index}`, subjectSha256: "subject" },
+        );
+        if (index % 2 === 0) {
+          await expect(pending).resolves.toMatchObject({ outcome: "completed" });
+        } else {
+          await expect(pending).rejects.toThrowError("spawn failed");
+        }
+        expect(isolatedActiveValidationInvocationCount()).toBe(0);
+      }
+
+      await expect(
+        runner.run(
+          configured,
+          "focused",
+          cwd,
+          AbortSignal.timeout(5_000),
+          { invocationId: "stress-0", subjectSha256: "subject" },
+        ),
+      ).resolves.toMatchObject({ outcome: "completed" });
+      expect(isolatedActiveValidationInvocationCount()).toBe(0);
+    });
+  });
+
   it("rejects unintended executable identities before process creation", async () => {
     const cwd = await workspace();
     const executableLink = path.join(cwd, "node-link");
