@@ -930,7 +930,7 @@ describe("IntegrationQueue", () => {
     expect(receipt).toMatchObject({
       outcome: "failed",
       sourceCommit: reviewed.sourceCommit,
-      resultCommit: expect.any(String),
+      resultCommit: null,
       validation: { name: "full", outcome: "completed", exitCode: 0 },
     });
     expect(await integrationHead()).toBe(competingCommit);

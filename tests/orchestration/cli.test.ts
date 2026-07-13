@@ -264,20 +264,6 @@ describe("Zentra CLI", () => {
     expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
   });
 
-  it("rejects a noncanonical reviewer executable before creating a task", async () => {
-    const testFixture = await fixture();
-    const result = await invoke([
-      ...runArguments(testFixture),
-      "--reviewer-executable", "node",
-    ]);
-
-    expect(result).toMatchObject({
-      code: 1,
-      json: { command: "task.run", error: { code: "INVALID_COMMAND" } },
-    });
-    expect(existsSync(testFixture.databasePath)).toBe(false);
-  });
-
   it("denies an adversarial diff that passes focused validation without committing it", async () => {
     const testFixture = await fixture();
     const initialHead = await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"]);

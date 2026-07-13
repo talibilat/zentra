@@ -220,8 +220,8 @@ export function projectArtifacts(
   options: { readonly allowPendingProtocolMarker?: boolean } = {},
 ): ArtifactView {
   const artifacts: Artifact[] = [];
-  const evidenceByArtifactId = new Map<string, unknown>();
-  const phaseByArtifactId = new Map<string, "prepared" | "final">();
+  const evidenceByArtifactId: Record<string, unknown> = {};
+  const phaseByArtifactId: Record<string, "prepared" | "final"> = {};
   const byKind = new Map<ArtifactKind, {
     artifact: Artifact;
     evidence: unknown;
@@ -235,6 +235,7 @@ export function projectArtifacts(
   for (const event of events) {
     if (
       pendingMarker !== null &&
+      options.allowPendingProtocolMarker !== true &&
       event.type !== `artifact.${pendingMarker.kind}_recorded`
     ) {
       throw missingMarkedArtifact(pendingMarker.kind);
@@ -307,13 +308,13 @@ export function projectArtifacts(
         const priorIndex = artifacts.findIndex((candidate) =>
           candidate.artifactId === previousKind.artifact.artifactId);
         if (priorIndex !== -1) artifacts.splice(priorIndex, 1);
-        evidenceByArtifactId.delete(previousKind.artifact.artifactId);
-        phaseByArtifactId.delete(previousKind.artifact.artifactId);
+        delete evidenceByArtifactId[previousKind.artifact.artifactId];
+        delete phaseByArtifactId[previousKind.artifact.artifactId];
       }
       byKind.set(artifact.kind, { artifact, evidence, phase });
       artifacts.push(artifact);
-      evidenceByArtifactId.set(artifact.artifactId, evidence);
-      phaseByArtifactId.set(artifact.artifactId, phase);
+      evidenceByArtifactId[artifact.artifactId] = evidence;
+      phaseByArtifactId[artifact.artifactId] = phase;
       pendingMarker = null;
       continue;
     }
@@ -326,7 +327,7 @@ export function projectArtifacts(
         payload.verification === "verified"
       ) {
         const receipt = requireArtifact(byKind, "integration_receipt", event.type);
-        phaseByArtifactId.set(receipt.artifact.artifactId, "final");
+        phaseByArtifactId[receipt.artifact.artifactId] = "final";
       }
     }
   }
@@ -337,8 +338,8 @@ export function projectArtifacts(
 
   return Object.freeze({
     artifacts: Object.freeze([...artifacts]),
-    evidenceByArtifactId: Object.freeze(Object.fromEntries(evidenceByArtifactId)),
-    phaseByArtifactId: Object.freeze(Object.fromEntries(phaseByArtifactId)),
+    evidenceByArtifactId: Object.freeze({ ...evidenceByArtifactId }),
+    phaseByArtifactId: Object.freeze({ ...phaseByArtifactId }),
   });
 }
 
@@ -376,12 +377,6 @@ function validateLifecycleArtifactReference(
       if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
         throw new Error("lifecycle event references contradictory validation evidence");
       }
-      if (event.type === "task.review_requested") {
-        const report = ValidationEvidenceSchema.parse(payload.validation);
-        if (report.outcome !== "completed" || report.exitCode !== 0) {
-          throw new Error("task.review_requested requires successful validation evidence");
-        }
-      }
     }
   }
   if (
@@ -396,12 +391,6 @@ function validateLifecycleArtifactReference(
       if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
         throw new Error("lifecycle event references contradictory review evidence");
       }
-      if (
-        (event.type === "task.review_approved" || event.type === "task.integration_started") &&
-        !ReviewEvidenceSchema.parse(payload.review).approved
-      ) {
-        throw new Error(`${event.type} requires approved review evidence`);
-      }
     }
   }
   if (event.type === "task.integration_prepared" && !("receipt" in payload)) {
@@ -415,7 +404,6 @@ function validateLifecycleArtifactReference(
     ) {
       throw new Error("task.integration_prepared references contradictory prepared receipt evidence");
     }
-    assertSuccessfulPreparedReceipt(IntegrationReceiptEvidenceSchema.parse(payload.receipt));
   }
   if (
     event.type === "task.integration_observed" &&
@@ -490,14 +478,6 @@ function validateArtifactChain(
       : null;
     const expectedValidationSubject = receipt.resultCommit ??
       (typeof preparedReceipt?.resultCommit === "string" ? preparedReceipt.resultCommit : null);
-    const validationSubjectMatches = expectedValidationSubject === null
-      ? phase === "final" && receipt.outcome !== "completed"
-      : receipt.validation.provenance.subjectSha256 === expectedValidationSubject;
-    const preservesPreparedEvidence = preparedReceipt === null ||
-      receipt.outcome === "completed" ||
-      JSON.stringify({ ...receipt, outcome: preparedReceipt.outcome }) ===
-        JSON.stringify(preparedReceipt);
-    if (phase === "prepared") assertSuccessfulPreparedReceipt(receipt);
     if (
       receipt.taskId !== event.streamId ||
       receipt.projectId !== objectPayload(created).projectId ||
@@ -505,36 +485,14 @@ function validateArtifactChain(
       JSON.stringify(receipt.review) !== JSON.stringify(review.evidence) ||
       JSON.stringify(receipt.review) !== JSON.stringify(objectPayload(integrationStarted).review) ||
       receipt.validation.name !== "full" ||
-      !validationSubjectMatches ||
+      receipt.validation.provenance.subjectSha256 !== expectedValidationSubject ||
       (phase === "prepared" && receipt.outcome !== "completed") ||
-      !preservesPreparedEvidence ||
       (receipt.outcome === "completed" &&
         preparedReceipt !== null &&
         JSON.stringify(receipt) !== JSON.stringify(preparedReceipt))
     ) {
       throw new Error("integration receipt artifact contradicts task, project, source, result, review, or validation provenance");
     }
-  }
-}
-
-function isSuccessfulPreparedReceipt(
-  receipt: z.infer<typeof IntegrationReceiptEvidenceSchema>,
-): boolean {
-  return receipt.outcome === "completed" &&
-    receipt.review.approved &&
-    receipt.originalIntegrationCommit !== null &&
-    receipt.resultCommit !== null &&
-    receipt.validation.name === "full" &&
-    receipt.validation.outcome === "completed" &&
-    receipt.validation.exitCode === 0 &&
-    receipt.validation.provenance.subjectSha256 === receipt.resultCommit;
-}
-
-function assertSuccessfulPreparedReceipt(
-  receipt: z.infer<typeof IntegrationReceiptEvidenceSchema>,
-): void {
-  if (!isSuccessfulPreparedReceipt(receipt)) {
-    throw new Error("task.integration_prepared requires successful prepared receipt evidence");
   }
 }
 

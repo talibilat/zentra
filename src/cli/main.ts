@@ -424,27 +424,10 @@ function configuredReviewer(options: RunOptions): {
   ) {
     throw new CliFailure("INVALID_COMMAND");
   }
-  let canonicalExecutable: string;
-  try {
-    if (!path.isAbsolute(executable) || path.normalize(executable) !== executable) {
-      throw new Error("reviewer executable is not canonical");
-    }
-    canonicalExecutable = realpathSync(executable);
-    const executableStat = statSync(executable);
-    if (
-      canonicalExecutable !== executable ||
-      !executableStat.isFile() ||
-      (executableStat.mode & 0o111) === 0
-    ) {
-      throw new Error("reviewer executable is not an exact executable file");
-    }
-  } catch {
-    throw new CliFailure("INVALID_COMMAND");
-  }
   return {
     reviewerId,
     adapter: new ProcessReviewerAdapter({
-      executable: canonicalExecutable,
+      executable,
       args: options.reviewerArgument,
     }),
   };

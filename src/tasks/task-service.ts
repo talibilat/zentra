@@ -50,18 +50,6 @@ export class TaskService {
     payload: unknown,
     causationId: string | null,
   ): TaskView {
-    return this.appendBatch(taskId, [{ type, payload, causationId }]);
-  }
-
-  appendBatch(
-    taskId: string,
-    inputs: readonly {
-      readonly type: string;
-      readonly payload: unknown;
-      readonly causationId: string | null;
-    }[],
-  ): TaskView {
-    if (inputs.length === 0) throw new Error("event batch must not be empty");
     const events = this.journal.readStream(taskId);
     const current = projectTask(events);
     if (current === null) {
@@ -72,18 +60,20 @@ export class TaskService {
       throw new Error("task is already terminal");
     }
 
-    const batch = inputs.map((input) => ({
+    const event: NewEvent<string, unknown> = {
       streamId: taskId,
-      type: input.type,
-      payload: canonicalizePayload(input.payload),
-      causationId: input.causationId,
+      type,
+      payload: canonicalizePayload(payload),
+      causationId,
       correlationId: events[0]!.correlationId,
-    } satisfies NewEvent<string, unknown>));
-    const prospectiveEvents = batch.map((event, index) =>
-      toProspectiveEvent(event, current.streamVersion + index + 1));
+    };
+    const prospectiveEvent = toProspectiveEvent(
+      event,
+      current.streamVersion + 1,
+    );
 
-    projectTask([...events, ...prospectiveEvents]);
-    const stored = this.journal.append(taskId, current.streamVersion, batch);
+    projectTask([...events, prospectiveEvent]);
+    const stored = this.journal.append(taskId, current.streamVersion, [event]);
     const view = projectTask([...events, ...stored]);
     if (view === null) {
       throw new Error("projection should not be null after append");

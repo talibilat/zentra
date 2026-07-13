@@ -622,7 +622,10 @@ export class IntegrationQueue {
         }
         const uncertainOutcome = update.termination ?? "failed";
         if (reconciledHead === originalIntegrationCommit) {
-          return Object.freeze({ ...preparedReceipt, outcome: uncertainOutcome });
+          return receipt(
+            uncertainOutcome,
+            validation,
+          );
         }
         preserveCandidate = true;
         this.recordCleanupFailure(
@@ -649,7 +652,7 @@ export class IntegrationQueue {
         );
       }
       if (update.exitCode !== 0) {
-        return Object.freeze({ ...preparedReceipt, outcome: "failed" });
+        return receipt("failed", validation);
       }
 
       return registerCompletedReceipt(preparedReceipt);

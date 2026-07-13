@@ -337,10 +337,12 @@ export class TracerBulletOrchestrator {
               preparedReceipt,
               undefined,
               "prepared",
-              {
-                type: "task.integration_prepared",
-                payload: { receipt: preparedReceipt },
-              },
+            );
+            this.tasks.append(
+              input.taskId,
+              "task.integration_prepared",
+              { receipt: preparedReceipt },
+              null,
             );
           },
         });
@@ -363,17 +365,17 @@ export class TracerBulletOrchestrator {
           receipt,
           undefined,
           "final",
+        );
+        return this.terminate(
+          input.taskId,
+          receipt.outcome,
+          stage,
+          "integration did not complete successfully",
           {
-            type: `task.${receipt.outcome}`,
-            payload: {
-              stage,
-              reason: "integration did not complete successfully",
-              receipt,
-              candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
-            },
+            receipt,
+            candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
           },
         );
-        return this.current(input.taskId);
       }
       try {
         await validateIntegrationReceipt({
@@ -523,7 +525,6 @@ export class TracerBulletOrchestrator {
     evidence: unknown,
     digest = artifactEvidenceSha256(kind, evidence),
     phase?: "prepared" | "final",
-    following?: { readonly type: string; readonly payload: unknown },
   ): void {
     const payload = this.artifactPayload(taskId, kind, evidence, digest, phase) as {
       readonly artifact: {
@@ -532,22 +533,23 @@ export class TracerBulletOrchestrator {
         readonly sha256: string;
       };
     };
-    this.tasks.appendBatch(taskId, [
+    this.tasks.append(
+      taskId,
+      ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
       {
-        type: ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
-        payload: {
-          artifactProtocolVersion: 1,
-          artifactId: payload.artifact.artifactId,
-          kind: payload.artifact.kind,
-          sha256: payload.artifact.sha256,
-        },
-        causationId: null,
+        artifactProtocolVersion: 1,
+        artifactId: payload.artifact.artifactId,
+        kind: payload.artifact.kind,
+        sha256: payload.artifact.sha256,
       },
-      { type: `artifact.${kind}_recorded`, payload, causationId: null },
-      ...(following === undefined
-        ? []
-        : [{ ...following, causationId: null }]),
-    ]);
+      null,
+    );
+    this.tasks.append(
+      taskId,
+      `artifact.${kind}_recorded`,
+      payload,
+      null,
+    );
   }
 
   private artifactPayload(

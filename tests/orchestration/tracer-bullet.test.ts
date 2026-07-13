@@ -365,12 +365,10 @@ describe("TracerBulletOrchestrator", () => {
     class CrashAfterArtifactTaskService extends TaskService {
       private crashed = false;
 
-      override appendBatch(
-        ...args: Parameters<TaskService["appendBatch"]>
-      ): ReturnType<TaskService["appendBatch"]> {
+      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
         if (this.crashed) throw new Error(`simulated crash after ${kind}`);
-        const view = super.appendBatch(...args);
-        if (args[1].some((input) => input.type === `artifact.${kind}_recorded`)) {
+        const view = super.append(...args);
+        if (args[1] === `artifact.${kind}_recorded`) {
           this.crashed = true;
           throw new Error(`simulated crash after ${kind}`);
         }
@@ -392,11 +390,9 @@ describe("TracerBulletOrchestrator", () => {
       signal: runSignal(),
     })).rejects.toThrow(`simulated crash after ${kind}`);
     const stream = journal.readStream(`task-crash-${kind}`);
-    expect(stream.some((event) => event.type === `artifact.${kind}_recorded`)).toBe(true);
+    expect(stream.at(-1)?.type).toBe(`artifact.${kind}_recorded`);
 
-    expect(() => projectArtifacts(stream.filter(
-      (event) => event.type !== `artifact.${kind}_recorded`,
-    ))).toThrow(
+    expect(() => projectArtifacts(stream.slice(0, -1))).toThrow(
       `artifact protocol marker references missing ${kind} artifact`,
     );
   });
@@ -436,13 +432,13 @@ describe("TracerBulletOrchestrator", () => {
       .toMatchObject({ receipt: { outcome: "completed" } });
     expect(events.at(-1)).toMatchObject({
       type: "task.failed",
-      payload: { receipt: { outcome: "failed", resultCommit: expect.any(String) } },
+      payload: { receipt: { outcome: "failed", resultCommit: null } },
     });
     const artifacts = projectArtifacts(events);
     const receiptArtifact = artifacts.artifacts.find((artifact) =>
       artifact.kind === "integration_receipt");
     expect(artifacts.evidenceByArtifactId[receiptArtifact!.artifactId])
-      .toMatchObject({ outcome: "failed", resultCommit: expect.any(String) });
+      .toMatchObject({ outcome: "failed", resultCommit: null });
     expect(artifacts.phaseByArtifactId[receiptArtifact!.artifactId]).toBe("final");
   });
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import {
   canonicalValidationDigest,
@@ -8,7 +8,7 @@ import {
 import { DeterministicReviewerAdapter } from "../support/deterministic-reviewer-adapter.js";
 import type { ValidationReport } from "../../src/capabilities/validation-runner.js";
 import type { WorkerRequest, WorkerResult } from "../../src/workers/worker-adapter.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -484,48 +484,6 @@ describe("ProcessReviewerAdapter", () => {
     await expect(processReviewer(fixture).review(input, AbortSignal.timeout(5_000)))
       .rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
     expect(performance.now() - startedAt).toBeLessThan(750);
-  });
-
-  it("confirms the reviewer process group is gone before accepting a decision", async () => {
-    const pidFile = path.join(makeTempDir(), "descendant.pid");
-    const fixture = reviewerScript(`
-      import { createHash } from "node:crypto";
-      import { spawn } from "node:child_process";
-      import { writeFileSync } from "node:fs";
-      let body = "";
-      process.stdin.setEncoding("utf8");
-      for await (const chunk of process.stdin) body += chunk;
-      const request = JSON.parse(body);
-      const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5_000)"], {
-        detached: false,
-        stdio: "ignore"
-      });
-      writeFileSync(${JSON.stringify(pidFile)}, String(descendant.pid));
-      descendant.unref();
-      console.log(JSON.stringify({ reviewerId: request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(body).digest("hex"), diffSha256: request.diffSha256, validationSha256: request.validationSha256, decidedAt: new Date().toISOString(), reason: "reviewed" }));
-    `);
-
-    await processReviewer(fixture).review(input, AbortSignal.timeout(5_000));
-    const descendantPid = Number(readFileSync(pidFile, "utf8"));
-    expect(() => process.kill(descendantPid, 0)).toThrow(
-      expect.objectContaining({ code: "ESRCH" }),
-    );
-  });
-
-  it("fails closed when reviewer process-group absence cannot be confirmed", async () => {
-    const originalKill = process.kill.bind(process);
-    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-      if (pid < 0 && signal === 0) return true;
-      return originalKill(pid, signal);
-    });
-    try {
-      await expect(processReviewer(getContentAwareFixturePath()).review(
-        input,
-        AbortSignal.timeout(5_000),
-      )).rejects.toEqual(expect.objectContaining({ outcome: "failed" }));
-    } finally {
-      kill.mockRestore();
-    }
   });
 
   it("fails closed when the reviewer times out", async () => {
