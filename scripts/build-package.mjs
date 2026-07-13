@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -9,6 +9,7 @@ import {
   manifestPath,
   packageRoot,
   requiredBinaries,
+  requiredFixture,
 } from "./package-files.mjs";
 
 rmSync(path.join(packageRoot, "dist"), { recursive: true, force: true });
@@ -21,6 +22,18 @@ const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
 });
 if (result.error !== undefined) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
+
+const buildOutputs = collectBuildOutputs();
+for (const file of [
+  ...buildOutputs,
+  requiredFixture,
+  "package.json",
+  "README.md",
+  "LICENSE",
+]) {
+  const absolutePath = path.join(packageRoot, file);
+  if (existsSync(absolutePath)) chmodSync(absolutePath, 0o644);
+}
 
 for (const binary of requiredBinaries) {
   try {
@@ -36,10 +49,11 @@ for (const binary of requiredBinaries) {
 const manifest = {
   schemaVersion: 1,
   inputs: digestFiles(collectBuildInputs()),
-  outputs: digestFiles(collectBuildOutputs()),
+  outputs: digestFiles(buildOutputs),
 };
 mkdirSync(path.dirname(manifestPath), { recursive: true });
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+chmodSync(manifestPath, 0o644);
 
 function minimalEnvironment() {
   const environment = {};

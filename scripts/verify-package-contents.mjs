@@ -31,11 +31,11 @@ const forbiddenCanaries = [
 ];
 
 try {
-  const first = createAndInspectPackage("first");
-  const second = createAndInspectPackage("second");
+  const first = createAndInspectPackage("umask-022", 0o022);
+  const second = createAndInspectPackage("umask-077", 0o077);
   assertEqual("normalized archive entries", first.entries, second.entries);
   assertEqual("package metadata", first.packageJson, second.packageJson);
-  console.log(`Verified ${first.entries.length} deterministic package files across two clean packs.`);
+  console.log(`Verified ${first.entries.length} deterministic package files across clean packs with umasks 022 and 077.`);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Package content verification failed: ${message}`);
@@ -44,7 +44,16 @@ try {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
-function createAndInspectPackage(label) {
+function createAndInspectPackage(label, umask) {
+  const previousUmask = process.umask(umask);
+  try {
+    return inspectPackage(label);
+  } finally {
+    process.umask(previousUmask);
+  }
+}
+
+function inspectPackage(label) {
   const runRoot = path.join(temporaryRoot, label);
   const sourceRoot = path.join(runRoot, "source");
   const artifactRoot = path.join(runRoot, "artifacts");
@@ -70,7 +79,7 @@ function createAndInspectPackage(label) {
   assertPackageManifest(sourceRoot, listedFiles);
 
   const tarball = path.join(artifactRoot, result.filename);
-  run("tar", ["-xzf", tarball, "-C", extractedRoot], sourceRoot);
+  run("tar", ["-xzf", tarball, "-C", extractedRoot, "-p"], sourceRoot);
   const extractedPackage = path.join(extractedRoot, "package");
   const entries = walkFiles(extractedPackage).map((file) => {
     const relative = relativePath(extractedPackage, file);
