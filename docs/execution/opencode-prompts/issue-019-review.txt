@@ -1,0 +1,19 @@
+You are the independent OpenCode reviewer for Zentra issue 019 (Medium). READ-ONLY single combined pass (spec + quality). Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-files-019
+Branch: fix/predeploy-c1-files-019
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (npm pack --dry-run in a temp copy is OK; do not publish/install globally).
+- Do NOT modify, stage, commit, push, or run state-changing commands.
+
+Read:
+- docs/issues/019-medium-make-package-contents-deterministic.md
+- docs/execution/issue-019-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+OUT OF SCOPE (dispositioned): the actual LICENSE file + `license` field (issue 018), `os`/`cpu` (020), `engines` (021). A prospective LICENSE entry in the allowlist is expected even though the file lands with 018.
+
+Confirm: narrow `files` allowlist covering the bin/runtime output, required fixtures, README, and LICENSE-when-present; EXCLUDES tests, coverage, .worktrees, docs/execution, docs/issues, planning docs, *.db, secrets, stale build output; deterministic archive paths/modes/metadata verified; manifest snapshot or allowlist test over npm pack --json; forbidden-file canaries proven absent; twice-pack normalized comparison of file lists and content digests. Confirm the bin and required fixtures ARE included and issue 016's tarball install test still passes.
+
+Give a decisive verdict: INTEGRATE or BLOCK (Critical/Important only, exact file:line). Return your verdict as your final text output.

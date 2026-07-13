@@ -1,0 +1,18 @@
+You are the OpenCode fix agent for Zentra issue 019, addressing the blocking review finding.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-files-019
+Branch: fix/predeploy-c1-files-019
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top (no amend, no force-push).
+
+Finding: packaged archive file modes vary with the ambient umask (e.g. `umask 077 && pnpm package:contents` yields 0600 instead of 0644), and the twice-pack determinism test packs twice under the SAME umask so it cannot detect this. This violates the deterministic file-mode guarantee.
+
+Fix:
+1. Make packaged file modes deterministic regardless of the ambient umask: normalize archive entry modes so regular files are 0644 and the executable bin is 0755 in the produced tarball, independent of the umask in effect when packing. Implement this in the package build/verification tooling you own (for example explicitly chmod the built outputs before pack, or normalize modes during verification), NOT by relying on the caller's umask.
+2. Strengthen the determinism test to pack under at least two DIFFERENT umasks (e.g. 022 and 077) and assert identical normalized file modes and content digests across them.
+
+Then: run pnpm check, pnpm build, pnpm package:verify, pnpm package:contents (and try it under `umask 077`), npm pack --dry-run, and pnpm test; capture results. Commit (concise, no co-author trailer). Push: git push origin fix/predeploy-c1-files-019. Update docs/execution/issue-019-implementation-report.md.
+
+Owned files: package.json, scripts/*.mjs you own for packaging content verification, tests/package/*, and the report. Do NOT change issue 016's build behavior semantics, and do NOT add os/cpu/engines/license.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether verification passed and the branch is pushed.

@@ -1,0 +1,17 @@
+You are the independent OpenCode reviewer for Zentra issue 012 (Low). READ-ONLY single combined pass (spec + quality). Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-fixture-012
+Branch: fix/predeploy-fixture-012
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run state-changing commands.
+
+Read:
+- docs/issues/012-low-eliminate-fixture-attestation-toctou.md
+- docs/execution/issue-012-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Confirm: execution uses immutable private copied bytes / descriptor-bound mechanism referring to the EXACT hashed bytes (not a re-opened pathname); private copies under an owned 0700 dir not writable by untrusted content; replacement/symlink/hard-link/rename races cannot substitute executed bytes after attestation; macOS mechanism documented (atomicity, permissions, cleanup, invocation); packaged AND source layouts use the same guarantee. Code quality: no predictable temp-dir name race; O_NOFOLLOW/exclusive-create used correctly; bounded idempotent cleanup via finally; the executed path is the private bytes not the original pathname. Required tests exist (deterministic race, symlink, hard-link, permission, rename, cleanup, packed-tarball execution).
+
+Give a decisive verdict: INTEGRATE or BLOCK (Critical/Important only, exact file:line). Return your verdict as your final text output.
