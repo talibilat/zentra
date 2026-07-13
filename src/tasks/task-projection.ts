@@ -107,7 +107,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     return null;
   }
 
-  projectArtifacts(events, { allowPendingProtocolMarker: true });
+  projectArtifacts(events);
 
   const firstEvent = events[0]!;
   if (firstEvent.type !== "task.created") {

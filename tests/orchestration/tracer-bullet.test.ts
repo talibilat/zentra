@@ -343,6 +343,32 @@ describe("TracerBulletOrchestrator", () => {
     expect(ticketRef.exitCode).not.toBe(0);
   });
 
+  it("appends each successful artifact and consuming lifecycle boundary as one batch", async () => {
+    const fixture = await fixtureRepository();
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
+    const { orchestrator } = system(fixture.configPath, {
+      taskService: (journal) => new RecordingTaskService(journal),
+    });
+
+    await orchestrator.run({ ...runInput, taskId: "task-atomic-boundaries", signal: runSignal() });
+
+    expect(batches).toEqual(expect.arrayContaining([
+      ["task.artifact_recording", "artifact.patch_recorded", "task.validation_started"],
+      ["task.artifact_recording", "artifact.validation_report_recorded", "task.review_requested"],
+      ["task.artifact_recording", "artifact.review_report_recorded", "task.review_approved"],
+      ["task.artifact_recording", "artifact.integration_receipt_recorded", "task.integration_prepared"],
+    ]));
+    expect(batches.filter((batch) => batch.includes("task.artifact_recording"))).toHaveLength(4);
+  });
+
   it("rejects replay when every typed artifact event is deleted", async () => {
     const fixture = await fixtureRepository();
     const { journal, orchestrator } = system(fixture.configPath);
@@ -365,10 +391,12 @@ describe("TracerBulletOrchestrator", () => {
     class CrashAfterArtifactTaskService extends TaskService {
       private crashed = false;
 
-      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
         if (this.crashed) throw new Error(`simulated crash after ${kind}`);
-        const view = super.append(...args);
-        if (args[1] === `artifact.${kind}_recorded`) {
+        const view = super.appendBatch(...args);
+        if (args[1].some((input) => input.type === `artifact.${kind}_recorded`)) {
           this.crashed = true;
           throw new Error(`simulated crash after ${kind}`);
         }
@@ -390,9 +418,11 @@ describe("TracerBulletOrchestrator", () => {
       signal: runSignal(),
     })).rejects.toThrow(`simulated crash after ${kind}`);
     const stream = journal.readStream(`task-crash-${kind}`);
-    expect(stream.at(-1)?.type).toBe(`artifact.${kind}_recorded`);
+    expect(stream.some((event) => event.type === `artifact.${kind}_recorded`)).toBe(true);
 
-    expect(() => projectArtifacts(stream.slice(0, -1))).toThrow(
+    expect(() => projectArtifacts(stream.filter(
+      (event) => event.type !== `artifact.${kind}_recorded`,
+    ))).toThrow(
       `artifact protocol marker references missing ${kind} artifact`,
     );
   });
@@ -432,13 +462,13 @@ describe("TracerBulletOrchestrator", () => {
       .toMatchObject({ receipt: { outcome: "completed" } });
     expect(events.at(-1)).toMatchObject({
       type: "task.failed",
-      payload: { receipt: { outcome: "failed", resultCommit: null } },
+      payload: { receipt: { outcome: "failed", resultCommit: expect.any(String) } },
     });
     const artifacts = projectArtifacts(events);
     const receiptArtifact = artifacts.artifacts.find((artifact) =>
       artifact.kind === "integration_receipt");
     expect(artifacts.evidenceByArtifactId[receiptArtifact!.artifactId])
-      .toMatchObject({ outcome: "failed", resultCommit: null });
+      .toMatchObject({ outcome: "failed", resultCommit: expect.any(String) });
     expect(artifacts.phaseByArtifactId[receiptArtifact!.artifactId]).toBe("final");
   });
 
@@ -1175,7 +1205,19 @@ describe("TracerBulletOrchestrator", () => {
         }
       }
       const validations = new OutcomeValidation(new ProcessSupervisor());
-      const { journal, orchestrator } = system(fixture.configPath, { validations });
+      const batches: string[][] = [];
+      class RecordingTaskService extends TaskService {
+        override appendBatch(
+          ...args: Parameters<TaskService["appendBatch"]>
+        ): ReturnType<TaskService["appendBatch"]> {
+          batches.push(args[1].map((input) => input.type));
+          return super.appendBatch(...args);
+        }
+      }
+      const { journal, orchestrator } = system(fixture.configPath, {
+        validations,
+        taskService: (stream) => new RecordingTaskService(stream),
+      });
 
       const result = await orchestrator.run({
         ...runInput,
@@ -1193,6 +1235,11 @@ describe("TracerBulletOrchestrator", () => {
         "task.artifact_recording",
         "artifact.patch_recorded",
         "task.validation_started",
+        "task.artifact_recording",
+        "artifact.validation_report_recorded",
+        `task.${outcome}`,
+      ]);
+      expect(batches).toContainEqual([
         "task.artifact_recording",
         "artifact.validation_report_recorded",
         `task.${outcome}`,
@@ -1326,7 +1373,19 @@ describe("TracerBulletOrchestrator", () => {
         );
       },
     };
-    const { journal, orchestrator } = system(fixture.configPath, { reviewer });
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      reviewer,
+      taskService: (stream) => new RecordingTaskService(stream),
+    });
 
     const result = await orchestrator.run({
       ...runInput,
@@ -1356,6 +1415,13 @@ describe("TracerBulletOrchestrator", () => {
         : []),
       `task.${outcome}`,
     ]);
+    if (kind === "valid") {
+      expect(batches).toContainEqual([
+        "task.artifact_recording",
+        "artifact.review_report_recorded",
+        "task.denied",
+      ]);
+    }
   });
 
   it.each([
@@ -1482,8 +1548,18 @@ describe("TracerBulletOrchestrator", () => {
         }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
+      const batches: string[][] = [];
+      class RecordingTaskService extends TaskService {
+        override appendBatch(
+          ...args: Parameters<TaskService["appendBatch"]>
+        ): ReturnType<TaskService["appendBatch"]> {
+          batches.push(args[1].map((input) => input.type));
+          return super.appendBatch(...args);
+        }
+      }
       const { journal, orchestrator } = system(fixture.configPath, {
         integrations: new OutcomeIntegration(new GitClient(), validations),
+        taskService: (stream) => new RecordingTaskService(stream),
       });
 
       const result = await orchestrator.run({
@@ -1500,6 +1576,11 @@ describe("TracerBulletOrchestrator", () => {
           "review_report",
           "integration_receipt",
         ]);
+      expect(batches).toContainEqual([
+        "task.artifact_recording",
+        "artifact.integration_receipt_recorded",
+        `task.${outcome}`,
+      ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
       const terminalPayload = journal.readStream(result.taskId).at(-1)?.payload as {
         candidateCleanupFailures: readonly CleanupFailure[];

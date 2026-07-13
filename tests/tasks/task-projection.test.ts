@@ -492,6 +492,76 @@ describe("TaskService", () => {
     expect(stored[1]?.causationId).toBe("cause-1");
   });
 
+  it("appends a validated nonempty event batch in one journal transaction", () => {
+    const appendedBatches: string[][] = [];
+    class RecordingJournal extends SqliteEventJournal {
+      override append(
+        ...args: Parameters<SqliteEventJournal["append"]>
+      ): ReturnType<SqliteEventJournal["append"]> {
+        appendedBatches.push(args[2].map((event) => event.type));
+        return super.append(...args);
+      }
+    }
+    const journal = new RecordingJournal(":memory:");
+    journals.push(journal);
+    const service = new TaskService(journal);
+    service.create(createInput);
+    appendedBatches.length = 0;
+
+    const view = service.appendBatch("task-1", [
+      { type: "task.leased", payload: { leaseOwner: "worker-1" }, causationId: null },
+      { type: "task.started", payload: { workerId: "worker-1" }, causationId: "cause-2" },
+    ]);
+
+    expect(view).toMatchObject({ lifecycle: "running", streamVersion: 3 });
+    expect(journal.readStream("task-1").map((stored) => stored.type)).toEqual([
+      "task.created",
+      "task.leased",
+      "task.started",
+    ]);
+    expect(journal.readStream("task-1")[2]?.causationId).toBe("cause-2");
+    expect(appendedBatches).toEqual([["task.leased", "task.started"]]);
+  });
+
+  it("delegates a single append through appendBatch", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    let batchCalls = 0;
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batchCalls += 1;
+        return super.appendBatch(...args);
+      }
+    }
+    const service = new RecordingTaskService(journal);
+    service.create(createInput);
+
+    service.append("task-1", "task.leased", { leaseOwner: "worker-1" }, null);
+
+    expect(batchCalls).toBe(1);
+  });
+
+  it("rejects an empty batch without persistence", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+
+    expect(() => service.appendBatch("task-1", [])).toThrow("event batch must not be empty");
+    expect(journal.readStream("task-1")).toHaveLength(1);
+  });
+
+  it("validates the full prospective batch before persisting any event", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+
+    expect(() => service.appendBatch("task-1", [
+      { type: "task.leased", payload: { leaseOwner: "worker-1" }, causationId: null },
+      { type: "task.review_requested", payload: {}, causationId: null },
+    ])).toThrow("invalid transition from leased via task.review_requested");
+    expect(journal.readStream("task-1").map((stored) => stored.type)).toEqual(["task.created"]);
+  });
+
   it("rejects appending to an unknown task", () => {
     const { service } = makeService();
     expect(() => service.append("nope", "task.leased", {}, null)).toThrow();

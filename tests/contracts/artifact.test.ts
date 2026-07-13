@@ -445,6 +445,146 @@ describe("projectArtifacts", () => {
       artifactMarker(recorded, 4),
     ])).toThrow("artifact protocol marker references missing patch artifact");
   });
+
+  it("fails closed when a protocol marker is followed by a non-artifact event", () => {
+    const recorded = artifactEvent("patch", 5, patch);
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactMarker(recorded, 4),
+      event("task.failed", 5),
+    ])).toThrow("artifact protocol marker references missing patch artifact");
+  });
+
+  it("accepts a failed full-validation receipt before preparation", () => {
+    const failedValidation = {
+      ...fullValidation,
+      outcome: "failed" as const,
+      exitCode: 1,
+    };
+    const failedReceipt = {
+      ...receipt,
+      resultCommit: null,
+      validation: failedValidation,
+      outcome: "failed" as const,
+    };
+    expect(() => projectArtifacts([
+      ...throughReviewRequest(),
+      artifactEvent("review_report", 8, review),
+      event("task.review_approved", 9, { review }),
+      event("task.integration_started", 10, { sourceCommit: receipt.sourceCommit, review }),
+      artifactEvent("integration_receipt", 11, failedReceipt, undefined, "final"),
+      event("task.failed", 12, { receipt: failedReceipt }),
+    ])).not.toThrow();
+  });
+
+  it("rejects a review request backed by unsuccessful focused validation", () => {
+    const failed = { ...validation, outcome: "failed" as const, exitCode: 1 };
+    expect(() => projectArtifacts([
+      event("task.created", 1, { projectId: "project-1", title: "task" }),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch),
+      event("task.validation_started", 5, validationStartedPayload),
+      artifactEvent("validation_report", 6, failed),
+      event("task.review_requested", 7, { reviewerId: "reviewer-1", validation: failed }),
+    ])).toThrow("task.review_requested requires successful validation evidence");
+  });
+
+  it.each(["task.review_approved", "task.integration_started"])(
+    "rejects %s when the retained review is denied",
+    (boundary) => {
+      const denied = { ...review, approved: false };
+      const events = [
+        ...throughReviewRequest(),
+        artifactEvent("review_report", 8, denied),
+        event(boundary, 9, {
+          review: denied,
+          ...(boundary === "task.integration_started" ? { sourceCommit: receipt.sourceCommit } : {}),
+        }),
+      ];
+      expect(() => projectArtifacts(events)).toThrow(`${boundary} requires approved review evidence`);
+    },
+  );
+
+  it.each([
+    ["receipt outcome", { outcome: "failed" }],
+    ["review approval", { review: { ...review, approved: false } }],
+    ["integration base", { originalIntegrationCommit: null }],
+    ["result commit", { resultCommit: null }],
+    ["validation name", { validation: { ...fullValidation, name: "focused" } }],
+    ["validation outcome", {
+      validation: { ...fullValidation, outcome: "failed", exitCode: 1 },
+    }],
+    ["validation subject", {
+      validation: {
+        ...fullValidation,
+        provenance: { ...fullValidation.provenance, subjectSha256: "d".repeat(40) },
+      },
+    }],
+  ] as const)("rejects prepared evidence without successful %s", (_case, mutation) => {
+    const invalid = { ...receipt, ...mutation };
+    const events = [
+      ...throughReviewRequest(),
+      artifactEvent("review_report", 8, review),
+      event("task.review_approved", 9, { review }),
+      event("task.integration_started", 10, { sourceCommit: receipt.sourceCommit, review }),
+      artifactEvent("integration_receipt", 11, invalid, undefined, "prepared"),
+      event("task.integration_prepared", 12, { receipt: invalid }),
+    ];
+    expect(() => projectArtifacts(events)).toThrow(/successful prepared receipt evidence/);
+  });
+
+  it("accepts a final failed CAS receipt that changes only the outcome", () => {
+    const events = completeArtifactChain();
+    const failed = { ...receipt, outcome: "failed" as const };
+    events[12] = artifactEvent(
+      "integration_receipt",
+      13,
+      failed,
+      "artifact-integration-final",
+      "final",
+    );
+    expect(() => projectArtifacts(events)).not.toThrow();
+  });
+
+  it.each([
+    ["integration base", { originalIntegrationCommit: "d".repeat(40) }],
+    ["result commit", { resultCommit: "d".repeat(40) }],
+    ["review", { review: { ...review, reason: "substituted" } }],
+    ["validation", {
+      validation: {
+        ...fullValidation,
+        provenance: { ...fullValidation.provenance, invocationId: "substituted" },
+      },
+    }],
+  ] as const)("rejects final failed CAS evidence that changes prepared %s provenance", (_case, mutation) => {
+    const events = completeArtifactChain();
+    const changed = { ...receipt, ...mutation, outcome: "failed" as const };
+    events[12] = artifactEvent(
+      "integration_receipt",
+      13,
+      changed,
+      "artifact-integration-final",
+      "final",
+    );
+    expect(() => projectArtifacts(events)).toThrow(/prepared|contradict/);
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])(
+    "safely retains the %s artifact identity in evidence maps",
+    (artifactId) => {
+      const view = projectArtifacts([
+        event("task.created", 1),
+        event("task.leased", 2),
+        event("task.started", 3),
+        artifactEvent("patch", 4, patch, artifactId),
+      ]);
+      expect(Object.hasOwn(view.evidenceByArtifactId, artifactId)).toBe(true);
+      expect(view.evidenceByArtifactId[artifactId]).toEqual(patch);
+    },
+  );
 });
 
 function completeArtifactChain(): StoredEvent[] {
