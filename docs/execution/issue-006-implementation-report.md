@@ -97,6 +97,8 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - Tracer coverage proving patch, validation, review, prepared-receipt, and terminal artifact boundaries use one three-event batch.
 - Replay rejection for marker-only and nontrailing markers, unsuccessful focused validation, denied success-boundary reviews, and every prepared-receipt success predicate.
 - Prepared-to-final provenance substitution rejection and safe retention of `__proto__`, `constructor`, and `prototype` artifact IDs.
+- Replay rejection for successful non-focused validation at the review boundary and terminal lifecycle events that contradict their receipt outcome.
+- Atomic retention of wrong-subject validation evidence on its immediate terminal failure without allowing that evidence to authorize review.
 
 ## Commands And Results
 
@@ -114,8 +116,8 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - `pnpm check` after the independent-review fixes: passed with no TypeScript errors.
 - `pnpm build` after the independent-review fixes: passed.
 - `git diff --check` after the independent-review fixes: passed with no output.
-- `pnpm exec vitest run tests/tasks/task-projection.test.ts tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after Retry 1: passed, 3 test files and 206 tests.
-- `pnpm test` after Retry 1: passed, 18 test files and 643 tests.
+- `pnpm exec vitest run tests/tasks/task-projection.test.ts tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after Retry 1 and gate fixes: passed, 3 test files and 213 tests.
+- `pnpm test` after Retry 1 and gate fixes: passed, 18 test files and 650 tests.
 - `pnpm check` after Retry 1: passed with no TypeScript errors.
 - `pnpm build` after Retry 1: passed.
 - `git diff --check` after Retry 1: passed with no output.
@@ -143,8 +145,10 @@ Historical reports that predate timeout fields remain accepted, while reports th
 
 The earlier report's statement that no standards or specification findings remained was incorrect because the atomicity and replay defects listed above were still present.
 Retry 1 reviewed the worktree diff against `AGENTS.md`, the approved orchestrator design, the MVP plan, and every issue 006 acceptance criterion.
-The review found one private-helper interface smell where a required consuming event was optional; the helper now requires that boundary event directly.
-No standards or specification findings remain after that correction.
+The initial review found one private-helper interface smell where a required consuming event was optional; the helper now requires that boundary event directly.
+The no-mistakes review then found three in-scope misses: the review boundary did not require the `focused` validation name, terminal receipt outcomes were not bound to terminal event types, and wrong-subject validation failure evidence was dropped by a rejected terminal append.
+Commits `4841424` and `e7cf9d8` correct those misses with focused replay tests.
+No standards or specification findings remain after those corrections.
 The implementation keeps the event journal authoritative, keeps projections rebuildable, introduces no shell or external authority, and changes only the explicitly allowed production, test, and report paths.
 The four schemas, durable metadata, exact digest bindings, journal-only projection, atomic fail-closed replay checks, required malformed and failure-stage tests, and explicit delete-all tamper test are present.
 No remote blob store was added, bounded retained evidence remains bounded, and lifecycle events were not replaced.
@@ -175,4 +179,7 @@ A future artifact store can extend the safe logical path semantics without chang
 - Recovery report update: the commit containing this report.
 - Independent-review hardening: `afa8773` (`fix: harden artifact evidence replay`).
 - Automated gate scope restoration: `dd2e9d5` and `679de5c` revert the gate's generated out-of-scope documentation and reviewer-containment commits without rewriting branch history.
-- Retry 1 atomicity and replay correction: the commit containing this report.
+- Retry 1 atomicity and replay correction: `c2b9208` (`fix: make artifact boundaries atomic`).
+- Focused review and terminal receipt correction: `4841424` (`no-mistakes(review): Enforce focused review and terminal receipt outcomes`).
+- Wrong-subject validation failure retention: `e7cf9d8` (`no-mistakes(review): Retain mismatched validation failure evidence atomically`).
+- Final Retry 1 report totals: the commit containing this report.
