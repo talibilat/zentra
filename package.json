@@ -11,6 +11,7 @@
     "dist/",
     "fixtures/deterministic-worker.mjs",
     "README.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {

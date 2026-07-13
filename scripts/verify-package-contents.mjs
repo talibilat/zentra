@@ -134,6 +134,7 @@ function copyPackageSource(destination) {
     "package.json",
     "pnpm-lock.yaml",
     "README.md",
+    "SECURITY.md",
     "tsconfig.json",
     "tsconfig.build.json",
   ].map((name) => [name, validatePackageFile(name).absolutePath]);
@@ -172,6 +173,7 @@ function assertPackageManifest(sourceRoot, listedFiles) {
   const expected = [
     "LICENSE",
     "README.md",
+    "SECURITY.md",
     ...walkFiles(path.join(sourceRoot, "dist")).map((file) => relativePath(sourceRoot, file)),
     "fixtures/deterministic-worker.mjs",
     "package.json",

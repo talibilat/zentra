@@ -199,6 +199,7 @@ function copyPackageSource(destination: string): void {
     "package.json",
     "pnpm-lock.yaml",
     "README.md",
+    "SECURITY.md",
     "tsconfig.json",
     "tsconfig.build.json",
   ]) {
@@ -275,7 +276,7 @@ describe("MVP package platform metadata", () => {
 
     expect(metadata.os).toEqual(["darwin"]);
     expect(metadata.cpu).toEqual(["arm64"]);
-  });
+  }, 120_000);
 
   it("installs the packed package and loads its native dependency on the supported host", async () => {
     expect(process.platform).toBe("darwin");

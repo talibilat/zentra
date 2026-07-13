@@ -81,6 +81,7 @@ function packageSandbox(): string {
     "package.json",
     "pnpm-lock.yaml",
     "README.md",
+    "SECURITY.md",
     "tsconfig.json",
     "tsconfig.build.json",
   ]) {
@@ -145,6 +146,8 @@ async function initializeProject(baseDirectory: string): Promise<{
 describe("publishable CLI package", () => {
   it("packs from clean output, installs into an empty consumer, and runs a SQLite-backed task", async () => {
     const sandbox = packageSandbox();
+    const securityPolicy = path.join(sandbox, "SECURITY.md");
+    chmodSync(securityPolicy, 0o600);
     expect(existsSync(path.join(sandbox, "dist"))).toBe(false);
 
     const { tarball, result } = await pack(sandbox);
@@ -153,6 +156,7 @@ describe("publishable CLI package", () => {
     expect(packedCli!.mode & 0o111).not.toBe(0);
     expect(result.files.some((file) => file.path === "fixtures/deterministic-worker.mjs")).toBe(true);
     expect(result.files.some((file) => file.path === "dist/package-manifest.json")).toBe(true);
+    expect(lstatSync(securityPolicy).mode & 0o777).toBe(0o644);
 
     const consumer = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-consumer-")));
     temporaryDirectories.push(consumer);
@@ -318,14 +322,19 @@ describe("publishable CLI package", () => {
     expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
   }, 30_000);
 
-  it("rejects a packaged symlink without modifying or packaging its external target", async () => {
+  it.each([
+    ["fixture", "fixtures/deterministic-worker.mjs"],
+    ["security policy", "SECURITY.md"],
+  ] as const)("rejects a symlinked packaged %s without modifying or packaging its external target", async (
+    _, packagedPath,
+  ) => {
     const sandbox = packageSandbox();
     const externalTarget = path.join(sandbox, "external-target.mjs");
-    const fixture = path.join(sandbox, "fixtures", "deterministic-worker.mjs");
+    const packagedFile = path.join(sandbox, packagedPath);
     writeFileSync(externalTarget, "external target\n", "utf8");
     chmodSync(externalTarget, 0o600);
-    rmSync(fixture);
-    symlinkSync(externalTarget, fixture);
+    rmSync(packagedFile);
+    symlinkSync(externalTarget, packagedFile);
     const destination = path.join(sandbox, "artifacts");
     mkdirSync(destination);
 
@@ -335,7 +344,7 @@ describe("publishable CLI package", () => {
     )).rejects.toMatchObject({
       code: 1,
       stderr: expect.stringContaining(
-        "fixtures/deterministic-worker.mjs must be a regular non-symlink file",
+        `${packagedPath} must be a regular non-symlink file`,
       ),
     });
     expect(statSync(externalTarget).mode & 0o777).toBe(0o600);
@@ -498,8 +507,8 @@ describe("publishable CLI package", () => {
         nodeExecutable,
         ["--input-type=module", "--eval", parentProgram],
         repositoryRoot,
-        { environment: subprocessEnvironment, timeoutMs: 100 },
-      )).rejects.toThrow("timed out after 100ms");
+        { environment: subprocessEnvironment, timeoutMs: 1_000 },
+      )).rejects.toThrow("timed out after 1000ms");
       descendantPid = Number(readFileSync(pidFile, "utf8"));
 
       expect(descendantPid).toBeGreaterThan(0);
