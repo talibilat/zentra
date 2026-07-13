@@ -1,12 +1,21 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { promisify } from "node:util";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   IntegrationLeaseStore,
   MAX_INTEGRATION_LEASE_MS,
   type IntegrationLeaseKey,
 } from "../../src/integration/integration-lease.js";
+
+const execFileAsync = promisify(execFile);
+const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+const LEASE_HOLDER_FIXTURE = path.resolve(
+  import.meta.dirname,
+  "fixtures/lease-holder.mjs",
+);
 
 describe("IntegrationLeaseStore", () => {
   let directory: string;
@@ -112,4 +121,96 @@ describe("IntegrationLeaseStore", () => {
       "integration lease duration is out of bounds",
     );
   });
+});
+
+describe("IntegrationLeaseStore across real OS processes", () => {
+  let directory: string;
+  let databasePath: string;
+  let resultsPath: string;
+  const key: IntegrationLeaseKey = {
+    commonDirectory: "/canonical/repository/.git",
+    integrationRef: "refs/heads/zentra/integration",
+  };
+
+  beforeAll(async () => {
+    if (!existsSync(path.join(repositoryRoot, "dist/src/integration/integration-lease.js"))) {
+      await execFileAsync("pnpm", ["build"], { cwd: repositoryRoot });
+    }
+  }, 60_000);
+
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(tmpdir(), "zentra-integration-lease-mp-"));
+    databasePath = path.join(directory, "leases.sqlite");
+    resultsPath = path.join(directory, "results.ndjson");
+  });
+
+  afterEach(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  function readEvents(): Array<{ pid: number; event: string; at: number; released?: boolean }> {
+    if (!existsSync(resultsPath)) return [];
+    return readFileSync(resultsPath, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line));
+  }
+
+  function spawnHolder(holdMs: number): Promise<void> {
+    return execFileAsync(
+      process.execPath,
+      [
+        LEASE_HOLDER_FIXTURE,
+        databasePath,
+        key.commonDirectory,
+        key.integrationRef,
+        String(holdMs),
+        resultsPath,
+      ],
+      {
+        cwd: repositoryRoot,
+        shell: false,
+        env: { PATH: process.env.PATH ?? "" },
+      },
+    ).then(() => undefined);
+  }
+
+  it(
+    "serializes lease ownership across two independent node processes for the same key",
+    async () => {
+      const [first, second] = await Promise.allSettled([
+        spawnHolder(300),
+        spawnHolder(300),
+      ]);
+
+      expect(first.status).toBe("fulfilled");
+      expect(second.status).toBe("fulfilled");
+
+      const events = readEvents().sort((a, b) => a.at - b.at);
+      const acquisitions = events.filter((event) => event.event === "acquired");
+      const releases = events.filter((event) => event.event === "released");
+
+      expect(acquisitions).toHaveLength(2);
+      expect(releases).toHaveLength(2);
+      expect(new Set(acquisitions.map((event) => event.pid)).size).toBe(2);
+      expect(releases.every((event) => event.released === true)).toBe(true);
+
+      // Reconstruct hold intervals per process and prove they never overlap:
+      // the second acquisition must not start before the first process's
+      // matching release timestamp (one process must wait for the other).
+      const intervals = acquisitions.map((acquired) => {
+        const release = releases.find((event) => event.pid === acquired.pid);
+        if (release === undefined) {
+          throw new Error(`no matching release event for pid ${acquired.pid}`);
+        }
+        return { pid: acquired.pid, start: acquired.at, end: release.at };
+      });
+      intervals.sort((a, b) => a.start - b.start);
+
+      expect(intervals).toHaveLength(2);
+      expect(intervals[1]!.start).toBeGreaterThanOrEqual(intervals[0]!.end);
+      expect(intervals[0]!.pid).not.toBe(intervals[1]!.pid);
+    },
+    20_000,
+  );
 });
