@@ -1297,9 +1297,19 @@ describe("TracerBulletOrchestrator", () => {
         throw new Error("reviewer must not run");
       },
     };
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
     const { journal, orchestrator } = system(fixture.configPath, {
       validations: new ReplayingValidationRunner(new ProcessSupervisor()),
       reviewer,
+      taskService: (stream) => new RecordingTaskService(stream),
     });
 
     const result = await orchestrator.run({
@@ -1310,7 +1320,26 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.terminalOutcome).toBe("failed");
     expect(reviewerCalls).toBe(0);
-    expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.failed");
+    const events = journal.readStream(result.taskId);
+    expect(events.slice(-3).map((event) => event.type)).toEqual([
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
+      "task.failed",
+    ]);
+    expect(events.at(-1)?.payload).toEqual({
+      stage: "validation",
+      reason: "focused validation report subject does not match the patch digest",
+      validation: oldReport,
+    });
+    expect(batches).toContainEqual([
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
+      "task.failed",
+    ]);
+    const artifacts = projectArtifacts(events);
+    const validationArtifact = artifacts.artifacts.find((artifact) =>
+      artifact.kind === "validation_report");
+    expect(artifacts.evidenceByArtifactId[validationArtifact!.artifactId]).toEqual(oldReport);
   });
 
   it("rejects context-bound validation executed with a substituted focused command", async () => {

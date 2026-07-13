@@ -508,6 +508,50 @@ describe("projectArtifacts", () => {
     ])).toThrow("task.review_requested requires successful focused validation evidence");
   });
 
+  it("retains a subject-mismatched validation only for its immediate terminal failure", () => {
+    const mismatched = {
+      ...validation,
+      provenance: { ...validation.provenance, subjectSha256: "0".repeat(64) },
+    };
+    const events = [
+      event("task.created", 1, { projectId: "project-1", title: "task" }),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch),
+      event("task.validation_started", 5, validationStartedPayload),
+      artifactEvent("validation_report", 6, mismatched),
+      event("task.failed", 7, {
+        stage: "validation",
+        reason: "focused validation report subject does not match the patch digest",
+        validation: mismatched,
+      }),
+    ];
+
+    expect(projectArtifacts(events).artifacts.map((artifact) => artifact.kind)).toEqual([
+      "patch",
+      "validation_report",
+    ]);
+  });
+
+  it("does not let a subject-mismatched validation authorize review", () => {
+    const mismatched = {
+      ...validation,
+      provenance: { ...validation.provenance, subjectSha256: "0".repeat(64) },
+    };
+    expect(() => projectArtifacts([
+      event("task.created", 1, { projectId: "project-1", title: "task" }),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch),
+      event("task.validation_started", 5, validationStartedPayload),
+      artifactEvent("validation_report", 6, mismatched),
+      event("task.review_requested", 7, {
+        reviewerId: "reviewer-1",
+        validation: mismatched,
+      }),
+    ])).toThrow("validation report artifact contradicts the patch artifact");
+  });
+
   it.each([
     ["task.completed", "failed"],
     ["task.cancelled", "completed"],

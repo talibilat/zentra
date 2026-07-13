@@ -212,13 +212,20 @@ export class TracerBulletOrchestrator {
         { invocationId: validationInvocationId, subjectSha256: diffSha256 },
       );
       if (validation.provenance.subjectSha256 !== diffSha256) {
-        return this.terminate(
+        this.recordArtifact(
           input.taskId,
-          "failed",
-          stage,
-          "focused validation report subject does not match the patch digest",
-          { validation },
+          "validation_report",
+          validation,
+          {
+            type: "task.failed",
+            payload: {
+              stage,
+              reason: "focused validation report subject does not match the patch digest",
+              validation,
+            },
+          },
         );
+        return this.current(input.taskId);
       }
       const validationOutcome = failedValidationOutcome(validation);
       if (validationOutcome !== null) {

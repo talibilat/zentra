@@ -468,7 +468,8 @@ function validateArtifactChain(
     const report = ValidationEvidenceSchema.parse(evidence);
     const patch = requireArtifact(byKind, "patch", "validation_report artifact");
     if (
-      report.provenance.subjectSha256 !== patch.artifact.sha256
+      report.provenance.subjectSha256 !== patch.artifact.sha256 &&
+      !isImmediateValidationFailure(report, event, events)
     ) {
       throw new Error("validation report artifact contradicts the patch artifact");
     }
@@ -521,6 +522,19 @@ function validateArtifactChain(
       throw new Error("integration receipt artifact contradicts task, project, source, result, review, or validation provenance");
     }
   }
+}
+
+function isImmediateValidationFailure(
+  report: z.infer<typeof ValidationEvidenceSchema>,
+  artifactEvent: StoredEvent,
+  events: readonly StoredEvent[],
+): boolean {
+  const next = events.find((candidate) =>
+    candidate.streamVersion === artifactEvent.streamVersion + 1);
+  if (next?.type !== "task.failed") return false;
+  const validation = objectPayload(next).validation;
+  const parsed = ValidationEvidenceSchema.safeParse(validation);
+  return parsed.success && JSON.stringify(parsed.data) === JSON.stringify(report);
 }
 
 function assertSuccessfulPreparedReceipt(
