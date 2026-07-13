@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Command, CommanderError } from "commander";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
+import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
 import {
   resolveBundledFixture,
   type BundledFixture,
@@ -15,7 +16,12 @@ import { IntegrationQueue } from "../integration/integration-queue.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
 import { RecoveryService } from "../orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
-import { ProjectConfigSchema, type ProjectConfig } from "../projects/project-config.js";
+import {
+  APPROVED_VALIDATION_EXECUTABLE,
+  assertApprovedValidationExecutableIdentity,
+  ProjectConfigSchema,
+  type ProjectConfig,
+} from "../projects/project-config.js";
 import { ProjectRegistry } from "../projects/project-registry.js";
 import { ReviewGate } from "../reviews/review-gate.js";
 import {
@@ -29,15 +35,54 @@ import { GitClient } from "../workspaces/git-client.js";
 import { WorktreeManager } from "../workspaces/worktree-manager.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
+const REVIEWER_ID = "zentra-deterministic-reviewer";
 const WORKER_TIMEOUT_MS = 120_000;
 const MAX_OPERATIONAL_JSON_BYTES = 16_384;
 const MAX_TASK_ID_LENGTH = 128;
 const MAX_PROJECT_ID_BYTES = 128;
 const MAX_TITLE_BYTES = 512;
 const MAX_FILE_BYTES = 255;
-const MAX_CONTENT_BYTES = 1_048_576;
+const MAX_DIFF_FRAMING_BYTES = 4_096;
+// Every one-byte line may require one additional Git diff prefix byte.
+const MAX_CONTENT_BYTES = Math.floor(
+  (MAX_RETAINED_ARTIFACT_BYTES - MAX_DIFF_FRAMING_BYTES) / 2,
+);
 const MAX_CONFIG_BYTES = 1_048_576;
 const MAX_PROJECT_CONFIGS = 256;
+const FIXED_REVIEWER_SOURCE = String.raw`
+import { createHash } from "node:crypto";
+let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+const sha256 = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+const validation = request.validation;
+const argvSha256 = sha256(JSON.stringify(validation.command));
+const outputSha256 = sha256(JSON.stringify({ stdout: validation.stdout, stderr: validation.stderr }));
+const validationSha256 = sha256(JSON.stringify({
+  name: validation.name,
+  outcome: validation.outcome,
+  exitCode: validation.exitCode,
+  startedAt: validation.startedAt,
+  finishedAt: validation.finishedAt,
+  command: validation.command,
+  stdout: validation.stdout,
+  stderr: validation.stderr,
+  argvSha256,
+  outputSha256,
+  provenance: validation.provenance,
+}));
+const dangerous = request.diff.includes("requireAuthentication = false");
+process.stdout.write(JSON.stringify({
+  reviewerId: request.reviewerId,
+  decision: dangerous ? "deny" : "approve",
+  requestSha256: sha256(input),
+  diffSha256: sha256(request.diff),
+  validationSha256,
+  decidedAt: new Date().toISOString(),
+  reason: dangerous ? "Denied deterministic authentication bypass." : "Approved deterministic reviewed evidence.",
+}) + "\n");
+`;
 
 const PUBLIC_ERROR_MESSAGES = Object.freeze({
   BUNDLED_FIXTURE_INVALID: "Bundled fixture attestation failed.",
@@ -83,9 +128,6 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
   readonly title: string;
   readonly file: string;
   readonly content: string;
-  readonly reviewerExecutable?: string;
-  readonly reviewerArgument: readonly string[];
-  readonly reviewerId?: string;
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
@@ -185,14 +227,6 @@ function createProgram(
     .requiredOption("--title <title>", "task title")
     .requiredOption("--file <relative-path>", "one root-level file")
     .requiredOption("--content <text>", "replacement file content")
-    .option("--reviewer-executable <path>", "content-aware reviewer executable")
-    .option(
-      "--reviewer-argument <value>",
-      "argument passed to the configured reviewer executable",
-      (value: string, previous: string[]) => [...previous, value],
-      [],
-    )
-    .option("--reviewer-id <id>", "independent reviewer identity")
     .action(async (options: RunOptions) => {
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
@@ -208,21 +242,7 @@ function createProgram(
         projectId: projectConfig.projectId,
         title: options.title,
       });
-      const reviewer = configuredReviewer(options);
-      if (reviewer === null) {
-        const denied = await withSystem(
-          options.database,
-          configs,
-          "read-write",
-          (system) => Promise.resolve(denyMissingReviewer(system.tasks, {
-            taskId: options.taskId,
-            projectId: projectConfig.projectId,
-            title: options.title,
-          })),
-        );
-        setResult(taskRunResult(denied));
-        return;
-      }
+      const reviewer = await configuredReviewer();
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
@@ -231,7 +251,7 @@ function createProgram(
             projectId: projectConfig.projectId,
             title: options.title,
             workerId: WORKER_ID,
-            reviewerId: reviewer.reviewerId,
+            reviewerId: REVIEWER_ID,
             workerRequest: {
               executable: process.execPath,
               args: [
@@ -413,49 +433,16 @@ function attestedWorkerFixture(anchor?: string | URL): BundledFixture {
   }
 }
 
-function configuredReviewer(options: RunOptions): {
-  readonly reviewerId: string;
+async function configuredReviewer(): Promise<{
   readonly adapter: ReviewerAdapter;
-} | null {
-  const executable = options.reviewerExecutable;
-  const reviewerId = options.reviewerId;
-  if (executable === undefined && reviewerId === undefined && options.reviewerArgument.length === 0) {
-    return null;
-  }
-  if (
-    executable === undefined ||
-    executable.length === 0 ||
-    reviewerId === undefined ||
-    reviewerId.length === 0
-  ) {
-    throw new CliFailure("INVALID_COMMAND");
-  }
+}> {
+  await assertApprovedValidationExecutableIdentity(APPROVED_VALIDATION_EXECUTABLE);
   return {
-    reviewerId,
     adapter: new ProcessReviewerAdapter({
-      executable,
-      args: options.reviewerArgument,
+      executable: APPROVED_VALIDATION_EXECUTABLE,
+      args: ["--input-type=module", "--eval", FIXED_REVIEWER_SOURCE],
     }),
   };
-}
-
-function denyMissingReviewer(
-  tasks: TaskService,
-  input: { readonly taskId: string; readonly projectId: string; readonly title: string },
-): TaskView {
-  tasks.create({
-    ...input,
-    correlationId: input.taskId,
-  });
-  return tasks.append(
-    input.taskId,
-    "task.denied",
-    {
-      stage: "setup",
-      reason: "content-aware reviewer is not configured",
-    },
-    null,
-  );
 }
 
 function assertSafeRootFile(candidate: string): void {

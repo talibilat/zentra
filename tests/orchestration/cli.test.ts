@@ -132,9 +132,8 @@ async function invoke(
 function runArguments(
   testFixture: Fixture,
   taskId = "task-cli",
-  configureReviewer = true,
 ): readonly string[] {
-  const args = [
+  return [
     "task", "run",
     "--config", testFixture.configPath,
     "--database", testFixture.databasePath,
@@ -143,14 +142,6 @@ function runArguments(
     "--file", "greeting.txt",
     "--content", "hello from CLI\n",
   ];
-  if (configureReviewer) {
-    args.push(
-      "--reviewer-executable", process.execPath,
-      "--reviewer-argument", CONTENT_AWARE_REVIEWER,
-      "--reviewer-id", "content-reviewer-1",
-    );
-  }
-  return args;
 }
 
 function fileSha256(filePath: string): string {
@@ -236,32 +227,24 @@ describe("Zentra CLI", () => {
     expect(status.json).toEqual({ command: "task.status", task: run.json.task });
   });
 
-  it("denies by default without reviewer configuration before commit or integration", async () => {
+  it("uses the internally selected reviewer without caller configuration", async () => {
     const testFixture = await fixture();
-    const initialHead = await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"]);
 
-    const result = await invoke(runArguments(testFixture, "task-no-reviewer", false));
+    const result = await invoke(runArguments(testFixture, "task-internal-reviewer"));
 
     expect(result).toMatchObject({
-      code: 1,
-      stdout: "",
+      code: 0,
+      stderr: "",
       json: {
         command: "task.run",
-        outcome: "denied",
+        outcome: "completed",
         task: {
-          taskId: "task-no-reviewer",
+          taskId: "task-internal-reviewer",
           lifecycle: "terminal",
-          terminalOutcome: "denied",
+          terminalOutcome: "completed",
         },
       },
     });
-    expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(initialHead);
-    expect((await new GitClient().run(testFixture.repositoryPath, [
-      "show-ref",
-      "--verify",
-      "refs/heads/zentra/integration",
-    ])).exitCode).not.toBe(0);
-    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
   });
 
   it("denies an adversarial diff that passes focused validation without committing it", async () => {
@@ -719,6 +702,23 @@ describe("Zentra CLI", () => {
     ])).toBe(refsBefore);
   });
 
+  it("reserves artifact capacity for Git diff framing before creating effects", async () => {
+    const testFixture = await fixture();
+
+    const result = await invoke([
+      ...runArguments(testFixture, "task-unframed-content"),
+      "--content", "c".repeat(1_048_576),
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.json).toEqual({
+      command: "task.run",
+      error: { code: "INVALID_CONTENT", message: "Task content is too large." },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
   it("rejects an oversized config file before reading it or creating effects", async () => {
     const testFixture = await fixture();
     writeFileSync(testFixture.configPath, "x".repeat(1_048_577), "utf8");
@@ -887,6 +887,26 @@ describe("Zentra CLI", () => {
     },
   );
 
+  it("rejects caller-selected reviewer executable authority before creating effects", async () => {
+    const testFixture = await fixture();
+
+    const result = await invoke([
+      ...runArguments(testFixture, "task-caller-reviewer"),
+      "--reviewer-executable", process.execPath,
+      "--reviewer-argument", CONTENT_AWARE_REVIEWER,
+      "--reviewer-id", "caller-reviewer",
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.json).toMatchObject({
+      command: "task.run",
+      error: { code: "INVALID_COMMAND" },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
   it("maps SIGINT to one cancelled object with a nonzero exit", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
@@ -1042,7 +1062,7 @@ describe("built CLI help", () => {
     expect(result.stdout).toMatch(/\brecover\b/);
   });
 
-  it("runs the bundled worker and configured content-aware reviewer through the built entry point", async () => {
+  it("runs the bundled worker and internally fixed reviewer through the built entry point", async () => {
     const root = path.resolve(import.meta.dirname, "../..");
     const testFixture = await fixture();
 

@@ -9,7 +9,7 @@ const MAX_ID_LENGTH = 256;
 const MAX_PATH_LENGTH = 4_096;
 const MAX_TEXT_LENGTH = 4_096;
 const MAX_COMMAND_ARGUMENTS = 256;
-const MAX_RETAINED_BYTES = 1_024 * 1_024;
+export const MAX_RETAINED_ARTIFACT_BYTES = 1_024 * 1_024;
 const ValidationTimeoutSchema = z.number().int().min(100).max(30 * 60 * 1_000);
 
 const IdentitySchema = z.string().min(1).max(MAX_ID_LENGTH);
@@ -19,6 +19,10 @@ const TimestampSchema = z.string().max(64).datetime({ offset: true });
 const SafeLogicalPathSchema = z.string().min(1).max(MAX_PATH_LENGTH).refine(isSafeLogicalPath, {
   message: "artifact path must be a safe logical relative path",
 });
+const RetainedTextSchema = z.string().refine(
+  (value) => Buffer.byteLength(value, "utf8") <= MAX_RETAINED_ARTIFACT_BYTES,
+  { message: "retained artifact text exceeds the UTF-8 byte limit" },
+);
 
 export const ArtifactKindSchema = z.enum([
   "patch",
@@ -37,7 +41,10 @@ export const ArtifactSchema = z.strictObject({
 });
 
 const PatchEvidenceSchema = z.strictObject({
-  diff: z.string().min(1).max(MAX_RETAINED_BYTES),
+  diff: z.string().min(1).refine(
+    (value) => Buffer.byteLength(value, "utf8") <= MAX_RETAINED_ARTIFACT_BYTES,
+    { message: "retained patch exceeds the UTF-8 byte limit" },
+  ),
   diffSha256: Sha256Schema,
   changedPath: SafeLogicalPathSchema,
   changedContentSha256: Sha256Schema,
@@ -47,8 +54,8 @@ const ValidationEvidenceSchema = z.strictObject({
   name: IdentitySchema,
   outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
   exitCode: z.number().int().nullable(),
-  stdout: z.string().max(MAX_RETAINED_BYTES),
-  stderr: z.string().max(MAX_RETAINED_BYTES),
+  stdout: RetainedTextSchema,
+  stderr: RetainedTextSchema,
   startedAt: TimestampSchema,
   finishedAt: TimestampSchema,
   command: z.array(BoundedTextSchema).min(1).max(MAX_COMMAND_ARGUMENTS),

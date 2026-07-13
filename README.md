@@ -10,7 +10,7 @@ Zoe is a client of Zentra rather than part of this repository, and Zentra does n
 
 The current MVP runs on one local machine for one user and executes one deterministic tracer-bullet task at a time against one configured Git project.
 
-It uses bundled deterministic worker and reviewer fixtures to prove the orchestration contracts without exposing a general coding harness or shell interface.
+It uses a bundled deterministic worker fixture and an internally fixed deterministic reviewer subprocess to prove the orchestration contracts without exposing a general coding harness or shell interface.
 
 Real coding harnesses, high concurrency, distributed execution, plugin APIs, and Zoe personal capabilities are explicitly not included yet.
 
@@ -103,6 +103,9 @@ pnpm start -- task run \
   --content $'hello from Zentra\n'
 ```
 
+`--content` accepts at most 522,240 UTF-8 bytes, reserving 4 KiB for fixed Git headers and another content-sized allowance for the worst case in which Git adds a prefix to every one-byte line.
+Zentra measures the complete generated diff, including replaced content and framing, against the 1 MiB byte boundary and fails closed without recording a partial patch when that complete diff is too large.
+
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
 ```bash
@@ -140,11 +143,12 @@ Task identities are also validated as safe single path and ref components before
 
 ## Security Boundary
 
-The CLI chooses Zentra's bundled deterministic worker and reviewer executables internally; CLI callers cannot select or replace those executables.
+The CLI chooses Zentra's bundled deterministic worker internally and runs its fixed reviewer source only through the same approved canonical absolute Node.js executable identity used by validation policy.
+The `task run` command exposes no reviewer executable, reviewer argument, or reviewer identity options; attempts to supply those options are rejected before journal or worktree effects.
 
 Configured validations are different: trusted project configuration supplies their argument arrays, while each validation executable must exactly match the approved canonical absolute path of the Node.js executable running Zentra.
 
-CLI callers cannot provide a working directory, workspace, worker fixture, or reviewer fixture.
+CLI callers cannot provide a working directory, workspace, worker fixture, reviewer source, or reviewer process arguments.
 
 Workers, reviewers, and validations receive explicit minimal environments and do not inherit arbitrary parent secrets.
 
@@ -189,4 +193,4 @@ pnpm build
 pnpm start -- --help
 ```
 
-The CLI integration tests create real temporary Git repositories and exercise deterministic task execution, exact journal replay, recovery decisions, unsafe input rejection, stable JSON and exit codes, secret redaction, signal cancellation, and the built help entry point.
+The CLI integration tests create real temporary Git repositories and exercise deterministic task execution, caller-selected reviewer rejection, retained-patch byte limits, exact journal replay, recovery decisions, unsafe input rejection, stable JSON and exit codes, secret redaction, signal cancellation, and the built help entry point.
