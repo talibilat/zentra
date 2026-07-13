@@ -82,6 +82,7 @@ function artifactEvent(
 }
 
 const patch = {
+  diff: "diff",
   diffSha256: digest("diff"),
   changedPath: "greeting.txt",
   changedContentSha256: digest("hello\n"),
@@ -127,6 +128,42 @@ describe("artifact recorded event contracts", () => {
       payload: { ...payload, artifact: { ...payload.artifact, ...mutation } },
     })).toThrow();
   });
+
+  it.each([
+    ["patch", patch, { changedPath: "/tmp/greeting.txt" }],
+    ["validation_report", validation, { outcome: "approved" }],
+    ["review_report", review, { reviewerId: "" }],
+    ["integration_receipt", receipt, { sourceCommit: "not-a-commit" }],
+  ] as const)("rejects malformed %s evidence", (kind, evidence, mutation) => {
+    const recorded = artifactEvent(kind, 4, evidence);
+    const payload = recorded.payload as { artifact: unknown; evidence: Record<string, unknown> };
+    expect(() => ArtifactRecordedEventSchema.parse({
+      type: recorded.type,
+      payload: { ...payload, evidence: { ...payload.evidence, ...mutation } },
+    })).toThrow();
+  });
+
+  it("rejects oversized identity and evidence strings", () => {
+    const recorded = artifactEvent("patch", 4, patch);
+    const payload = recorded.payload as {
+      artifact: Record<string, unknown>;
+      evidence: Record<string, unknown>;
+    };
+    expect(() => ArtifactRecordedEventSchema.parse({
+      type: recorded.type,
+      payload: {
+        ...payload,
+        artifact: { ...payload.artifact, artifactId: "a".repeat(10_000) },
+      },
+    })).toThrow();
+    expect(() => ArtifactRecordedEventSchema.parse({
+      type: recorded.type,
+      payload: {
+        ...payload,
+        evidence: { ...payload.evidence, diff: "d".repeat(2_000_000) },
+      },
+    })).toThrow();
+  });
 });
 
 describe("projectArtifacts", () => {
@@ -167,6 +204,56 @@ describe("projectArtifacts", () => {
       event("task.started", 3),
       { ...recorded, payload: { ...payload, artifact: { ...payload.artifact, sha256: "0".repeat(64) } } },
     ])).toThrow("digest contradicts");
+  });
+
+  it("rejects a patch when both recorded digests contradict the retained diff", () => {
+    const recorded = artifactEvent("patch", 4, patch);
+    const payload = recorded.payload as {
+      artifact: Record<string, unknown>;
+      evidence: Record<string, unknown>;
+    };
+    const forgedDigest = "0".repeat(64);
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      {
+        ...recorded,
+        payload: {
+          artifact: { ...payload.artifact, sha256: forgedDigest },
+          evidence: { ...payload.evidence, diffSha256: forgedDigest },
+        },
+      },
+    ])).toThrow("patch artifact contains a contradictory diff digest");
+  });
+
+  it("uses bounded deterministic errors for malformed payloads and duplicate identities", () => {
+    const malformed = artifactEvent("patch", 4, patch);
+    const malformedPayload = malformed.payload as {
+      artifact: Record<string, unknown>;
+      evidence: unknown;
+    };
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      {
+        ...malformed,
+        payload: {
+          ...malformedPayload,
+          artifact: { ...malformedPayload.artifact, artifactId: "a".repeat(10_000) },
+        },
+      },
+    ])).toThrow(new Error("invalid artifact.patch_recorded payload"));
+
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch, "duplicate"),
+      event("task.validation_started", 5, validationStartedPayload),
+      artifactEvent("validation_report", 6, validation, "duplicate"),
+    ])).toThrow(new Error("duplicate artifact identity"));
   });
 
   it("rejects lifecycle evidence that references a missing artifact", () => {

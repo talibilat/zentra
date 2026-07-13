@@ -192,10 +192,11 @@ export class TracerBulletOrchestrator {
       const diffSha256 = sha256(inspected.diff);
 
       this.recordArtifact(input.taskId, "patch", {
+        diff: inspected.diff,
         diffSha256,
         changedPath: patch.path,
         changedContentSha256: patch.sha256,
-      } satisfies PatchArtifactEvidence, diffSha256);
+      } satisfies PatchArtifactEvidence);
 
       this.tasks.append(
         input.taskId,

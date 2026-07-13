@@ -5,8 +5,17 @@ import { z } from "zod";
 
 import type { StoredEvent } from "./event.js";
 
-const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const SafeLogicalPathSchema = z.string().min(1).refine(isSafeLogicalPath, {
+const MAX_ID_LENGTH = 256;
+const MAX_PATH_LENGTH = 4_096;
+const MAX_TEXT_LENGTH = 4_096;
+const MAX_COMMAND_ARGUMENTS = 256;
+const MAX_RETAINED_BYTES = 1_024 * 1_024;
+
+const IdentitySchema = z.string().min(1).max(MAX_ID_LENGTH);
+const BoundedTextSchema = z.string().max(MAX_TEXT_LENGTH);
+const Sha256Schema = z.string().length(64).regex(/^[a-f0-9]{64}$/);
+const TimestampSchema = z.string().max(64).datetime({ offset: true });
+const SafeLogicalPathSchema = z.string().min(1).max(MAX_PATH_LENGTH).refine(isSafeLogicalPath, {
   message: "artifact path must be a safe logical relative path",
 });
 
@@ -18,53 +27,54 @@ export const ArtifactKindSchema = z.enum([
 ]);
 
 export const ArtifactSchema = z.strictObject({
-  artifactId: z.string().min(1),
-  taskId: z.string().min(1),
+  artifactId: IdentitySchema,
+  taskId: IdentitySchema,
   kind: ArtifactKindSchema,
   path: SafeLogicalPathSchema,
   sha256: Sha256Schema,
-  createdAt: z.string().datetime({ offset: true }),
+  createdAt: TimestampSchema,
 });
 
 const PatchEvidenceSchema = z.strictObject({
+  diff: z.string().min(1).max(MAX_RETAINED_BYTES),
   diffSha256: Sha256Schema,
   changedPath: SafeLogicalPathSchema,
   changedContentSha256: Sha256Schema,
 });
 
 const ValidationEvidenceSchema = z.strictObject({
-  name: z.string().min(1),
+  name: IdentitySchema,
   outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
   exitCode: z.number().int().nullable(),
-  stdout: z.string(),
-  stderr: z.string(),
-  startedAt: z.string().datetime({ offset: true }),
-  finishedAt: z.string().datetime({ offset: true }),
-  command: z.array(z.string()).min(1),
+  stdout: z.string().max(MAX_RETAINED_BYTES),
+  stderr: z.string().max(MAX_RETAINED_BYTES),
+  startedAt: TimestampSchema,
+  finishedAt: TimestampSchema,
+  command: z.array(BoundedTextSchema).min(1).max(MAX_COMMAND_ARGUMENTS),
   argvSha256: Sha256Schema,
   outputSha256: Sha256Schema,
   provenance: z.strictObject({
-    invocationId: z.string().min(1),
-    canonicalCwd: z.string().min(1),
-    subjectSha256: z.string().min(1).nullable(),
+    invocationId: IdentitySchema,
+    canonicalCwd: z.string().min(1).max(MAX_PATH_LENGTH),
+    subjectSha256: z.string().min(1).max(64).nullable(),
   }),
 });
 
 const ReviewEvidenceSchema = z.strictObject({
-  reviewerId: z.string().min(1),
+  reviewerId: IdentitySchema,
   approved: z.boolean(),
   diffSha256: Sha256Schema,
   validationSha256: Sha256Schema,
-  decidedAt: z.string().datetime({ offset: true }),
-  reason: z.string().min(1),
+  decidedAt: TimestampSchema,
+  reason: z.string().min(1).max(MAX_TEXT_LENGTH),
 });
 
 const IntegrationReceiptEvidenceSchema = z.strictObject({
-  taskId: z.string().min(1),
-  projectId: z.string().min(1),
-  sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
-  originalIntegrationCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
-  resultCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
+  taskId: IdentitySchema,
+  projectId: IdentitySchema,
+  sourceCommit: z.string().max(64).regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  originalIntegrationCommit: z.string().max(64).regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
+  resultCommit: z.string().max(64).regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
   review: ReviewEvidenceSchema,
   validation: ValidationEvidenceSchema,
   outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
@@ -136,10 +146,15 @@ export function artifactEvidenceSha256(
   evidence: unknown,
 ): string {
   if (kind === "patch") {
-    return PatchEvidenceSchema.parse(evidence).diffSha256;
+    const patch = parseEvidence(PatchEvidenceSchema, evidence, "patch");
+    const diffSha256 = sha256(patch.diff);
+    if (diffSha256 !== patch.diffSha256) {
+      throw new Error("patch artifact contains a contradictory diff digest");
+    }
+    return diffSha256;
   }
   if (kind === "validation_report") {
-    const report = ValidationEvidenceSchema.parse(evidence);
+    const report = parseEvidence(ValidationEvidenceSchema, evidence, "validation_report");
     const argvSha256 = sha256(JSON.stringify(report.command));
     const outputSha256 = sha256(JSON.stringify({ stdout: report.stdout, stderr: report.stderr }));
     if (argvSha256 !== report.argvSha256 || outputSha256 !== report.outputSha256) {
@@ -159,7 +174,10 @@ export function artifactEvidenceSha256(
       provenance: report.provenance,
     }));
   }
-  return sha256(JSON.stringify(evidence));
+  if (kind === "review_report") {
+    return sha256(JSON.stringify(parseEvidence(ReviewEvidenceSchema, evidence, kind)));
+  }
+  return sha256(JSON.stringify(parseEvidence(IntegrationReceiptEvidenceSchema, evidence, kind)));
 }
 
 export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
@@ -183,14 +201,14 @@ export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
         payload: event.payload,
       });
       if (!parsed.success) {
-        throw new Error(`invalid ${event.type} payload: ${parsed.error.message}`);
+        throw new Error(`invalid ${event.type} payload`);
       }
       const { artifact, evidence } = parsed.data.payload;
       if (artifact.taskId !== event.streamId) {
         throw new Error(`${event.type} artifact taskId does not match its stream`);
       }
       if (ids.has(artifact.artifactId)) {
-        throw new Error(`duplicate artifact identity: ${artifact.artifactId}`);
+        throw new Error("duplicate artifact identity");
       }
       if (byKind.has(artifact.kind)) {
         throw new Error(`duplicate artifact kind: ${artifact.kind}`);
@@ -240,17 +258,17 @@ function validateLifecycleArtifactReference(
   }
   if (event.type === "task.review_requested" || "validation" in payload) {
     if ("validation" in payload) {
-      const validation = requireArtifact(byKind, "validation_report", event.type);
+      const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
       if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
-        throw new Error(`${event.type} references contradictory validation evidence`);
+        throw new Error("lifecycle event references contradictory validation evidence");
       }
     }
   }
   if (event.type === "task.review_approved" || event.type === "task.integration_started" || "review" in payload) {
     if ("review" in payload) {
-      const review = requireArtifact(byKind, "review_report", event.type);
+      const review = requireArtifact(byKind, "review_report", "lifecycle event");
       if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
-        throw new Error(`${event.type} references contradictory review evidence`);
+        throw new Error("lifecycle event references contradictory review evidence");
       }
     }
   }
@@ -260,9 +278,9 @@ function validateLifecycleArtifactReference(
     "receipt" in payload
   ) {
     if ("receipt" in payload) {
-      const receipt = requireArtifact(byKind, "integration_receipt", event.type);
+      const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
       if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
-        throw new Error(`${event.type} references contradictory integration receipt evidence`);
+        throw new Error("lifecycle event references contradictory integration receipt evidence");
       }
     }
   }
@@ -366,4 +384,16 @@ function isSafeLogicalPath(candidate: string): boolean {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function parseEvidence<TSchema extends z.ZodType>(
+  schema: TSchema,
+  evidence: unknown,
+  kind: ArtifactKind,
+): z.infer<TSchema> {
+  const parsed = schema.safeParse(evidence);
+  if (!parsed.success) {
+    throw new Error(`invalid ${kind} artifact evidence`);
+  }
+  return parsed.data;
 }
