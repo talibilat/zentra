@@ -331,6 +331,9 @@ function signalProcessGroup(pid, signal) {
   }
 }
 
+// Checks process-group membership only. A descendant that uses detached:true again to create a
+// new session is a documented residual risk outside the Trusted-Project MVP threat model; AGENTS.md
+// already disclaims sandboxing against deliberate actions by an approved, trusted executable.
 async function waitForProcessGroupExit(pid, timeoutMs) {
   const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
   while (processGroupExists(pid)) {

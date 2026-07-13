@@ -19,6 +19,10 @@ Before the fix, the timeout error could resolve while the descendant PID was sti
 - Waits for the child's `close` event (stream drain) before resolving, in addition to process-group absence.
 - Throws explicitly if the process group survives the bounded forced-termination window, instead of silently reporting a timeout or success.
 
+## Residual Risk
+
+Process-group exit detection covers same-process-group descendants, but a descendant that uses `detached: true` again to create a new session can escape it; this is accepted outside the Trusted-Project MVP threat model because, consistently with the exact-executable allowlist posture in `AGENTS.md`, Zentra does not sandbox deliberate actions by an approved executable in a trusted project.
+
 ## Test Evidence
 
 - `pnpm exec vitest run tests/package/` - 2 files, 26 tests passed, including the new descendant-confirmation regression.

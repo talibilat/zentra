@@ -473,7 +473,7 @@ describe("publishable CLI package", () => {
     });
   }, 30_000);
 
-  it("confirms package-verifier descendants exit before reporting a timeout", async () => {
+  it("confirms same-process-group package-verifier descendants exit before reporting a timeout", async () => {
     const pidFile = path.join(packageSandbox(), "timed-out-descendant.pid");
     const descendantProgram = "setInterval(() => {}, 1_000)";
     const parentProgram = [
