@@ -605,6 +605,72 @@ export class RecoveryService {
     }
   }
 
+  /**
+   * Explicit, human-authorized action to abandon a task that is stuck at
+   * the `task.worktree_creation_started` stage: the worktree/branch were
+   * created exactly as intended, but no worker ever started
+   * (`task.leased` was never recorded) and an operator has decided not to
+   * resume it. This never runs automatically; it requires this distinct
+   * method call, is never reachable from `inspect()` alone, and -- like
+   * `recordCompletion` -- re-authorizes immediately before performing any
+   * effect to avoid a TOCTOU gap between inspection and action.
+   *
+   * Scope is intentionally narrow: it only ever removes worktree/branch
+   * state that exactly matches the durably recorded creation intent (same
+   * branch, path, and base as `WorktreeManager.adopt()` requires) and is
+   * clean/unmodified. Any competing, partial, dirty, or already-leased
+   * state is refused with no effect, preserving it for manual operator
+   * inspection.
+   */
+  async authorizeBoundedCleanup(taskId: string): Promise<TaskView> {
+    await this.assertBoundedCleanupAuthorized(taskId);
+
+    const events = this.journal.readStream(taskId);
+    const chain = reconstructChain(taskId, events);
+    const intent = chain.worktreeCreationStarted;
+    if (intent === null) throw new Error("durable worktree creation intent is missing");
+    const task = this.tasks.get(taskId);
+    if (task === null) throw new Error(`task ${taskId} could not be projected`);
+    const project = this.projects.get(task.projectId);
+
+    // Re-authorize immediately before the effect: never trust the first
+    // inspection alone (TOCTOU avoidance), the same pattern recordCompletion
+    // uses before its cleanup effect.
+    await this.assertBoundedCleanupAuthorized(taskId);
+    const refreshedEvents = this.journal.readStream(taskId);
+    if (refreshedEvents.at(-1)?.type !== "task.worktree_creation_started") {
+      throw new Error("bounded cleanup state changed after reinspection");
+    }
+
+    await this.worktrees.removeUnleased(project, intent, { timeoutMs: GIT_READ_TIMEOUT_MS });
+
+    return this.tasks.append(
+      taskId,
+      "task.cancelled",
+      {
+        stage: "setup",
+        reason: "operator authorized bounded cleanup of an unleased, exactly-matched worktree",
+      },
+      null,
+    );
+  }
+
+  private async assertBoundedCleanupAuthorized(taskId: string): Promise<void> {
+    const authorization = await this.inspect(taskId);
+    if (authorization.action !== "resume_preparation") {
+      throw new Error(
+        `bounded cleanup is not authorized: ${authorization.action}`,
+      );
+    }
+    const events = this.journal.readStream(taskId);
+    const last = events.at(-1);
+    if (last === undefined || last.type !== "task.worktree_creation_started") {
+      throw new Error(
+        "bounded cleanup is only authorized for a task stuck at task.worktree_creation_started",
+      );
+    }
+  }
+
   async recordCompletion(taskId: string): Promise<TaskView> {
     const authorization = await this.inspect(taskId);
     if (authorization.action !== "record_completion") {

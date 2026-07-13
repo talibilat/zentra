@@ -617,6 +617,163 @@ describe("RecoveryService", () => {
     });
   });
 
+  describe("authorizeBoundedCleanup (issue 002, problem 2)", () => {
+    it("removes the worktree and branch for a safe, exact, unleased state and ends in a terminal outcome", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // Git actually completed exactly as intended, but the task was
+      // abandoned before any worker ever started (no task.leased).
+      await testFixture.worktrees.create(testFixture.project, "task-9");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "resume_preparation",
+      });
+
+      const worktreePath = path.join(testFixture.project.worktreeRoot, "task-9");
+      expect(existsSync(worktreePath)).toBe(true);
+
+      const result = await restarted.recovery.authorizeBoundedCleanup("task-9");
+
+      expect(result.lifecycle).toBe("terminal");
+      expect(["cancelled", "denied"]).toContain(result.terminalOutcome);
+      expect(existsSync(worktreePath)).toBe(false);
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).not.toBe(0);
+
+      // The task must be genuinely terminal in the durable journal, not
+      // just in the in-memory return value.
+      expect(restarted.tasks.get("task-9")?.lifecycle).toBe("terminal");
+    });
+
+    it("refuses (throws, no effect) for a partial worktree creation, preserving the branch untouched", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // Partial effect: branch created, worktree never registered.
+      await gitOk(testFixture.project.repositoryPath, ["branch", "ticket/task-9"]);
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "await_reconciliation",
+      });
+
+      await expect(restarted.recovery.authorizeBoundedCleanup("task-9")).rejects.toThrow(
+        /not authorized/i,
+      );
+
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).toBe(0);
+      expect(restarted.tasks.get("task-9")?.lifecycle).not.toBe("terminal");
+    });
+
+    it("refuses (throws, no effect) for a competing branch identity that does not match the intended base", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      await gitOk(testFixture.project.repositoryPath, ["branch", "ticket/task-9", "HEAD"]);
+      await gitOk(testFixture.project.repositoryPath, [
+        "worktree", "add", path.join(testFixture.project.worktreeRoot, "task-9"), "ticket/task-9",
+      ]);
+      await gitOk(
+        path.join(testFixture.project.worktreeRoot, "task-9"),
+        ["commit", "--allow-empty", "-m", "competing commit not from the intended base"],
+      );
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "await_reconciliation",
+      });
+
+      await expect(restarted.recovery.authorizeBoundedCleanup("task-9")).rejects.toThrow(
+        /not authorized/i,
+      );
+
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(true);
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).toBe(0);
+    });
+
+    it("refuses (throws, no effect) for a dirty worktree, preserving it untouched", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      const lease = await testFixture.worktrees.create(testFixture.project, "task-9");
+      writeFileSync(path.join(lease.path, "unreviewed.txt"), "dirty\n");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "await_reconciliation",
+      });
+
+      await expect(restarted.recovery.authorizeBoundedCleanup("task-9")).rejects.toThrow(
+        /not authorized/i,
+      );
+
+      expect(existsSync(path.join(lease.path, "unreviewed.txt"))).toBe(true);
+    });
+
+    it("refuses (throws, no effect) once the task has already been leased, preserving the leased worktree", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      await leaseTask(testFixture, first.tasks);
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "resume_preparation",
+        reason: expect.stringMatching(/leased worktree is ready/i),
+      });
+
+      await expect(restarted.recovery.authorizeBoundedCleanup("task-9")).rejects.toThrow(
+        /worktree_creation_started/i,
+      );
+
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(true);
+    });
+
+    it("never performs any effect from inspect() alone: only the explicit method call removes state", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      await testFixture.worktrees.create(testFixture.project, "task-9");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      const worktreePath = path.join(testFixture.project.worktreeRoot, "task-9");
+
+      // Calling inspect() repeatedly must never remove anything.
+      await restarted.recovery.inspect("task-9");
+      await restarted.recovery.inspect("task-9");
+      await restarted.recovery.inspect("task-9");
+
+      expect(existsSync(worktreePath)).toBe(true);
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).toBe(0);
+      expect(restarted.tasks.get("task-9")?.lifecycle).not.toBe("terminal");
+    });
+  });
+
   it("awaits reconciliation after worker start whether its unrecorded effect is visible", async () => {
     const testFixture = await fixture();
     const first = openSystem(testFixture);

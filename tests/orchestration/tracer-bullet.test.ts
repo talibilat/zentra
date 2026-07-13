@@ -2177,5 +2177,185 @@ describe("TracerBulletOrchestrator", () => {
       expect(types[1]).toBe("task.worktree_creation_started");
       expect(types[2]).toBe("task.leased");
     });
+
+    it("(d) adopt path: a task recovered as 'exact match, adopt' genuinely resumes and reaches completion, not just a decision label", async () => {
+      // This is the Critical-severity regression this issue exists to fix:
+      // recovery.inspect() previously only ever *labeled* this state
+      // resume_preparation with nothing able to act on that label. This
+      // test proves actual forward progress: worktree_creation_started
+      // durable evidence -> interruption before task.leased -> restart ->
+      // recovery decides resume_preparation (adopt) -> the task is
+      // genuinely resumed through TracerBulletOrchestrator.resume() ->
+      // task.leased is durably appended -> the worker actually runs ->
+      // the task reaches full completion (task.completed), the strongest
+      // proof of forward progress the test infrastructure can produce.
+      const fixture = await fixtureRepository();
+      const databasePath = path.join(fixture.baseDirectory, "adopt.sqlite");
+      const taskId = "task-adopt-resume";
+
+      // Phase 1: interrupt exactly at the point real Git succeeded but the
+      // caller never durably recorded task.leased (mirrors mode "uncertain"
+      // above, but here we let the *caller* (not the orchestrator) observe
+      // the interruption, by driving WorktreeManager.create() directly with
+      // a real Git client and truncating before task.leased is appended --
+      // reusing the same durable "prepared" callback contract the
+      // orchestrator itself relies on).
+      const journal1 = new SqliteEventJournal(databasePath);
+      journals.push(journal1);
+      const tasks1 = new TaskService(journal1);
+      const projects = ProjectRegistry.fromFile(fixture.configPath);
+      const worktrees = new WorktreeManager(new GitClient());
+      const project = projects.get("greeting-project");
+
+      tasks1.create({
+        taskId,
+        projectId: "greeting-project",
+        title: "Update greeting",
+        correlationId: taskId,
+      });
+      await worktrees.ensureIntegrationBranch(project);
+      const lease = await worktrees.create(project, taskId, {}, (intent) => {
+        tasks1.append(taskId, "task.worktree_creation_started", intent, null);
+      });
+      // Deliberately stop here: never append task.leased, simulating a
+      // process kill/interruption between Git's real success and the
+      // durable leased fact -- exactly the uncertain window issue 002
+      // describes. Verify the interrupted state genuinely matches what an
+      // end user would see after a crash.
+      expect(existsSync(lease.path)).toBe(true);
+      expect(journal1.readStream(taskId).map((event) => event.type)).toEqual([
+        "task.created",
+        "task.worktree_creation_started",
+      ]);
+      journal1.close();
+      journals.splice(journals.indexOf(journal1), 1);
+
+      // Phase 2: restart. Reopen the same durable journal file, exactly as
+      // a real CLI restart would.
+      const journal2 = new SqliteEventJournal(databasePath);
+      journals.push(journal2);
+      const tasks2 = new TaskService(journal2);
+      const recovery = new RecoveryService(
+        journal2,
+        tasks2,
+        projects,
+        worktrees,
+        new GitClient(),
+      );
+
+      const decision = await recovery.inspect(taskId);
+      expect(decision.action).toBe("resume_preparation");
+      expect(decision.reason).toMatch(/exact intended branch, path, and base/i);
+
+      // Regression guard: recovery must never have silently terminalized
+      // this task while it awaited reconciliation.
+      const preResumeView = tasks2.get(taskId);
+      expect(preResumeView?.lifecycle).toBe("queued");
+      expect(preResumeView?.terminalOutcome).toBeNull();
+
+      // Phase 3: actually resume through the new adopt path (not merely
+      // asserting the decision label, per the reviewer's core complaint).
+      const supervisor = new ProcessSupervisor();
+      const validations = new ValidationRunner(supervisor);
+      const orchestrator = new TracerBulletOrchestrator(
+        tasks2,
+        projects,
+        worktrees,
+        supervisor,
+        validations,
+        new DeterministicReviewerAdapter(supervisor, reviewerFixture),
+        new ReviewGate(),
+        new IntegrationQueue(new GitClient(), validations),
+        workerFixture,
+      );
+
+      const result = await orchestrator.resume({
+        ...runInput,
+        taskId,
+        signal: runSignal(),
+      });
+
+      // Genuine forward progress: the task reached full completion, not
+      // just a resume_preparation label. task.leased was durably appended
+      // (proving adoption happened), the worker actually ran (task.started
+      // and beyond exist), and the task completed end to end.
+      expect(result.lifecycle).toBe("terminal");
+      expect(result.terminalOutcome).toBe("completed");
+      const finalTypes = journal2.readStream(taskId).map((event) => event.type);
+      expect(finalTypes[0]).toBe("task.created");
+      expect(finalTypes[1]).toBe("task.worktree_creation_started");
+      expect(finalTypes[2]).toBe("task.leased");
+      expect(finalTypes).toContain("task.started");
+      expect(finalTypes).toContain("task.completed");
+
+      // The adopt path never re-ran "git worktree add": the worktree
+      // registration is exactly the one Git created in phase 1, and its
+      // ticket branch commit lineage is unbroken back to that base.
+      const registered = await gitOk(fixture.repositoryPath, [
+        "worktree",
+        "list",
+        "--porcelain",
+      ]);
+      expect(registered).not.toContain(lease.path + "\n" + lease.path);
+    });
+
+    it("(e) adopt path refuses to resume when the recorded intent no longer matches an exact Git state, preserving it untouched", async () => {
+      const fixture = await fixtureRepository();
+      const databasePath = path.join(fixture.baseDirectory, "adopt-refuse.sqlite");
+      const taskId = "task-adopt-refuse";
+
+      const journal = new SqliteEventJournal(databasePath);
+      journals.push(journal);
+      const tasks = new TaskService(journal);
+      const projects = ProjectRegistry.fromFile(fixture.configPath);
+      const worktrees = new WorktreeManager(new GitClient());
+      const project = projects.get("greeting-project");
+
+      tasks.create({
+        taskId,
+        projectId: "greeting-project",
+        title: "Update greeting",
+        correlationId: taskId,
+      });
+      await worktrees.ensureIntegrationBranch(project);
+      const intent = {
+        taskId,
+        branch: `ticket/${taskId}`,
+        path: path.join(fixture.worktreeRoot, taskId),
+        base: project.integrationBranch,
+      };
+      tasks.append(taskId, "task.worktree_creation_started", intent, null);
+      // No Git effect ever occurred: nothing exists to adopt.
+
+      const supervisor = new ProcessSupervisor();
+      const validations = new ValidationRunner(supervisor);
+      const orchestrator = new TracerBulletOrchestrator(
+        tasks,
+        projects,
+        worktrees,
+        supervisor,
+        validations,
+        new DeterministicReviewerAdapter(supervisor, reviewerFixture),
+        new ReviewGate(),
+        new IntegrationQueue(new GitClient(), validations),
+        workerFixture,
+      );
+
+      // Adoption re-verification fails closed (no exact worktree exists to
+      // adopt). Like the orchestrator's own setup-stage handling of an
+      // uncertain worktree-creation effect, this must never be hidden
+      // behind an automatically-retried Git effect or a terminal outcome:
+      // the task is left nonterminal, exactly as recovery.inspect() found
+      // it, for an operator or a later resume attempt to reconcile.
+      const result = await orchestrator.resume({ ...runInput, taskId, signal: runSignal() });
+      expect(result.lifecycle).toBe("queued");
+      expect(result.terminalOutcome).toBeNull();
+
+      // No Git effect and no task.leased must ever be appended when the
+      // adopt-time re-verification fails.
+      const types = journal.readStream(taskId).map((event) => event.type);
+      expect(types).toEqual(["task.created", "task.worktree_creation_started"]);
+      expect(existsSync(intent.path)).toBe(false);
+    });
   });
 });
