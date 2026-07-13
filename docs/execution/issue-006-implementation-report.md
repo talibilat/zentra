@@ -6,12 +6,20 @@ Implemented and verified.
 
 The tracer now records patch, focused-validation, independent-review, and integration-receipt artifacts as explicit typed journal events.
 Artifact replay is independent of mutable worktree and candidate paths.
+The implementation was recovered after integration commit `55076c2` was reverted by `57d812c`, then corrected for the omitted delete-all-artifact-events review finding.
 
 ## Root Cause
 
 The artifact contract previously described only common metadata.
 The tracer embedded worker patch metadata, validation reports, review decisions, and integration receipts exclusively in lifecycle events.
 Consumers therefore had no validated artifact stream and had to understand lifecycle-specific payloads.
+
+The recovered replay projection enabled strict lifecycle-reference validation only after it encountered a surviving artifact event.
+Deleting every artifact event therefore left artifact mode disabled and incorrectly returned an empty artifact view.
+Because stream versions are immutable journal identities, deleted events leave a version gap that now activates strict artifact replay and exposes the first missing lifecycle dependency.
+
+Issue 023 also added bounded validation timeout evidence after the original issue 006 branch diverged.
+The recovered artifact schema now accepts the current bounded timeout fields, requires top-level and provenance timeout values to agree, and preserves the canonical validation digest consumed by review.
 
 ## Files Changed
 
@@ -37,10 +45,11 @@ Artifact creation timestamps are persisted ISO timestamps created immediately be
 `projectArtifacts` rebuilds artifact metadata and retained evidence exclusively from stored events.
 Replay hashes the retained exact patch diff bytes and rejects the artifact if either `artifact.sha256` or `evidence.diffSha256` contradicts that independently computed digest.
 Replay rejects malformed event payloads, unsafe paths, duplicate artifact IDs, duplicate artifact kinds, contradictory evidence digests, invalid artifact ordering, events after terminalization, and lifecycle evidence without the required prior artifact.
+Replay also rejects a lifecycle stream after every artifact event has been deleted because the retained immutable stream versions reveal the removed records.
 Replay also binds the review artifact to the exact patch and focused-validation artifacts and binds the integration receipt to the exact review artifact.
 Identity, path, timestamp, command, output, diff, review, and receipt strings now have explicit contract bounds.
 Malformed payload and duplicate-identity failures use fixed deterministic messages without raw Zod diagnostics or attacker-controlled identity interpolation.
-Legacy streams without artifact events remain readable, while any stream that enters artifact mode is validated strictly.
+Contiguous legacy streams without artifact events remain readable, while streams containing artifact events or deleted-event version gaps are validated strictly.
 
 ## Tests Added
 
@@ -55,13 +64,20 @@ Legacy streams without artifact events remain readable, while any stream that en
 - Completion evidence proving the patch digest equals the content-aware review diff digest.
 - Completion evidence proving the integration receipt digest equals the exact completed receipt bytes.
 - Failure-stage artifact enumeration for worker cancellation, validation failure, review denial or rejection, commit termination, and integration failure.
+- End-to-end deletion of every `artifact.*_recorded` event followed by replay rejection for the missing patch artifact.
+- Acceptance and bounded mismatch rejection for issue 023 validation timeout evidence.
 
 ## Commands And Results
 
-- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts`: passed, 2 test files and 88 tests.
-- `pnpm test`: passed, 17 test files and 565 tests.
+- `pnpm exec vitest run tests/orchestration/tracer-bullet.test.ts -t "rejects replay when every typed artifact event is deleted"` before the fix: failed, 1 failed and 68 skipped, because replay did not throw.
+- `pnpm exec vitest run tests/orchestration/tracer-bullet.test.ts -t "rejects replay when every typed artifact event is deleted"` after the fix: passed, 1 passed and 68 skipped.
+- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after initial recovery: failed, 35 of 89 tests, exposing incompatibility with issue 023 timeout-bearing validation reports.
+- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after timeout schema alignment: passed, 2 test files and 89 tests.
+- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after final contract coverage: passed, 2 test files and 90 tests.
+- `pnpm test`: passed, 18 test files and 594 tests.
 - `pnpm check`: passed with no TypeScript errors.
 - `pnpm build`: passed.
+- `git diff --check`: passed with no output.
 
 ## Acceptance Criteria Evidence
 
@@ -69,8 +85,25 @@ Legacy streams without artifact events remain readable, while any stream that en
 - Stable IDs, task IDs, kinds, safe logical paths, SHA-256 digests, and creation timestamps are persisted at each durable evidence boundary.
 - Validation uses the patch diff digest as its subject, review uses the exact patch and validation digests, commit uses the reviewed patch digest, and integration and completion use the exact recorded review and receipt evidence.
 - `projectArtifacts(journal.readStream(taskId))` enumerates all artifacts after the worktree has been removed.
-- Tampered replay fails closed for identity, digest, order, and missing-reference violations with deterministic bounded errors.
+- Tampered replay fails closed for identity, digest, order, individual missing-reference violations, and deletion of all artifact events with deterministic bounded errors.
 - Changing both recorded patch digest fields cannot defeat replay because the retained exact diff bytes provide an independent digest source.
+
+## Required Test Review
+
+- Contract tests accept all four artifact kinds and reject malformed metadata and kind-specific evidence.
+- Tracer replay enumerates the expected artifacts after completion and after worker, validation, review, commit, and integration failure boundaries.
+- Tampered replay covers contradictory digests, missing references, duplicate identities, invalid ordering, and deletion of every artifact event.
+
+## Self-Review
+
+The Standards review compared `57d812c...984ae1d` against `AGENTS.md` and the approved orchestrator design.
+No standards findings remained.
+The implementation keeps the event journal authoritative, keeps projections rebuildable, introduces no shell or external authority, and changes only issue-owned paths.
+
+The Spec review compared the same range against every acceptance criterion, required test, final verification item, and non-goal in `docs/issues/006-medium-record-typed-artifacts.md`.
+No specification findings remained.
+The four schemas, durable metadata, exact digest bindings, journal-only projection, fail-closed replay checks, required malformed and failure-stage tests, and explicit delete-all tamper test are present.
+No remote blob store was added, bounded retained evidence remains bounded, and lifecycle events were not replaced.
 
 ## Security Boundary
 
@@ -87,7 +120,12 @@ A future artifact store can extend the safe logical path semantics without chang
 
 ## Commit Identity
 
-- Branch: `fix/predeploy-b-artifacts`.
+- Branch: `fix/predeploy-b-artifacts-recovery`.
 - Initial implementation: `66c5e1c` (`feat: record typed task artifacts`).
 - Blocking review fixes: `929a636` (`fix: bind patch artifacts to retained diff`).
-- Report update: the commit containing this report.
+- Original report update: `90d0b48` (`docs: record issue 006 review fixes`).
+- Original integration: `55076c2` (`merge: integrate issue 006 - typed artifact recording with journal replay`).
+- Safety revert: `57d812c` (`Revert "merge: integrate issue 006 - typed artifact recording with journal replay"`).
+- Recovery: `e237ee0` (`Reapply "merge: integrate issue 006 - typed artifact recording with journal replay"`).
+- Delete-all replay and timeout compatibility fix: `984ae1d` (`fix: reject deleted artifact event streams`).
+- Recovery report update: the commit containing this report.
