@@ -198,9 +198,10 @@ describe("publishable CLI package", () => {
     expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], project.repository)).stdout)
       .toBe("hello from package\n");
 
-    const installedFixtureModule = await import(pathToFileURL(
+    const installedFixtureModuleUrl = pathToFileURL(
       path.join(installedRoot, "dist", "src", "fixtures", "bundled-fixtures.js"),
-    ).href) as {
+    ).href;
+    const installedFixtureModule = await import(installedFixtureModuleUrl) as {
       resolveBundledFixture(name: "deterministic-worker.mjs"): {
         readonly path: string;
         cleanup(): void;
@@ -208,6 +209,70 @@ describe("publishable CLI package", () => {
     };
     const installedSource = path.join(installedRoot, "fixtures", "deterministic-worker.mjs");
     const attestedBytes = readFileSync(installedSource);
+    const interpositionWorkspace = path.join(consumer, "digest-interposition-workspace");
+    mkdirSync(interpositionWorkspace);
+    const interpositionProgram = [
+      'import fs from "node:fs";',
+      'import { spawnSync } from "node:child_process";',
+      'import path from "node:path";',
+      'import { syncBuiltinESMExports } from "node:module";',
+      `const source = ${JSON.stringify(installedSource)};`,
+      `const resolverUrl = ${JSON.stringify(installedFixtureModuleUrl)};`,
+      `const workspace = ${JSON.stringify(interpositionWorkspace)};`,
+      'const marker = "UNATTESTED_PACKAGE_INTERPOSITION_MARKER";',
+      "const acceptedBytes = fs.readFileSync(source);",
+      "const originalMkdtempSync = fs.mkdtempSync;",
+      "let fixture;",
+      "let interposed = false;",
+      "try {",
+      "  fs.mkdtempSync = (...args) => {",
+      "    interposed = true;",
+      "    fs.writeFileSync(source, `throw new Error(\"${marker}\");\\n`, \"utf8\");",
+      "    return originalMkdtempSync(...args);",
+      "  };",
+      "  syncBuiltinESMExports();",
+      "  const resolver = await import(resolverUrl);",
+      '  fixture = resolver.resolveBundledFixture("deterministic-worker.mjs");',
+      "  fs.mkdtempSync = originalMkdtempSync;",
+      "  syncBuiltinESMExports();",
+      "  if (!interposed) throw new Error(\"private materialization was not interposed\");",
+      "  if (fs.readFileSync(fixture.path, \"utf8\").includes(marker)) {",
+      "    throw new Error(\"unattested bytes were materialized\");",
+      "  }",
+      "  const execution = spawnSync(process.execPath, [",
+      "    fixture.path,",
+      '    "--workspace", workspace,',
+      '    "--file", "greeting.txt",',
+      '    "--content", "packed accepted bytes executed\\n",',
+      "  ], { encoding: \"utf8\", shell: false });",
+      "  if (execution.status !== 0 || `${execution.stdout}${execution.stderr}`.includes(marker)) {",
+      "    throw new Error(`private execution failed: ${execution.stdout}${execution.stderr}`);",
+      "  }",
+      "  const privatePath = fixture.path;",
+      "  const privateDirectory = path.dirname(privatePath);",
+      "  fixture.cleanup();",
+      "  fixture = undefined;",
+      "  if (fs.existsSync(privatePath) || fs.existsSync(privateDirectory)) {",
+      "    throw new Error(\"private materialization was not cleaned\");",
+      "  }",
+      "  process.stdout.write(JSON.stringify({ interposed, executed: true }));",
+      "} finally {",
+      "  fs.mkdtempSync = originalMkdtempSync;",
+      "  syncBuiltinESMExports();",
+      "  fixture?.cleanup();",
+      "  fs.writeFileSync(source, acceptedBytes);",
+      "}",
+    ].join("\n");
+    const interposition = await run(nodeExecutable, [
+      "--input-type=module",
+      "--eval",
+      interpositionProgram,
+    ], consumer, { ...subprocessEnvironment, TMPDIR: fixtureTemp });
+    expect(interposition.stderr).toBe("");
+    expect(JSON.parse(interposition.stdout)).toEqual({ interposed: true, executed: true });
+    expect(readFileSync(path.join(interpositionWorkspace, "greeting.txt"), "utf8"))
+      .toBe("packed accepted bytes executed\n");
+
     for (let attempt = 0; attempt < 10; attempt += 1) {
       writeFileSync(installedSource, attestedBytes);
       const fixture = installedFixtureModule.resolveBundledFixture("deterministic-worker.mjs");

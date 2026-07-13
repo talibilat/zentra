@@ -45,13 +45,29 @@ The orchestrator now validates the worker script against the private path suppli
 ## Tests Added
 
 - Source-layout and built-layout cases require a distinct private path, a `0700` parent directory, and a `0500` execution file.
+- Source-layout and built-layout tests interpose `mkdtempSync`, replace the source after digest acceptance but before private materialization begins, and prove the accepted buffer is materialized and executed.
 - Deterministic replacement and rename races mutate the source immediately after resolution, execute the private script, and prove the unattested marker is not executed.
 - A hard-link test modifies the source inode through another name after attestation and proves the private execution inode and bytes remain unchanged.
 - The existing symlink test proves an expected-path symlink fails closed even when its target contains valid bytes.
 - A source permission test proves an unreadable fixture fails closed.
 - Cleanup testing proves the executable and private directory are removed and repeated cleanup is safe.
 - The installed-tarball end-to-end test directs temporary materialization into an isolated temporary root, executes a complete packaged task, and proves no fixture directory remains afterward.
+- A fresh Node process replaces the installed resolver's `mkdtempSync` binding before module import, mutates the packed source at the materialization boundary, and proves only accepted bytes are copied and executed.
 - The installed resolver is exercised through ten source-replacement attempts, and every private fixture executes attested behavior without emitting the unattested marker.
+
+## Reviewer Follow-Up
+
+The independent reviewer found that the original race tests replaced source bytes only after `resolveBundledFixture` returned.
+Those tests proved post-resolution immutability but did not deterministically exercise the interval after digest acceptance and before private materialization.
+
+The follow-up uses filesystem interposition rather than a production test hook.
+`mkdtempSync` is the first private-materialization filesystem operation after the digest comparison succeeds.
+The interposed implementation replaces the source before delegating to the real `mkdtempSync`, so the replacement occurs precisely before directory creation and destination writing.
+The tests then inspect and execute the private file to prove it contains the previously accepted buffer rather than the replacement.
+
+Vitest performs this interposition for exact source and built resolver layouts.
+The installed-tarball test performs the same interposition in a fresh Node process using `syncBuiltinESMExports` before importing the installed resolver.
+Both paths restore the real filesystem binding, clean the private `0700` directory, and restore packed source bytes even if an assertion fails.
 
 ## Commands And Results
 
@@ -64,6 +80,15 @@ The orchestrator now validates the worker script against the private path suppli
 - Final typecheck: `pnpm check` passed.
 - Production build: `pnpm build` passed.
 - Installed replacement stress coverage: the package end-to-end test replaced the installed source after each of ten attestations, all ten private copies executed successfully, no unattested marker appeared, and every private executable directory was absent after cleanup.
+- Post-merge baseline: `pnpm test -- tests/package/package-e2e.test.ts` passed 689 of 689 tests across 18 files after integrating `fix/pre-deployment`.
+- Deterministic source and built interposition: `pnpm vitest run tests/fixtures/bundled-fixtures.test.ts` passed 13 of 13 tests.
+- Deterministic installed-package interposition: `pnpm vitest run tests/package/package-e2e.test.ts` passed 16 of 16 tests.
+- Focused fixture, tracer, and package suites: `pnpm vitest run tests/fixtures/bundled-fixtures.test.ts tests/orchestration/tracer-bullet.test.ts tests/package/package-e2e.test.ts` passed 104 of 104 tests.
+- Merged typecheck: `pnpm check` passed.
+- Final merged suite: `pnpm test` passed 691 of 691 tests across 18 files.
+- Final production package build: `pnpm build` passed.
+- Package verification: `pnpm run package:verify` passed.
+- Package contents: `pnpm run package:contents` verified 71 deterministic package files across clean packs with umasks `022` and `077`.
 
 ## Acceptance Criteria Evidence
 
