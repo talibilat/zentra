@@ -8,8 +8,10 @@ The issue corpus files under `docs/issues/` are unchanged and untouched - do not
 ## Repository State At This Handoff
 
 `main` is at `ad4daca3e6360bf1266af66ef8f1b0f5100ef415` ("docs: retire completed issue briefs"), unchanged and untouched this session (no writer may ever touch `main`). Note this is newer than the `de15cad` recorded in a prior version of this file; `main` advanced via a docs-only commit between sessions.
-Integration branch `fix/pre-deployment` (local only, not yet pushed to origin, not yet merged to main) is at commit `48d1434` ("merge: integrate cross-process integration lease (issue 014)") in worktree `.worktrees/fix-pre-deployment`.
-**Nothing in this remediation has been pushed to origin or merged into `main` yet.** Do not describe any of the work below as "pushed" or "merged" until that literally happens through the human-approved integration procedure.
+Integration branch `fix/pre-deployment` is at commit `af8887c` ("merge: integrate reconciled uncertain worktree creation (issue 002)") in worktree `.worktrees/fix-pre-deployment`. It was pushed to `origin/fix/pre-deployment` once at `99bad06` (issue 014 only, at the user's explicit request); commits since then (issue 002) have NOT been pushed yet.
+**Nothing in this remediation has been merged into `main` yet**, and the user explicitly deferred that decision - dependent work continues to branch off `fix/pre-deployment` rather than waiting on a main merge. Do not describe issue 002 as "pushed" or "merged into main" until that literally happens through the human-approved integration procedure.
+
+**Correction to a prior version of this file:** issues 020 and 021 (Medium, platform support and Node engine bounds) were found to already be fully implemented and committed (`0effdc0`, `8fd55ec`), including their required tests - they were never actually open work, just not marked closed in `docs/issues/README.md`. Do not assign a writer to redo them. The only genuine remaining gap they feed into is issue 024's real CI matrix (no `.yml` workflow files exist in this repo yet).
 
 Active worktrees:
 - `.worktrees/fix-pre-deployment` (branch `fix/pre-deployment`) - the integration steward's worktree only. No implementation writer may edit here.
@@ -61,17 +63,39 @@ Verified by the integration steward independently at each stage (not trusting su
 
 **Known pre-existing flake found during merge verification (not caused by issue 014):** `tests/workers/process-supervisor.test.ts` > "gives post-exit timeout precedence over stream and graceful term..." failed once in the full-suite run, passed in 2 subsequent isolated/full reruns. Timing-sensitive, unrelated file (no process-supervisor changes in this merge). Flagged for follow-up per user's engineering-excellence standard; not blocking, not fixed yet.
 
+## Completed And Integrated Into `fix/pre-deployment` (commit `af8887c`), This Session
+
+**Issue 002 (Critical) - Reconcile Uncertain Worktree Creation. INTEGRATED.**
+Root cause: `worktree-manager.ts`'s `create()` ran `git worktree add` as one bare effect with no durable evidence; `tracer-bullet.ts`'s setup-stage catch blindly terminalized on any cancellation/timeout regardless of whether Git had actually created the branch/worktree; `recovery.ts` short-circuited any terminal task to a no-op before ever inspecting real Git state - so an interrupted creation could orphan real Git state that recovery could never see.
+
+Fix: a new durable `task.worktree_creation_started` event records exact intended `{taskId, branch, path, base}` before `git worktree add` runs. A new `verifyExactCreation` independently checks real path existence, exact `git worktree list --porcelain` registration, and branch-commit-equals-base-commit before trusting a reported success. Setup-stage interruption no longer blindly terminalizes - the task is left nonterminal for recovery. `recovery.ts` gained a new inspection branch distinguishing no-effect / exact-match / competing-identity / dirty / partial state, reusing the existing `resume_preparation`/`await_reconciliation` vocabulary (no new action needed).
+
+First independent review found one Critical gap and one Important gap: (1) the "exact match, adopt" recovery decision was correctly classified but nothing in the codebase could actually resume a task from it - `TaskService.create()` throws for an already-created task, so the classification was a dead end; (2) the brief's requested "authorize bounded cleanup" alternative path didn't exist at all.
+
+Fix round added: `WorktreeManager.adopt()` (reuses the same exact-match verification as `create()`, never re-runs `git worktree add`) plus a new `TracerBulletOrchestrator.resume()` entry point that adopts and genuinely continues the task through to completion (proven by a real crash/restart/resume test asserting `task.leased` -> `task.started` -> terminal `completed`, not just a decision label); and `RecoveryService.authorizeBoundedCleanup()` (modeled on the existing `recordCompletion` pattern - re-verifies authorization immediately before acting, TOCTOU-safe), gated to only the narrow confirmed-safe case, refusing for any partial/competing/dirty/already-leased state.
+
+Second independent verification pass: APPROVE. One Minor note left as a follow-up, not blocking: `authorizeBoundedCleanup`'s "nothing created yet" vs "exact match" sub-cases aren't explicitly distinguished by its own gating checks - it currently fails safe only incidentally, via `removeUnleased`'s `lstatSync` throwing ENOENT first. No test explicitly covers this. Worth tightening later, not a live bug.
+
+Verified by the integration steward independently at each stage: baseline 735/735 (post-first-fix-round), 743/743 (post-second-fix-round, in the writer worktree and again post-merge into `fix/pre-deployment`), `pnpm check` clean, `pnpm build` clean at every stage. The writer also found and fixed a genuine pre-existing subprocess-heavy test-timeout flakiness issue (raised vitest's default `testTimeout`/`hookTimeout` from 5000ms to 20000ms, unrelated to this fix's logic, confirmed low-risk/test-only).
+
 ## Next Actions, In Dependency Order
 
-1. **Issue 002 (Critical)** - the one remaining Critical item, and the immediate priority per user instruction. Unblocked now that issue 014 is reviewed and integrated. Read `docs/issues/002-critical-reconcile-uncertain-worktree-creation.md` for the exact brief before starting.
-2. **Issue 003 (High)** - after issue 002's `src/orchestration/recovery.ts` edits are reviewed and integrated on top of issue 014. Use one recovery writer or strictly sequential worktrees for every edit to that file; do not run 002 and 003 concurrently against the same file.
-3. **Issue 004 (High)** - Pod G, after both issue 003 and issue 014 are integrated. Touches `src/cli/main.ts`, which the now-integrated CLI-authority fix also touched - read the current integrated `src/cli/main.ts` fully before editing, do not blindly reapply an old diff.
-4. Fresh whole-branch specification, code-quality, and security reviews after all of the above integrate, then the full final verification command list from `docs/execution/pre-deployment-handoff.md`'s "Final Verification" section, then `docs/execution/pre-deployment-final-report.md`.
-5. Follow up on the process-supervisor flake noted above (not currently scheduled work, but should not be forgotten).
+1. **Issue 003 (High)** - now unblocked: issue 002's `src/orchestration/recovery.ts` edits are reviewed and integrated on top of issue 014. Use one recovery writer or strictly sequential worktrees for every edit to that file.
+2. **Issue 004 (High)** - Pod G, after both issue 003 and issue 014 are integrated (014 done). Touches `src/cli/main.ts`, which the earlier CLI-authority fix also touched - read the current integrated `src/cli/main.ts` fully before editing, do not blindly reapply an old diff.
+3. Fresh whole-branch specification, code-quality, and security reviews after all of the above integrate, then the full final verification command list from `docs/execution/pre-deployment-handoff.md`'s "Final Verification" section, then `docs/execution/pre-deployment-final-report.md`.
+4. Follow up on the process-supervisor flake noted above, and the Minor `authorizeBoundedCleanup` gating note from issue 002's second review (not currently scheduled work, but should not be forgotten).
+
+## Concurrently In Progress (User-Run, Outside This Steward Session)
+
+**Issue 010 (Medium) - Reject Grafts Before Integration Effects.** The user requested a self-contained writer prompt for this (delivered in-conversation, not recorded here verbatim) and is running it themselves in a separate worktree branched from `fix/pre-deployment`, targeting `src/integration/integration-queue.ts` only. No file overlap with issue 002's files (recovery.ts/tracer-bullet.ts/worktree-manager.ts) or with this steward's worktree. When it's ready, it still needs the same independent-review-before-merge gate as everything else in this ledger before landing on `fix/pre-deployment`.
+
+**Issue 028 (Low)** must NOT start until issue 010 is fully integrated - both own `src/integration/integration-queue.ts` and its brief requires serializing with other integration-queue writers.
 
 ## Deferred (Medium/Low, Per User Instruction - Do Not Start Without New Instruction)
 
-`better-sqlite3` range/support-evidence mismatch (needed for issue 021 acceptance and issue 024), issue 027 (security reporting policy proof), issue 015 (process lifetime registries), issue 024 (CI/release package gates, Node 24/25/26 matrix - also the hard prerequisite for issue 017's actual execution), issue 017 (distribution model - blocked on 024 regardless of priority), issue 010 then 028 (integration-queue.ts, after 014), issue 022 then 025 (Pod G, after 004), issue 007 (task-chain invariants, after all recovery work settles), closing out issues 020/021's acceptance evidence (needs 024).
+`better-sqlite3` range/support-evidence mismatch (needed for issue 024), issue 027 (security reporting policy proof - human decision may already be recorded from a prior session, reconfirm before starting), issue 015 (validation invocation ID lifetime - confirmed independent/safe to run in parallel if the user wants it), issue 024 (CI/release package gates, Node 24/25/26 matrix - also the hard prerequisite for issue 017's actual execution; 020/021 already provide its input evidence), issue 017 (distribution model - blocked on 024 regardless of priority), issue 028 (blocked on 010, see above), issue 022 then 025 (Pod G, after 004), issue 007 (task-chain invariants, after all recovery work settles).
+
+Issues 020 and 021 are NOT open work - see the correction note under "Repository State" above.
 
 ## Timing Reference (For Comparing Future Agent/Tool Choices)
 
