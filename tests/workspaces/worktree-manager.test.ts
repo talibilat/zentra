@@ -18,8 +18,10 @@ import {
 } from "../../src/workspaces/git-client.js";
 import {
   WorkspaceCommitUncertainError,
+  WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
   WorktreeManager,
+  type WorkspaceCreationIntent,
 } from "../../src/workspaces/worktree-manager.js";
 
 const git = new GitClient();
@@ -714,4 +716,97 @@ describe("WorktreeManager", () => {
       expect(effectCalls).toBe(1);
     },
   );
+
+  it("invokes onPrepared with the exact intended branch, path, and base before the Git effect runs", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const observed: WorkspaceCreationIntent[] = [];
+    let effectRan = false;
+    class RecordingGitClient extends GitClient {
+      override run(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<CommandResult> {
+        if (args.includes("worktree") && args.includes("add")) effectRan = true;
+        return super.run(cwd, args, options);
+      }
+    }
+
+    const lease = await new WorktreeManager(new RecordingGitClient()).create(
+      project,
+      "task-prepared-evidence",
+      {},
+      (intent) => {
+        expect(effectRan).toBe(false);
+        observed.push(intent);
+      },
+    );
+
+    expect(observed).toEqual([{
+      taskId: "task-prepared-evidence",
+      branch: "ticket/task-prepared-evidence",
+      path: lease.path,
+      base: project.integrationBranch,
+    }]);
+  });
+
+  it("propagates a thrown onPrepared error before invoking the Git effect", async () => {
+    await manager.ensureIntegrationBranch(project);
+    let effectRan = false;
+    class RecordingGitClient extends GitClient {
+      override run(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<CommandResult> {
+        if (args.includes("worktree") && args.includes("add")) effectRan = true;
+        return super.run(cwd, args, options);
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new RecordingGitClient()).create(
+        project,
+        "task-prepared-throws",
+        {},
+        () => {
+          throw new Error("durable append failed");
+        },
+      ),
+    ).rejects.toThrow(/durable append failed/);
+    expect(effectRan).toBe(false);
+    expect(existsSync(path.join(worktreeRoot, "task-prepared-throws"))).toBe(false);
+  });
+
+  it("reports uncertain creation when the created branch does not point at the exact intended base", async () => {
+    await manager.ensureIntegrationBranch(project);
+    class RetargetingGitClient extends GitClient {
+      override async run(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<CommandResult> {
+        const result = await super.run(cwd, args, options);
+        if (args.includes("worktree") && args.includes("add")) {
+          // Simulate a competing effect where the created branch was moved
+          // away from the exact base commit that was intended and recorded
+          // as prepared evidence (e.g. a concurrent actor advanced it).
+          const worktreePath = args.at(-2)!;
+          await super.run(worktreePath, ["commit", "--allow-empty", "-m", "moved away from base"]);
+        }
+        return result;
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new RetargetingGitClient()).create(project, "task-wrong-base"),
+    ).rejects.toBeInstanceOf(WorkspaceCreationUncertainError);
+  });
+
+  it("reports uncertain creation when the created worktree path is not a real directory", async () => {
+    await manager.ensureIntegrationBranch(project);
+    class SwappingGitClient extends GitClient {
+      override async run(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<CommandResult> {
+        const result = await super.run(cwd, args, options);
+        if (args.includes("worktree") && args.includes("add")) {
+          const worktreePath = args.at(-2)!;
+          rmSync(worktreePath, { recursive: true, force: true });
+          writeFileSync(worktreePath, "not a directory\n", "utf8");
+        }
+        return result;
+      }
+    }
+
+    await expect(
+      new WorktreeManager(new SwappingGitClient()).create(project, "task-swapped-path"),
+    ).rejects.toBeInstanceOf(WorkspaceCreationUncertainError);
+  });
 });

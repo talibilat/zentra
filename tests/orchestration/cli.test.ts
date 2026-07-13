@@ -907,7 +907,12 @@ describe("Zentra CLI", () => {
     expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
   });
 
-  it("maps SIGINT to one cancelled object with a nonzero exit", async () => {
+  // A signal delivered this early lands while `git worktree add` is still
+  // running. Worktree creation is effectful: Git may have created the branch
+  // or worktree before the interruption, so the task must be left nonterminal
+  // (not "cancelled") for recovery to reconcile real Git state on restart,
+  // instead of a terminal outcome hiding an uncertain effect. See issue 002.
+  it("leaves an interrupted worktree creation nonterminal on SIGINT", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
     const pending = invoke(runArguments(testFixture, "task-signal"), signals);
@@ -919,14 +924,14 @@ describe("Zentra CLI", () => {
     expect(result.stdout).toBe("");
     expect(result.json).toMatchObject({
       command: "task.run",
-      outcome: "cancelled",
-      task: { taskId: "task-signal", terminalOutcome: "cancelled" },
+      outcome: null,
+      task: { taskId: "task-signal", terminalOutcome: null },
     });
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
-  it("maps SIGTERM to one cancelled object with a nonzero exit", async () => {
+  it("leaves an interrupted worktree creation nonterminal on SIGTERM", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
     const pending = invoke(runArguments(testFixture, "task-sigterm"), signals);
@@ -938,8 +943,8 @@ describe("Zentra CLI", () => {
     expect(result.stdout).toBe("");
     expect(result.json).toMatchObject({
       command: "task.run",
-      outcome: "cancelled",
-      task: { taskId: "task-sigterm", terminalOutcome: "cancelled" },
+      outcome: null,
+      task: { taskId: "task-sigterm", terminalOutcome: null },
     });
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);

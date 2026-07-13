@@ -95,6 +95,10 @@ export class TaskService {
     const events = this.journal.readStream(taskId);
     return projectTask(events);
   }
+
+  readStream(taskId: string): readonly StoredEvent[] {
+    return this.journal.readStream(taskId);
+  }
 }
 
 function canonicalizePayload(payload: unknown): unknown {

@@ -23,6 +23,24 @@ export interface WorkspaceLease {
   readonly path: string;
 }
 
+export interface WorkspaceCreationIntent {
+  readonly taskId: string;
+  readonly branch: string;
+  readonly path: string;
+  readonly base: string;
+}
+
+export class WorkspaceCreationUncertainError extends Error {
+  override readonly name = "WorkspaceCreationUncertainError";
+
+  constructor(
+    readonly evidence: Readonly<Record<string, unknown>>,
+    reason: string,
+  ) {
+    super(`workspace creation result is uncertain: ${reason}`);
+  }
+}
+
 export class WorkspaceGitTerminationError extends Error {
   override readonly name = "WorkspaceGitTerminationError";
 
@@ -86,6 +104,7 @@ export class WorktreeManager {
     project: ProjectConfig,
     taskId: string,
     options: GitRunOptions = {},
+    onPrepared?: (intent: WorkspaceCreationIntent) => void | Promise<void>,
   ): Promise<WorkspaceLease> {
     await this.assertSafeGitConfiguration(project.repositoryPath, options);
     const branch = `ticket/${taskId}`;
@@ -102,6 +121,20 @@ export class WorktreeManager {
     }
 
     mkdirSync(project.worktreeRoot, { recursive: true });
+
+    // Durable "prepared" evidence must be recorded before the Git effect runs,
+    // so a caller that is interrupted mid-effect can still reconcile exactly
+    // what was intended (branch/path/base) instead of losing all evidence.
+    const intent: WorkspaceCreationIntent = {
+      taskId,
+      branch,
+      path: worktreePath,
+      base: project.integrationBranch,
+    };
+    if (onPrepared !== undefined) {
+      await onPrepared(intent);
+    }
+
     await this.runOrThrow(project.repositoryPath, [
       "worktree",
       "add",
@@ -111,7 +144,123 @@ export class WorktreeManager {
       project.integrationBranch,
     ], options);
 
+    // Do not trust exit code 0 alone: verify the exact branch, registration,
+    // path, and base facts before returning a lease that callers will treat
+    // as a durable "task.leased" fact.
+    await this.verifyExactCreation(project, intent, options);
+
     return { taskId, branch, path: worktreePath };
+  }
+
+  /**
+   * Adopts a worktree whose creation was durably prepared
+   * (task.worktree_creation_started) and whose Git effect already ran to
+   * completion in a prior, interrupted attempt. This never invokes
+   * `git worktree add` again: it only re-verifies, from scratch, that the
+   * exact branch/registration/path/base facts already hold, using the same
+   * verification `create()` uses before minting a lease. It throws
+   * `WorkspaceCreationUncertainError` (never deletes or overwrites anything)
+   * if the state is not an exact match.
+   */
+  async adopt(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions = {},
+  ): Promise<WorkspaceLease> {
+    await this.assertSafeGitConfiguration(project.repositoryPath, options);
+    await this.verifyExactCreation(project, intent, options);
+    return { taskId: intent.taskId, branch: intent.branch, path: intent.path };
+  }
+
+  private async verifyExactCreation(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions,
+  ): Promise<void> {
+    const evidence = Object.freeze({ ...intent });
+    let canonicalPath: string;
+    try {
+      const stat = lstatSync(intent.path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new Error("created worktree path is not a real directory");
+      }
+      canonicalPath = realpathSync(intent.path);
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    let registration: CommandResult;
+    try {
+      registration = await this.run(project.repositoryPath, [
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+      ], options);
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (registration.termination !== null || registration.exitCode !== 0 || registration.truncated) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        "worktree registration could not be read",
+      );
+    }
+    const records = registration.stdout.split("\0\0").filter(Boolean);
+    const branchRef = `branch refs/heads/${intent.branch}`;
+    const exactRegistration = records.filter((record) => {
+      const fields = record.split("\0");
+      return (
+        (fields.includes(`worktree ${intent.path}`) ||
+          fields.includes(`worktree ${canonicalPath}`)) &&
+        fields.includes(branchRef)
+      );
+    });
+    if (exactRegistration.length !== 1) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        "ticket worktree registration is not exact",
+      );
+    }
+    let baseHead: CommandResult;
+    let branchHead: CommandResult;
+    try {
+      baseHead = await this.run(project.repositoryPath, [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${intent.base}^{commit}`,
+      ], options);
+      branchHead = await this.run(project.repositoryPath, [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${intent.branch}^{commit}`,
+      ], options);
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (
+      baseHead.termination !== null || baseHead.exitCode !== 0 || baseHead.truncated ||
+      branchHead.termination !== null || branchHead.exitCode !== 0 || branchHead.truncated
+    ) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        "base or branch identity could not be read",
+      );
+    }
+    if (baseHead.stdout.trim() !== branchHead.stdout.trim()) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        "created branch does not point at the exact intended base commit",
+      );
+    }
   }
 
   async inspect(
@@ -358,6 +507,141 @@ export class WorktreeManager {
     await this.cleanupEffect(
       project.repositoryPath,
       ["update-ref", "-d", branchRef, expectedSourceCommit],
+      options,
+      "ref_deletion",
+      evidence,
+    );
+  }
+
+  /**
+   * Removes a worktree and its ticket branch that were created but never
+   * leased (no work ever started). This is the "abandoned before lease"
+   * counterpart to `cleanupCompleted`: it performs the same exactness and
+   * cleanliness checks (registration, path, branch identity, no staged or
+   * unstaged changes), but has no completed-integration receipt or source
+   * commit to check against, because no worker ever ran. It never deletes
+   * anything unless every check is exact; on any mismatch it throws
+   * `WorkspaceCleanupError` and leaves all state untouched for an operator.
+   */
+  async removeUnleased(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions = {},
+  ): Promise<void> {
+    const evidence = Object.freeze({ ...intent });
+    const expectedPath = path.join(project.worktreeRoot, intent.taskId);
+    const expectedBranch = `ticket/${intent.taskId}`;
+    try {
+      if (
+        intent.path !== expectedPath ||
+        intent.branch !== expectedBranch ||
+        intent.base !== project.integrationBranch
+      ) {
+        throw new Error("worktree creation intent is not exact");
+      }
+      const leaseStat = lstatSync(intent.path);
+      if (!existsSync(intent.path) || leaseStat.isSymbolicLink() || !leaseStat.isDirectory()) {
+        throw new Error("ticket worktree path is not exact");
+      }
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    try {
+      await this.assertSafeGitConfiguration(intent.path, options);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const registration = await this.cleanupRead(project.repositoryPath, [
+      "worktree",
+      "list",
+      "--porcelain",
+      "-z",
+    ], options, evidence);
+    const records = registration.stdout.split("\0\0").filter(Boolean);
+    let canonicalLeasePath: string;
+    try {
+      canonicalLeasePath = realpathSync(intent.path);
+    } catch (error) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const exactRegistration = records.filter((record) => {
+      const fields = record.split("\0");
+      return (fields.includes(`worktree ${intent.path}`) ||
+          fields.includes(`worktree ${canonicalLeasePath}`)) &&
+        fields.includes(`branch refs/heads/${intent.branch}`);
+    });
+    if (exactRegistration.length !== 1) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        "ticket worktree registration is not exact",
+      );
+    }
+    const status = await this.cleanupRead(intent.path, [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ], options, evidence);
+    if (status.stdout !== "") {
+      throw new WorkspaceCleanupError("verification", false, evidence, "ticket worktree is dirty");
+    }
+    const head = await this.cleanupRead(
+      intent.path,
+      ["rev-parse", "--verify", "HEAD^{commit}"],
+      options,
+      evidence,
+    );
+    const baseHead = await this.cleanupRead(
+      project.repositoryPath,
+      ["rev-parse", "--verify", `refs/heads/${intent.base}^{commit}`],
+      options,
+      evidence,
+    );
+    if (head.stdout.trim() !== baseHead.stdout.trim()) {
+      throw new WorkspaceCleanupError(
+        "verification",
+        false,
+        evidence,
+        "ticket branch no longer points at the exact intended base commit",
+      );
+    }
+    const branchRef = `refs/heads/${intent.branch}`;
+    const branch = await this.cleanupRead(
+      project.repositoryPath,
+      ["rev-parse", "--verify", `${branchRef}^{commit}`],
+      options,
+      evidence,
+    );
+    if (branch.stdout.trim() !== head.stdout.trim()) {
+      throw new WorkspaceCleanupError("verification", false, evidence, "ticket ref changed");
+    }
+
+    await this.cleanupEffect(
+      project.repositoryPath,
+      ["worktree", "remove", "--", intent.path],
+      options,
+      "worktree_removal",
+      evidence,
+    );
+    await this.cleanupEffect(
+      project.repositoryPath,
+      ["update-ref", "-d", branchRef, branch.stdout.trim()],
       options,
       "ref_deletion",
       evidence,
