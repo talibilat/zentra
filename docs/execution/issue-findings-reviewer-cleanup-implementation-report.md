@@ -15,6 +15,10 @@ The adapter waits for that proof for a bounded one-second interval before resolv
 If absence cannot be confirmed, it rejects with `failed` and does not parse or accept the review decision.
 Existing cancellation, timeout, and execution failures retain their canonical outcomes only after process-group absence has been confirmed.
 
+## Residual Risk
+
+The exit check covers process-group membership only; a descendant that re-detaches into a new session can escape it, which is accepted outside the Trusted-Project MVP threat model because, like the exact-executable allowlist, this mechanism is not a sandbox against deliberate actions by an already-trusted executable.
+
 ## Test Evidence
 
 The writer session that authored this fix had no command-execution tool available and explicitly declined to claim verification results.

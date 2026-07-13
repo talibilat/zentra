@@ -248,6 +248,8 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
         }
       };
       const waitForProcessGroupExit = async (): Promise<boolean> => {
+        // This checks process-group membership only. A descendant that re-detaches into a new
+        // session is a documented residual risk outside the Trusted-Project MVP threat model.
         const deadline = Date.now() + FORCED_TERMINATION_MS;
         while (processGroupExists()) {
           const remaining = deadline - Date.now();

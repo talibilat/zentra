@@ -510,6 +510,7 @@ describe("ProcessReviewerAdapter", () => {
     expect(performance.now() - startedAt).toBeLessThan(750);
   });
 
+  // Covers same-process-group descendants, not re-detached sessions (a documented residual risk).
   it("does not accept a review while its owned process group still has a surviving descendant", async () => {
     const pidFile = path.join(makeTempDir(), "descendant.pid");
     const fixture = reviewerScript(`
