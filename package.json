@@ -25,6 +25,12 @@
   "engines": {
     "node": ">=24"
   },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "dependencies": {
     "better-sqlite3": "^12.0.0",
     "commander": "^14.0.0",
