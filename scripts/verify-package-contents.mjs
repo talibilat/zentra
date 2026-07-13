@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   collectBuildInputs,
@@ -24,12 +25,15 @@ import {
 } from "./package-files.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
-const temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-contents-")));
 const nodeExecutable = canonicalExecutable(process.execPath, "Node.js");
 const npmExecutable = canonicalExecutable(path.join(path.dirname(nodeExecutable), "npm"), "npm");
 const tarExecutable = canonicalExecutable("/usr/bin/tar", "tar");
-const commandEnvironment = minimalEnvironment();
 const commandTimeoutMs = 120_000;
+const terminationGraceMs = 250;
+const forcedTerminationMs = 1_000;
+const processGroupPollMs = 10;
+let temporaryRoot;
+let commandEnvironment;
 const forbiddenCanaries = [
   ".env",
   ".worktrees/package-canary.txt",
@@ -41,30 +45,38 @@ const forbiddenCanaries = [
   "tests/package-canary.test.js",
 ];
 
-try {
-  const first = createAndInspectPackage("umask-022", 0o022);
-  const second = createAndInspectPackage("umask-077", 0o077);
-  assertEqual("normalized archive entries", first.entries, second.entries);
-  assertEqual("package metadata", first.packageJson, second.packageJson);
-  console.log(`Verified ${first.entries.length} deterministic package files across clean packs with umasks 022 and 077.`);
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`Package content verification failed: ${message}`);
-  process.exitCode = 1;
-} finally {
-  rmSync(temporaryRoot, { recursive: true, force: true });
+if (process.argv[1] !== undefined && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  await main();
 }
 
-function createAndInspectPackage(label, umask) {
+async function main() {
+  temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-contents-")));
+  commandEnvironment = minimalEnvironment();
+  try {
+    const first = await createAndInspectPackage("umask-022", 0o022);
+    const second = await createAndInspectPackage("umask-077", 0o077);
+    assertEqual("normalized archive entries", first.entries, second.entries);
+    assertEqual("package metadata", first.packageJson, second.packageJson);
+    console.log(`Verified ${first.entries.length} deterministic package files across clean packs with umasks 022 and 077.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Package content verification failed: ${message}`);
+    process.exitCode = 1;
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+async function createAndInspectPackage(label, umask) {
   const previousUmask = process.umask(umask);
   try {
-    return inspectPackage(label);
+    return await inspectPackage(label);
   } finally {
     process.umask(previousUmask);
   }
 }
 
-function inspectPackage(label) {
+async function inspectPackage(label) {
   const runRoot = path.join(temporaryRoot, label);
   const sourceRoot = path.join(runRoot, "source");
   const artifactRoot = path.join(runRoot, "artifacts");
@@ -75,7 +87,7 @@ function inspectPackage(label) {
   copyPackageSource(sourceRoot);
   seedCanaries(sourceRoot);
 
-  const packed = run(
+  const packed = await run(
     nodeExecutable,
     [npmExecutable, "pack", "--silent", "--json", "--pack-destination", artifactRoot],
     sourceRoot,
@@ -90,7 +102,7 @@ function inspectPackage(label) {
   assertPackageManifest(sourceRoot, listedFiles);
 
   const tarball = path.join(artifactRoot, result.filename);
-  run(tarExecutable, ["-xzf", tarball, "-C", extractedRoot, "-p"], sourceRoot);
+  await run(tarExecutable, ["-xzf", tarball, "-C", extractedRoot, "-p"], sourceRoot);
   const extractedPackage = path.join(extractedRoot, "package");
   const entries = walkFiles(extractedPackage).map((file) => {
     const relative = relativePath(extractedPackage, file);
@@ -198,27 +210,153 @@ function relativePath(root, file) {
   return path.relative(root, file).split(path.sep).join("/");
 }
 
-function run(executable, args, cwd) {
+export function run(executable, args, cwd, {
+  environment = commandEnvironment,
+  timeoutMs = commandTimeoutMs,
+} = {}) {
   const command = formatCommand(executable, args);
-  const result = spawnSync(executable, args, {
-    cwd,
-    shell: false,
-    env: commandEnvironment,
-    encoding: "utf8",
-    maxBuffer: 10 * 1_024 * 1_024,
-    timeout: commandTimeoutMs,
+  const maxBuffer = 10 * 1_024 * 1_024;
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd,
+      detached: true,
+      shell: false,
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let capturedBytes = 0;
+    let decided = false;
+    let closed = false;
+    let resolveClosed;
+    const closedPromise = new Promise((resolveClose) => {
+      resolveClosed = resolveClose;
+    });
+    const timer = setTimeout(() => decide({ kind: "timeout" }), timeoutMs);
+
+    const capture = (destination, chunk) => {
+      const remaining = maxBuffer - capturedBytes;
+      if (remaining > 0) {
+        const retained = Math.min(remaining, chunk.byteLength);
+        destination.push(retained === chunk.byteLength ? chunk : chunk.subarray(0, retained));
+        capturedBytes += retained;
+      }
+      if (chunk.byteLength > remaining) decide({ kind: "output_limit" });
+    };
+
+    const decide = (decision) => {
+      if (decided) return;
+      decided = true;
+      clearTimeout(timer);
+      void settle(decision);
+    };
+
+    const settle = async (decision) => {
+      const pid = child.pid;
+      try {
+        if (pid !== undefined) {
+          await terminateProcessGroup(pid, decision.kind === "exit");
+        }
+        if (!closed) {
+          await waitForClose(closedPromise, forcedTerminationMs);
+        }
+      } catch (error) {
+        reject(new Error(`${command} cleanup could not confirm subprocess-tree exit: ${errorMessage(error)}`));
+        return;
+      }
+
+      const result = {
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        status: decision.kind === "exit" ? decision.status : null,
+        signal: decision.kind === "exit" ? decision.signal : null,
+      };
+      if (decision.kind === "timeout") {
+        reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+        return;
+      }
+      if (decision.kind === "output_limit") {
+        reject(new Error(`${command} exceeded the ${maxBuffer}-byte output limit`));
+        return;
+      }
+      if (decision.kind === "spawn_error") {
+        reject(new Error(`${command} failed to start: ${decision.error.message}`));
+        return;
+      }
+      if (result.status !== 0) {
+        const termination = result.signal === null ? `exit ${result.status}` : `signal ${result.signal}`;
+        reject(new Error(`${command} failed with ${termination}:\n${result.stderr || result.stdout}`));
+        return;
+      }
+      resolve(result);
+    };
+
+    child.stdout.on("data", (chunk) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk) => capture(stderr, chunk));
+    child.on("error", (error) => decide({ kind: "spawn_error", error }));
+    child.on("exit", (status, signal) => decide({ kind: "exit", status, signal }));
+    child.on("close", () => {
+      closed = true;
+      resolveClosed();
+    });
   });
-  if (result.error !== undefined) {
-    if ("code" in result.error && result.error.code === "ETIMEDOUT") {
-      throw new Error(`${command} timed out after ${commandTimeoutMs}ms`);
-    }
-    throw new Error(`${command} failed to start: ${result.error.message}`);
+}
+
+async function terminateProcessGroup(pid, graceful) {
+  if (graceful && processGroupExists(pid)) {
+    signalProcessGroup(pid, "SIGTERM");
+    if (await waitForProcessGroupExit(pid, terminationGraceMs)) return;
   }
-  if (result.status !== 0) {
-    const termination = result.signal === null ? `exit ${result.status}` : `signal ${result.signal}`;
-    throw new Error(`${command} failed with ${termination}:\n${result.stderr || result.stdout}`);
+  if (processGroupExists(pid)) signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, forcedTerminationMs))) {
+    throw new Error(`process group ${pid} survived bounded termination`);
   }
-  return result;
+}
+
+function processGroupExists(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function signalProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+// Checks process-group membership only. A descendant that uses detached:true again to create a
+// new session is a documented residual risk outside the Trusted-Project MVP threat model; AGENTS.md
+// already disclaims sandboxing against deliberate actions by an approved, trusted executable.
+async function waitForProcessGroupExit(pid, timeoutMs) {
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  while (processGroupExists(pid)) {
+    const remainingNs = deadline - process.hrtime.bigint();
+    if (remainingNs <= 0n) return false;
+    const remainingMs = Number((remainingNs + 999_999n) / 1_000_000n);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(processGroupPollMs, remainingMs)));
+  }
+  return true;
+}
+
+async function waitForClose(closedPromise, timeoutMs) {
+  let timer;
+  await Promise.race([
+    closedPromise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("subprocess streams did not close after termination")), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function canonicalExecutable(candidate, label) {

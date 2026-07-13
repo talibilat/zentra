@@ -473,6 +473,53 @@ describe("publishable CLI package", () => {
     });
   }, 30_000);
 
+  it("confirms same-process-group package-verifier descendants exit before reporting a timeout", async () => {
+    const pidFile = path.join(packageSandbox(), "timed-out-descendant.pid");
+    const descendantProgram = "setInterval(() => {}, 1_000)";
+    const parentProgram = [
+      'import { spawn } from "node:child_process";',
+      'import { writeFileSync } from "node:fs";',
+      `const descendant = spawn(process.execPath, ["--eval", ${JSON.stringify(descendantProgram)}], { stdio: "ignore" });`,
+      'if (descendant.pid === undefined) throw new Error("descendant pid unavailable");',
+      `writeFileSync(${JSON.stringify(pidFile)}, String(descendant.pid), "utf8");`,
+      "descendant.unref();",
+      "setInterval(() => {}, 1_000);",
+    ].join("\n");
+    const verifierUrl = pathToFileURL(
+      path.join(repositoryRoot, "scripts", "verify-package-contents.mjs"),
+    ).href;
+    const verifier = await import(verifierUrl) as {
+      run(
+        executable: string,
+        args: readonly string[],
+        cwd: string,
+        options: { readonly environment: NodeJS.ProcessEnv; readonly timeoutMs: number },
+      ): Promise<unknown>;
+    };
+    let descendantPid: number | undefined;
+
+    try {
+      await expect(verifier.run(
+        nodeExecutable,
+        ["--input-type=module", "--eval", parentProgram],
+        repositoryRoot,
+        { environment: subprocessEnvironment, timeoutMs: 100 },
+      )).rejects.toThrow("timed out after 100ms");
+      descendantPid = Number(readFileSync(pidFile, "utf8"));
+
+      expect(descendantPid).toBeGreaterThan(0);
+      expect(() => process.kill(descendantPid!, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+    } finally {
+      if (descendantPid !== undefined) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  }, 30_000);
+
   it("terminates package build subprocesses that exceed their output limit", async () => {
     const helper = pathToFileURL(path.join(repositoryRoot, "scripts", "run-command.mjs")).href;
     const noisyProgram = "process.stdout.write('x'.repeat(4_096))";
