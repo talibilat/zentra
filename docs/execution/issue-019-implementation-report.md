@@ -15,12 +15,16 @@ The package-content verifier also resolved bare `npm` and `tar` names through am
 The subsequent final-component checks still followed symlinked ancestor directories in package inputs and outputs.
 As a result, a symlinked `fixtures/` directory could escape the package root, have its external fixture mode changed, and then be omitted from a successfully produced tarball.
 The production verifier had the same ancestor traversal weakness and could read required runtime output through a symlinked directory outside the package root.
+The clean package-content verifier still copied its own source files with raw `copyFileSync` and `cpSync` paths before the validated package lifecycle began.
+Consequently, a top-level source-file symlink was read through during copying, and a symlinked source directory reached npm before rejection instead of failing at the determinism gate's source boundary.
+The package build also ran TypeScript with inherited terminal streams and no timeout or output bound, so a stuck or excessively verbose compiler could block packaging indefinitely or consume unbounded output resources.
 
 ## Files Changed
 
 - `package.json`
 - `scripts/build-package.mjs`
 - `scripts/package-files.mjs`
+- `scripts/run-command.mjs`
 - `scripts/verify-package.mjs`
 - `scripts/verify-package-contents.mjs`
 - `tests/package/package-e2e.test.ts`
@@ -44,6 +48,10 @@ This preflight prevents an invalid later path from causing partial mode changes 
 The verifier derives npm from the canonical Node installation, resolves both npm and `/usr/bin/tar` to canonical absolute regular executable files, and invokes canonical npm through canonical Node so no shebang lookup can substitute Node.
 Every verifier subprocess uses an executable plus argument array with `shell: false`, a fixed minimal environment, isolated npm home, cache, user configuration, and global configuration, and a 120-second timeout.
 Subprocess failures now report the full quoted executable and argument vector, exit or signal status, and captured tool output.
+Before creating either clean source sandbox, the package-content verifier now applies the shared component-wise package-path validation to every top-level copied file and directory and preflights every recursively copied build input.
+No `copyFileSync`, `cpSync`, or npm lifecycle begins until all copied source paths are confirmed to contain no final or ancestor symlinks and to resolve inside the canonical package root.
+The TypeScript build now uses a reusable synchronous subprocess runner with an absolute executable, explicit argument vector, `shell: false`, a fixed 120-second timeout, a 10 MiB bound for each captured stream, deterministic timeout, overflow, signal, and exit reporting, and an explicit environment containing only fixed `PATH`, `LANG`, and `LC_ALL` values.
+The package E2E subprocess helper now requires absolute executable paths, invokes npm through canonical Node and npm paths, invokes canonical `/usr/bin/git`, uses a finite timeout and bounded output, and supplies an isolated minimal environment rather than inheriting the parent process environment.
 The npm `prepack` lifecycle invokes the two Node scripts directly so deterministic verification does not require ambient pnpm resolution.
 This mode normalization does not change issue 016's output paths, content digests, clean-build behavior, or package verification semantics.
 
@@ -60,6 +68,8 @@ It also replaces the complete `fixtures/` ancestor with a symlink to an external
 A standalone verifier regression replaces `dist/src/cli/` with a symlink to an external output directory and proves verification rejects the ancestor before reading the CLI.
 Focused verifier tests prepend fake npm and tar executables to ambient `PATH` and prove neither is invoked.
 Another focused test sets ambient `npm_config_ignore_scripts=true` and proves the verifier strips it rather than bypassing the clean build and packaging stale output.
+Two clean-verifier regressions replace `package.json` and `src/` with external symlinks and prove validation rejects them before npm starts or external content is parsed or compiled.
+Focused subprocess regressions run real child processes that hang or exceed their capture allowance and prove the shared package-build runner terminates them with deterministic timeout and output-limit errors.
 
 ## Commands And Results
 
@@ -71,14 +81,17 @@ Another focused test sets ambient `npm_config_ignore_scripts=true` and proves th
 - Red verifier-ancestor reproduction: standalone package verification followed a symlinked `dist/src/cli/` ancestor and failed incidentally during a read instead of rejecting the path component.
 - Red ambient-PATH reproduction: the verifier selected a fake `npm` prepended to `PATH` and failed with the fake executable's exit status.
 - Red inherited-environment reproduction: ambient `npm_config_ignore_scripts=true` bypassed prepack and caused the verifier to detect `dist/stale-output.js` in the package.
+- Red top-level source-file reproduction: package verification copied and parsed external content through a symlinked `package.json`, then failed later with npm's `EJSONPARSE` error.
+- Red source-ancestor reproduction: package verification reached the npm lifecycle before rejecting a symlinked `src/` directory rather than failing at source preflight.
+- Red build-bound reproduction: the focused runner test failed because no bounded package-build subprocess helper existed.
 - Package-content verification: `pnpm package:contents` passed with 71 deterministic files in clean packs under umasks `022` and `077`, including the synthetic prospective LICENSE.
 - Restrictive-caller verification: `umask 077 && pnpm package:contents` passed with the same 71 deterministic files and normalized modes.
 - Clean production build: `pnpm build` passed.
 - Production output verification: `pnpm package:verify` passed.
 - Package dry run: `npm pack --dry-run` passed with 70 entries because issue 018 has not yet supplied LICENSE.
 - Typecheck: `pnpm check` passed.
-- Full suite: `pnpm test` passed 557 of 557 tests across 17 files in 40.36 seconds.
-- Issue 016 tarball installation and package-security tests: `pnpm exec vitest run tests/package/package-e2e.test.ts` passed all 12 tests in 14.60 seconds.
+- Full suite: `pnpm test` passed 561 of 561 tests across 17 files in 40.46 seconds.
+- Issue 016 tarball installation and package-security tests: `pnpm exec vitest run tests/package/package-e2e.test.ts` passed all 16 tests in 17.14 seconds.
 - Diff validation: `git diff --check` passed.
 
 ## Acceptance Criteria Evidence
@@ -88,7 +101,9 @@ Tests, coverage, worktrees, planning documents, local databases, secrets, source
 The clean prepack lifecycle removes stale `dist` state before selecting the allowlisted production tree.
 The verifier binds the npm manifest to every generated production file and verifies that `dist/src/cli/main.js` is mode `0755` while all other archive files are mode `0644`.
 The build and verifier reject packaged symlinks in final paths and every ancestor before any relevant chmod or read, so an external target is neither mode-modified, read as trusted package content, nor silently omitted from a successful package.
+The determinism gate also validates every source path before copying, so its clean sandbox cannot ingest content through a top-level or nested source symlink.
 Canonical npm and tar resolution, explicit argv execution, isolated npm configuration, and a minimal environment make tool selection independent of ambient `PATH` and parent secrets or npm settings.
+The TypeScript build cannot wait or capture output without a fixed bound, and all termination paths produce deterministic diagnostics.
 Clean builds under umasks `022` and `077` must produce identical normalized archive paths, modes, SHA-256 content digests, and complete package metadata.
 README and the deterministic worker fixture are present in the current tarball, and a synthetic LICENSE proves issue 018's future file will be included without creating that file or adding license metadata in this issue.
 
@@ -104,4 +119,5 @@ Branch: `fix/predeploy-c1-files-019`.
 Initial implementation commit: `b534e17`.
 Mode-normalization review-fix commit: `c7d21c2`.
 Security review-fix commit: `49b9627`.
-Ancestor-containment review-fix commit: this document's containing commit.
+Ancestor-containment review-fix commit: `8ef3898`.
+Final source-copy and build-subprocess review-fix commit: this document's containing commit.

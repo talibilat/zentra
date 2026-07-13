@@ -1,6 +1,5 @@
 import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 import {
   collectBuildInputs,
@@ -13,6 +12,10 @@ import {
   validatePackageDirectory,
   validatePackageFile,
 } from "./package-files.mjs";
+import { runCommand } from "./run-command.mjs";
+
+const commandTimeoutMs = 120_000;
+const commandMaxBuffer = 10 * 1_024 * 1_024;
 
 validatePackagedFile(requiredFixture);
 validatePackagedFile("README.md");
@@ -21,14 +24,16 @@ const buildInputs = collectBuildInputs();
 validatePackageDirectory("dist", { optional: true });
 rmSync(path.join(packageRoot, "dist"), { recursive: true, force: true });
 const tsc = path.join(packageRoot, "node_modules", "typescript", "bin", "tsc");
-const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
-  cwd: packageRoot,
-  shell: false,
-  stdio: "inherit",
-  env: minimalEnvironment(),
-});
-if (result.error !== undefined) throw result.error;
-if (result.status !== 0) process.exit(result.status ?? 1);
+try {
+  runCommand(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
+    cwd: packageRoot,
+    environment: minimalEnvironment(),
+    maxBuffer: commandMaxBuffer,
+    timeoutMs: commandTimeoutMs,
+  });
+} catch (error) {
+  failBuild(error instanceof Error ? error.message : String(error));
+}
 
 const buildOutputs = collectBuildOutputs();
 const packagedFiles = [...new Set([
@@ -78,9 +83,9 @@ function failBuild(message) {
 }
 
 function minimalEnvironment() {
-  const environment = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]) {
-    if (process.env[key] !== undefined) environment[key] = process.env[key];
-  }
-  return environment;
+  return {
+    PATH: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
+    LANG: "C",
+    LC_ALL: "C",
+  };
 }

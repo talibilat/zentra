@@ -17,6 +17,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  collectBuildInputs,
+  validatePackageDirectory,
+  validatePackageFile,
+} from "./package-files.mjs";
+
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-contents-")));
 const nodeExecutable = canonicalExecutable(process.execPath, "Node.js");
@@ -112,20 +118,27 @@ function inspectPackage(label) {
 }
 
 function copyPackageSource(destination) {
-  for (const name of [
+  const sourceFiles = [
     "package.json",
     "pnpm-lock.yaml",
     "README.md",
     "tsconfig.json",
     "tsconfig.build.json",
-  ]) {
-    copyFileSync(path.join(packageRoot, name), path.join(destination, name));
+  ].map((name) => [name, validatePackageFile(name).absolutePath]);
+  const license = validatePackageFile("LICENSE", { optional: true });
+  const sourceDirectories = ["fixtures", "scripts", "src"]
+    .map((name) => [name, validatePackageDirectory(name).absolutePath]);
+
+  // Validate every recursive entry before any copy can follow a changed source path.
+  collectBuildInputs();
+  for (const [name, source] of sourceFiles) {
+    copyFileSync(source, path.join(destination, name));
   }
-  if (existsSync(path.join(packageRoot, "LICENSE"))) {
-    copyFileSync(path.join(packageRoot, "LICENSE"), path.join(destination, "LICENSE"));
+  if (license !== null) {
+    copyFileSync(license.absolutePath, path.join(destination, "LICENSE"));
   }
-  for (const name of ["fixtures", "scripts", "src"]) {
-    cpSync(path.join(packageRoot, name), path.join(destination, name), { recursive: true });
+  for (const [name, source] of sourceDirectories) {
+    cpSync(source, path.join(destination, name), { recursive: true });
   }
   symlinkSync(path.join(packageRoot, "node_modules"), path.join(destination, "node_modules"));
 }
