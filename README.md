@@ -18,7 +18,20 @@ The MVP is evidence for the local orchestration path, not a production sandbox o
 
 ## Installation
 
-Install Node.js 24 or newer and pnpm 10.
+The MVP supports only macOS on Apple Silicon (`darwin`/`arm64`).
+
+The current local conformance evidence was produced on macOS 26.6 arm64.
+That observation is not a claim that untested macOS versions work, and Intel (`x64`) macOS, Linux, and Windows remain unsupported.
+
+Install Node.js 24, 25, or 26 and pnpm 10 on a supported host.
+The exact package engine range is `>=24 <27`; Node.js 27 and later are unsupported until an explicit compatibility review widens that bound.
+
+The package declares its supported operating system and CPU through npm `os` and `cpu` metadata.
+npm rejects other targets with `EBADPLATFORM` before installing Zentra, rather than allowing an operator to reach operational commands with an untested process, filesystem, Git, SQLite, or native-addon stack.
+
+The repository is not currently published through npm or an automated release channel.
+The instructions below describe development from a source checkout.
+Local tarballs produced by `npm pack` are tested installation artifacts, but no supported release-download, upgrade, rollback, or provenance procedure exists yet.
 
 Install dependencies and build the CLI from the repository root.
 
@@ -32,6 +45,8 @@ Run the built CLI through the package script.
 ```bash
 pnpm start -- --help
 ```
+
+See [MVP Platform And Runtime Support](docs/release/support-policy.md) for the exact support boundary and the evidence required to widen it.
 
 ## Project Configuration
 
