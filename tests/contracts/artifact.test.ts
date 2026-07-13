@@ -445,6 +445,111 @@ describe("projectArtifacts", () => {
       artifactMarker(recorded, 4),
     ])).toThrow("artifact protocol marker references missing patch artifact");
   });
+
+  it("allows a pending protocol marker only at the stream tail", () => {
+    const recorded = artifactEvent("patch", 5, patch);
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactMarker(recorded, 4),
+    ], { allowPendingProtocolMarker: true })).not.toThrow();
+    expect(() => projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactMarker(recorded, 4),
+      event("task.failed", 5),
+    ], { allowPendingProtocolMarker: true })).toThrow(
+      "artifact protocol marker references missing patch artifact",
+    );
+  });
+
+  it("accepts a failed full-validation receipt before preparation", () => {
+    const failedValidation = {
+      ...fullValidation,
+      outcome: "failed" as const,
+      exitCode: 1,
+    };
+    const failedReceipt = {
+      ...receipt,
+      resultCommit: null,
+      validation: failedValidation,
+      outcome: "failed" as const,
+    };
+    expect(() => projectArtifacts([
+      ...throughReviewRequest(),
+      artifactEvent("review_report", 8, review),
+      event("task.review_approved", 9, { review }),
+      event("task.integration_started", 10, { sourceCommit: receipt.sourceCommit, review }),
+      artifactEvent("integration_receipt", 11, failedReceipt, undefined, "final"),
+      event("task.failed", 12, { receipt: failedReceipt }),
+    ])).not.toThrow();
+  });
+
+  it.each([
+    ["failed focused validation", "task.review_requested"],
+    ["denied review approval", "task.review_approved"],
+  ] as const)("rejects a success lifecycle boundary with %s", (_case, boundary) => {
+    if (boundary === "task.review_requested") {
+      const failed = { ...validation, outcome: "failed" as const, exitCode: 1 };
+      expect(() => projectArtifacts([
+        event("task.created", 1, { projectId: "project-1", title: "task" }),
+        event("task.leased", 2),
+        event("task.started", 3),
+        artifactEvent("patch", 4, patch),
+        event("task.validation_started", 5, validationStartedPayload),
+        artifactEvent("validation_report", 6, failed),
+        event("task.review_requested", 7, { reviewerId: "reviewer-1", validation: failed }),
+      ])).toThrow(/successful/);
+      return;
+    }
+    const denied = { ...review, approved: false };
+    expect(() => projectArtifacts([
+      ...throughReviewRequest(),
+      artifactEvent("review_report", 8, denied),
+      event("task.review_approved", 9, { review: denied }),
+    ])).toThrow(/approved/);
+  });
+
+  it("rejects prepared receipt evidence without successful review and validation", () => {
+    const invalid = {
+      ...receipt,
+      originalIntegrationCommit: null,
+      validation: { ...fullValidation, outcome: "failed" as const, exitCode: 1 },
+    };
+    const events = completeArtifactChain().slice(0, 10);
+    events.push(artifactEvent("integration_receipt", 11, invalid, undefined, "prepared"));
+    expect(() => projectArtifacts(events)).toThrow(/prepared|successful|approved/);
+  });
+
+  it("rejects a post-preparation failure that changes prepared evidence", () => {
+    const events = completeArtifactChain();
+    const changed = {
+      ...receipt,
+      originalIntegrationCommit: "d".repeat(40),
+      outcome: "failed" as const,
+    };
+    events[12] = artifactEvent(
+      "integration_receipt",
+      13,
+      changed,
+      "artifact-integration-final",
+      "final",
+    );
+    expect(() => projectArtifacts(events)).toThrow(/prepared|contradict/);
+  });
+
+  it("retains artifact identities that match object prototype names", () => {
+    const view = projectArtifacts([
+      event("task.created", 1),
+      event("task.leased", 2),
+      event("task.started", 3),
+      artifactEvent("patch", 4, patch, "__proto__"),
+    ]);
+    expect(Object.hasOwn(view.evidenceByArtifactId, "__proto__")).toBe(true);
+    expect(view.evidenceByArtifactId["__proto__"]).toEqual(patch);
+  });
 });
 
 function completeArtifactChain(): StoredEvent[] {

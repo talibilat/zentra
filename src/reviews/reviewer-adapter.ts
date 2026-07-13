@@ -62,6 +62,8 @@ const DEFAULT_REVIEWER_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_REVIEW_INPUT_BYTES = 2 * 1_024 * 1_024;
 const DEFAULT_MAX_REVIEW_OUTPUT_BYTES = 16 * 1_024;
 const STREAM_FLUSH_GRACE_MS = 100;
+const FORCED_TERMINATION_MS = 250;
+const GROUP_EXIT_POLL_MS = 10;
 
 export interface ProcessReviewerOptions {
   readonly executable: string;
@@ -219,6 +221,7 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
       let outcome: "cancelled" | "timed_out" | "failed" | undefined;
       let reason = "";
       let settled = false;
+      let finishing = false;
       let exitObserved = false;
       let exitCode: number | null = null;
       let stdinCompleted = false;
@@ -234,8 +237,31 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
           child.kill("SIGKILL");
         }
       };
-      const finish = (): void => {
-        if (settled) return;
+      const processGroupExists = (): boolean => {
+        if (child.pid === undefined) return false;
+        try {
+          process.kill(-child.pid, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      };
+      const confirmProcessGroupExit = async (): Promise<boolean> => {
+        const deadline = performance.now() + FORCED_TERMINATION_MS;
+        while (processGroupExists()) {
+          const remaining = deadline - performance.now();
+          if (remaining <= 0) return false;
+          await new Promise((resolveSleep) =>
+            setTimeout(resolveSleep, Math.min(GROUP_EXIT_POLL_MS, remaining)),
+          );
+        }
+        return true;
+      };
+      const finish = async (): Promise<void> => {
+        if (settled || finishing) return;
+        finishing = true;
+        kill();
+        const groupExited = await confirmProcessGroupExit();
         settled = true;
         clearTimeout(timer);
         if (settlementTimer !== undefined) clearTimeout(settlementTimer);
@@ -243,11 +269,14 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
         child.stdin.destroy();
         child.stdout.destroy();
         child.stderr.destroy();
-        kill();
 
         const stderrText = Buffer.concat(stderr).toString("utf8");
         if (outcome !== undefined) {
           reject(new ReviewerExecutionError(outcome, reason || stderrText));
+          return;
+        }
+        if (!groupExited) {
+          reject(new ReviewerExecutionError("failed", "reviewer process group survived bounded termination"));
           return;
         }
         if (!exitObserved || exitCode !== 0) {
@@ -265,11 +294,11 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
         resolve(Buffer.concat(stdout).toString("utf8"));
       };
       const scheduleSettlementDeadline = (): void => {
-        settlementTimer ??= setTimeout(finish, STREAM_FLUSH_GRACE_MS);
+        settlementTimer ??= setTimeout(() => void finish(), STREAM_FLUSH_GRACE_MS);
       };
       const finishIfFlushed = (): void => {
         if (!exitObserved || !stdoutEnded || !stderrEnded) return;
-        if (outcome !== undefined || exitCode !== 0 || stdinCompleted) finish();
+        if (outcome !== undefined || exitCode !== 0 || stdinCompleted) void finish();
       };
       const stop = (
         nextOutcome: "cancelled" | "timed_out" | "failed",

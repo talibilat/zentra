@@ -492,6 +492,23 @@ describe("TaskService", () => {
     expect(stored[1]?.causationId).toBe("cause-1");
   });
 
+  it("appends a validated event batch in one journal transaction", () => {
+    const { service, journal } = makeService();
+    service.create(createInput);
+
+    const view = service.appendBatch("task-1", [
+      { type: "task.leased", payload: { leaseOwner: "worker-1" }, causationId: null },
+      { type: "task.started", payload: { workerId: "worker-1" }, causationId: null },
+    ]);
+
+    expect(view).toMatchObject({ lifecycle: "running", streamVersion: 3 });
+    expect(journal.readStream("task-1").map((stored) => stored.type)).toEqual([
+      "task.created",
+      "task.leased",
+      "task.started",
+    ]);
+  });
+
   it("rejects appending to an unknown task", () => {
     const { service } = makeService();
     expect(() => service.append("nope", "task.leased", {}, null)).toThrow();

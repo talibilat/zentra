@@ -125,7 +125,8 @@ Task identities are also validated as safe single path and ref components before
 
 ## Security Boundary
 
-The CLI chooses Zentra's bundled deterministic worker and reviewer executables internally; CLI callers cannot select or replace those executables.
+The CLI chooses Zentra's bundled deterministic worker internally.
+The local operator may configure one canonical absolute reviewer executable and its arguments; this is trusted executable authority under the Trusted-Project MVP model, not a sandbox or permission grant to untrusted callers.
 
 Configured validations are different: trusted project configuration supplies their argument arrays, while each validation executable must exactly match the approved canonical absolute path of the Node.js executable running Zentra.
 
