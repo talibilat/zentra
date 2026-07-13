@@ -1,0 +1,23 @@
+You are a fresh independent OpenCode reviewer performing the FINAL confirmation re-review of Zentra issue 011 after the protocol-discriminator fix. READ-ONLY.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+- docs/execution/issue-011-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+The prior blocking finding was: the supervisor inferred the invocation/protocol kind from the user-controlled taskId/args, so a worker task named "validation" or a `-e` invocation could bypass worker-artifact protocol validation and still report `completed`. Confirm it is fixed:
+1. ProcessSupervisor.execute() now takes an EXPLICIT, required invocation-kind (worker|validation|reviewer) or injected validator; NO inference from taskId or args remains.
+2. Each call site passes its correct kind (tracer-bullet worker, validation-runner validation, reviewer-adapter reviewer).
+3. `completed` requires the correct protocol output for the declared kind (worker => valid artifact.ready; reviewer => ReviewDecisionSchema; validation => its protocol).
+4. Regression tests prove a worker task named "validation" and an `args[0]==="-e"` worker without a valid completion event are NOT reported completed.
+
+Also confirm the previously-verified items still hold (monotonic deadlines, bounded EPERM handling, cancellation/timeout precedence, descendant-absence before completion, ESRCH-only checks, stream-grace timing test). macOS is the supported platform boundary; do not block on other platforms.
+
+Give a decisive verdict: INTEGRATE (finding resolved, no new blocking defect in owned scope) or BLOCK (specific Critical/Important defect remains, with exact file:line). Return your verdict as your final text output.

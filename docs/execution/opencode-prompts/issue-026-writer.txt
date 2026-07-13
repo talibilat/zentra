@@ -1,0 +1,27 @@
+You are the OpenCode implementation agent for Zentra issue 026 (Low, documentation-only).
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c2-docs-026
+Branch: fix/predeploy-c2-docs-026
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: docs/issues/026-low-update-stale-execution-documents.md, docs/execution/HANDOFF.md, docs/execution/mvp-final-report.md.
+
+Implement issue 026: correct stale repository-state claims in historical execution documents. The MVP is now merged to main (verify with `git log --oneline -5 main`).
+Acceptance criteria:
+- Either label execution reports clearly as immutable historical snapshots with an as-of commit and date, OR update their repository-state sections to distinguish then-current from present state.
+- Remove imperative instructions that appear current when their merge decision has already been completed (e.g. "do not merge the feature branch").
+- Link historical reports to the current status source rather than rewriting historical verification evidence.
+- Keep commit IDs, original test results, and historical decisions accurate to their original execution context (do NOT modernize historical numbers).
+
+Required checks: search execution documents for unqualified claims that the feature is unmerged / main is unchanged / no PR exists, and qualify them; validate all added repository-relative links; ensure a reader can determine the current merge state unambiguously from the revised documents.
+
+Constraints/non-goals: do NOT alter Git branches, tags, commits, or PRs; do NOT rewrite historical test outcomes; do NOT edit generated changelogs. Follow AGENTS.md markdown rule: put each full sentence on its own line in files you substantially edit. Do NOT use the em dash; use a plain dash.
+
+Final verification: run `git diff --check`; verify links resolve; confirm no unqualified stale claims remain.
+
+Owned files ONLY: docs/execution/HANDOFF.md and docs/execution/mvp-final-report.md (and only if needed, other clearly-historical execution reports). Do NOT edit docs/execution/pre-deployment-progress.md, docs/execution/issue-*-implementation-report.md, docs/issues/ briefs, or any source/package files.
+
+Commit (concise message, no co-author trailer). Push -u origin fix/predeploy-c2-docs-026.
+Create docs/execution/issue-026-implementation-report.md (standard sections).
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED.

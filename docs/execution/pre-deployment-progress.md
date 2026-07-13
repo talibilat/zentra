@@ -9,7 +9,7 @@ All implementation, testing, review, and documentation edits are performed by se
 - Integration branch: `fix/pre-deployment`
 - Integration worktree: `.worktrees/predeploy-integration` (reserved for merges, progress records, final verification only)
 - Issue corpus base commit: `f54ba31` (`docs/pre-deployment-issues`, pushed to origin)
-- Current integration commit: `15d7b8c` (013, 001, 009, 011 integrated + 008 disposition doc; baseline green after each; pushed). Closed: 001(Crit), 009+011(High), 013+008(Low).
+- Current integration commit: `f674bf8` (adds 026 + 016). Closed (7): 001+016(Crit), 009+011(High), 008+013+026(Low). In flight: 023 (review), 006 (review), 019+012 (writers).
 - Node: v24.2.0
 - pnpm: 10.0.0
 - OpenCode: 1.17.18 (`/Users/talibilat/.opencode/bin/opencode`)

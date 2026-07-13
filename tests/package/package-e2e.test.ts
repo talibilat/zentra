@@ -1,5 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -10,6 +11,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -18,10 +20,24 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+const nodeExecutable = realpathSync(process.execPath);
+const npmExecutable = realpathSync(path.join(path.dirname(nodeExecutable), "npm"));
+const gitExecutable = realpathSync("/usr/bin/git");
+const subprocessHome = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-test-home-")));
+const subprocessEnvironment = {
+  PATH: [path.dirname(nodeExecutable), "/usr/bin", "/bin"].join(path.delimiter),
+  HOME: subprocessHome,
+  TMPDIR: tmpdir(),
+  LANG: "C",
+  LC_ALL: "C",
+  npm_config_audit: "false",
+  npm_config_fund: "false",
+  npm_config_update_notifier: "false",
+};
 const temporaryDirectories: string[] = [];
 
 interface PackResult {
@@ -35,17 +51,27 @@ afterEach(() => {
   }
 });
 
+afterAll(() => {
+  rmSync(subprocessHome, { recursive: true, force: true });
+});
+
 async function run(
   executable: string,
   args: readonly string[],
   cwd: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = subprocessEnvironment,
 ) {
+  if (!path.isAbsolute(executable)) throw new Error(`test executable must be absolute: ${executable}`);
   return execFileAsync(executable, [...args], {
     cwd,
     env,
     maxBuffer: 10 * 1_024 * 1_024,
+    timeout: 120_000,
   });
+}
+
+function runNpm(args: readonly string[], cwd: string) {
+  return run(nodeExecutable, [npmExecutable, ...args], cwd);
 }
 
 function packageSandbox(): string {
@@ -54,6 +80,7 @@ function packageSandbox(): string {
   for (const name of [
     "package.json",
     "pnpm-lock.yaml",
+    "README.md",
     "tsconfig.json",
     "tsconfig.build.json",
   ]) {
@@ -71,11 +98,7 @@ function packageSandbox(): string {
 async function pack(sandbox: string): Promise<{ readonly tarball: string; readonly result: PackResult }> {
   const destination = path.join(sandbox, "artifacts");
   mkdirSync(destination);
-  const packed = await run(
-    "npm",
-    ["pack", "--silent", "--json", "--pack-destination", destination],
-    sandbox,
-  );
+  const packed = await runNpm(["pack", "--silent", "--json", "--pack-destination", destination], sandbox);
   const jsonStart = packed.stdout.lastIndexOf("\n[");
   const results = JSON.parse(packed.stdout.slice(jsonStart < 0 ? 0 : jsonStart + 1)) as PackResult[];
   expect(results).toHaveLength(1);
@@ -91,9 +114,9 @@ async function initializeProject(baseDirectory: string): Promise<{
   readonly repository: string;
 }> {
   const repository = path.join(baseDirectory, "project");
-  await run("git", ["init", "-b", "main", repository], baseDirectory);
-  await run("git", ["config", "user.name", "Zentra Package Test"], repository);
-  await run("git", ["config", "user.email", "package-test@zentra.local"], repository);
+  await run(gitExecutable, ["init", "-b", "main", repository], baseDirectory);
+  await run(gitExecutable, ["config", "user.name", "Zentra Package Test"], repository);
+  await run(gitExecutable, ["config", "user.email", "package-test@zentra.local"], repository);
   mkdirSync(path.join(repository, "test"));
   writeFileSync(path.join(repository, "greeting.txt"), "hello\n", "utf8");
   writeFileSync(
@@ -101,8 +124,8 @@ async function initializeProject(baseDirectory: string): Promise<{
     'import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\ntest("greeting", async () => assert.equal(await readFile(new URL("../greeting.txt", import.meta.url), "utf8"), "hello from package\\n"));\n',
     "utf8",
   );
-  await run("git", ["add", "--", "."], repository);
-  await run("git", ["commit", "-m", "initial package fixture"], repository);
+  await run(gitExecutable, ["add", "--", "."], repository);
+  await run(gitExecutable, ["commit", "-m", "initial package fixture"], repository);
 
   const config = path.join(baseDirectory, "zentra.project.json");
   const database = path.join(baseDirectory, "journal.sqlite");
@@ -112,8 +135,8 @@ async function initializeProject(baseDirectory: string): Promise<{
     integrationBranch: "zentra/integration",
     worktreeRoot: path.join(baseDirectory, "worktrees"),
     validations: {
-      focused: [realpathSync(process.execPath), "--test", "test/greeting.test.mjs"],
-      full: [realpathSync(process.execPath), "--test"],
+      focused: [nodeExecutable, "--test", "test/greeting.test.mjs"],
+      full: [nodeExecutable, "--test"],
     },
   }, null, 2)}\n`, "utf8");
   return { config, database, repository };
@@ -134,7 +157,7 @@ describe("publishable CLI package", () => {
     const consumer = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-consumer-")));
     temporaryDirectories.push(consumer);
     writeFileSync(path.join(consumer, "package.json"), '{"private":true,"type":"module"}\n', "utf8");
-    await run("npm", ["install", "--no-audit", "--no-fund", tarball], consumer);
+    await runNpm(["install", "--no-audit", "--no-fund", tarball], consumer);
 
     const installedRoot = path.join(consumer, "node_modules", "zentra");
     const installedCli = path.join(installedRoot, "dist", "src", "cli", "main.js");
@@ -161,10 +184,10 @@ describe("publishable CLI package", () => {
       "--title", "Run installed package",
       "--file", "greeting.txt",
       "--content", "hello from package\n",
-      "--reviewer-executable", realpathSync(process.execPath),
+      "--reviewer-executable", nodeExecutable,
       "--reviewer-argument", reviewer,
       "--reviewer-id", "package-reviewer",
-    ], consumer, { ...process.env, TMPDIR: fixtureTemp });
+    ], consumer, { ...subprocessEnvironment, TMPDIR: fixtureTemp });
     expect(operational.stderr).toBe("");
     expect(JSON.parse(operational.stdout)).toMatchObject({
       command: "task.run",
@@ -172,7 +195,7 @@ describe("publishable CLI package", () => {
       task: { taskId: "packaged-task", terminalOutcome: "completed" },
     });
     expect(existsSync(project.database)).toBe(true);
-    expect((await run("git", ["show", "zentra/integration:greeting.txt"], project.repository)).stdout)
+    expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], project.repository)).stdout)
       .toBe("hello from package\n");
 
     const installedFixtureModule = await import(pathToFileURL(
@@ -223,8 +246,7 @@ describe("publishable CLI package", () => {
     const destination = path.join(sandbox, "artifacts");
     mkdirSync(destination);
 
-    await expect(run(
-      "npm",
+    await expect(runNpm(
       ["pack", "--silent", "--json", "--pack-destination", destination],
       sandbox,
     )).rejects.toMatchObject({
@@ -234,6 +256,198 @@ describe("publishable CLI package", () => {
       ),
     });
     expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
+  it("rejects a packaged symlink without modifying or packaging its external target", async () => {
+    const sandbox = packageSandbox();
+    const externalTarget = path.join(sandbox, "external-target.mjs");
+    const fixture = path.join(sandbox, "fixtures", "deterministic-worker.mjs");
+    writeFileSync(externalTarget, "external target\n", "utf8");
+    chmodSync(externalTarget, 0o600);
+    rmSync(fixture);
+    symlinkSync(externalTarget, fixture);
+    const destination = path.join(sandbox, "artifacts");
+    mkdirSync(destination);
+
+    await expect(runNpm(
+      ["pack", "--silent", "--json", "--pack-destination", destination],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "fixtures/deterministic-worker.mjs must be a regular non-symlink file",
+      ),
+    });
+    expect(statSync(externalTarget).mode & 0o777).toBe(0o600);
+    expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
+  it("rejects a symlinked packaged ancestor without modifying its external target", async () => {
+    const sandbox = packageSandbox();
+    const externalFixtures = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-fixtures-")));
+    temporaryDirectories.push(externalFixtures);
+    const externalTarget = path.join(externalFixtures, "deterministic-worker.mjs");
+    writeFileSync(externalTarget, "external target\n", "utf8");
+    chmodSync(externalTarget, 0o600);
+    rmSync(path.join(sandbox, "fixtures"), { recursive: true });
+    symlinkSync(externalFixtures, path.join(sandbox, "fixtures"));
+    const destination = path.join(sandbox, "artifacts");
+    mkdirSync(destination);
+
+    await expect(runNpm(
+      ["pack", "--silent", "--json", "--pack-destination", destination],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path fixtures/deterministic-worker.mjs has symbolic-link component fixtures",
+      ),
+    });
+    expect(statSync(externalTarget).mode & 0o777).toBe(0o600);
+    expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
+  it("does not resolve package verification tools from ambient PATH", async () => {
+    const fakeBin = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-fake-bin-")));
+    temporaryDirectories.push(fakeBin);
+    const marker = path.join(fakeBin, "invoked");
+    for (const executable of ["npm", "tar"]) {
+      const fakeExecutable = path.join(fakeBin, executable);
+      writeFileSync(fakeExecutable, `#!/bin/sh\ntouch '${marker}'\nexit 97\n`, "utf8");
+      chmodSync(fakeExecutable, 0o755);
+    }
+
+    await execFileAsync(nodeExecutable, [
+      path.join(repositoryRoot, "scripts", "verify-package-contents.mjs"),
+    ], {
+      cwd: repositoryRoot,
+      env: { ...subprocessEnvironment, PATH: `${fakeBin}${path.delimiter}${subprocessEnvironment.PATH}` },
+      maxBuffer: 10 * 1_024 * 1_024,
+      timeout: 120_000,
+    });
+    expect(existsSync(marker)).toBe(false);
+  }, 130_000);
+
+  it("does not pass ambient npm configuration into package verification", async () => {
+    const result = await execFileAsync(nodeExecutable, [
+      path.join(repositoryRoot, "scripts", "verify-package-contents.mjs"),
+    ], {
+      cwd: repositoryRoot,
+      env: { ...subprocessEnvironment, npm_config_ignore_scripts: "true" },
+      maxBuffer: 10 * 1_024 * 1_024,
+      timeout: 120_000,
+    });
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("deterministic package files");
+  }, 130_000);
+
+  it("rejects a symlinked top-level source file before reading external content", async () => {
+    const sandbox = packageSandbox();
+    const externalRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-package-file-")));
+    temporaryDirectories.push(externalRoot);
+    const externalPackageJson = path.join(externalRoot, "package.json");
+    writeFileSync(externalPackageJson, "external content must not be parsed\n", "utf8");
+    rmSync(path.join(sandbox, "package.json"));
+    symlinkSync(externalPackageJson, path.join(sandbox, "package.json"));
+
+    await expect(run(
+      nodeExecutable,
+      [path.join(sandbox, "scripts", "verify-package-contents.mjs")],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path package.json must be a regular non-symlink file",
+      ),
+    });
+  }, 30_000);
+
+  it("rejects a symlinked source ancestor before reading external content", async () => {
+    const sandbox = packageSandbox();
+    const externalSource = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-source-")));
+    temporaryDirectories.push(externalSource);
+    writeFileSync(path.join(externalSource, "invalid.ts"), "external content must not be compiled\n", "utf8");
+    rmSync(path.join(sandbox, "src"), { recursive: true });
+    symlinkSync(externalSource, path.join(sandbox, "src"));
+
+    const verification = run(
+      nodeExecutable,
+      [path.join(sandbox, "scripts", "verify-package-contents.mjs")],
+      sandbox,
+    );
+    await expect(verification).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path src has symbolic-link component src",
+      ),
+    });
+    await expect(verification).rejects.toMatchObject({
+      stderr: expect.not.stringContaining("npm-cli.js"),
+    });
+  }, 30_000);
+
+  it("terminates package build subprocesses after their configured timeout", async () => {
+    const helper = pathToFileURL(path.join(repositoryRoot, "scripts", "run-command.mjs")).href;
+    const program = [
+      `import { runCommand } from ${JSON.stringify(helper)};`,
+      `runCommand(${JSON.stringify(nodeExecutable)}, ['-e', 'setInterval(() => {}, 1_000)'], {`,
+      `  cwd: ${JSON.stringify(repositoryRoot)},`,
+      "  environment: {},",
+      "  maxBuffer: 1_024,",
+      "  timeoutMs: 20,",
+      "});",
+    ].join("\n");
+
+    await expect(run(
+      nodeExecutable,
+      ["--input-type=module", "--eval", program],
+      repositoryRoot,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("timed out after 20ms"),
+    });
+  }, 30_000);
+
+  it("terminates package build subprocesses that exceed their output limit", async () => {
+    const helper = pathToFileURL(path.join(repositoryRoot, "scripts", "run-command.mjs")).href;
+    const noisyProgram = "process.stdout.write('x'.repeat(4_096))";
+    const program = [
+      `import { runCommand } from ${JSON.stringify(helper)};`,
+      `runCommand(${JSON.stringify(nodeExecutable)}, ['-e', ${JSON.stringify(noisyProgram)}], {`,
+      `  cwd: ${JSON.stringify(repositoryRoot)},`,
+      "  environment: {},",
+      "  maxBuffer: 128,",
+      "  timeoutMs: 1_000,",
+      "});",
+    ].join("\n");
+
+    await expect(run(
+      nodeExecutable,
+      ["--input-type=module", "--eval", program],
+      repositoryRoot,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("exceeded the 128-byte output limit"),
+    });
+  }, 30_000);
+
+  it("rejects a symlinked production-output ancestor during package verification", async () => {
+    const sandbox = packageSandbox();
+    await runNpm(["run", "build"], sandbox);
+    const externalRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-cli-")));
+    temporaryDirectories.push(externalRoot);
+    const externalCli = path.join(externalRoot, "cli");
+    const cliDirectory = path.join(sandbox, "dist", "src", "cli");
+    cpSync(cliDirectory, externalCli, { recursive: true });
+    rmSync(cliDirectory, { recursive: true });
+    symlinkSync(externalCli, cliDirectory);
+
+    await expect(runNpm(["run", "package:verify"], sandbox)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path dist/src/cli/main.js has symbolic-link component dist/src/cli",
+      ),
+    });
   }, 30_000);
 
   it.each([
@@ -256,10 +470,10 @@ describe("publishable CLI package", () => {
     )],
   ] as const)("rejects %s after a production build", async (_name, invalidate) => {
     const sandbox = packageSandbox();
-    await run("npm", ["run", "build"], sandbox);
+    await runNpm(["run", "build"], sandbox);
     invalidate(sandbox);
 
-    await expect(run("npm", ["run", "package:verify"], sandbox)).rejects.toMatchObject({
+    await expect(runNpm(["run", "package:verify"], sandbox)).rejects.toMatchObject({
       code: 1,
     });
   }, 30_000);

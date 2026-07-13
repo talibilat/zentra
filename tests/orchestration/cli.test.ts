@@ -638,6 +638,41 @@ describe("Zentra CLI", () => {
     ])).toBe(refsBefore);
   });
 
+  it.each([
+    ["focusedTimeoutMs", 0],
+    ["fullTimeoutMs", 1_800_001],
+    ["focusedTimeoutMs", 100.5],
+    ["fullTimeoutMs", "5000"],
+  ] as const)(
+    "rejects invalid %s configuration before journal, worktree, ref, or integration effects",
+    async (field, value) => {
+      const testFixture = await fixture();
+      const config = JSON.parse(readFileSync(testFixture.configPath, "utf8")) as {
+        validations: Record<string, unknown>;
+      };
+      config.validations[field] = value;
+      writeFileSync(testFixture.configPath, JSON.stringify(config), "utf8");
+      const refsBefore = await gitOk(testFixture.repositoryPath, [
+        "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
+      ]);
+
+      const result = await invoke(runArguments(testFixture, `task-invalid-${field}`));
+
+      expect(result).toMatchObject({
+        code: 1,
+        json: {
+          command: "task.run",
+          error: { code: "INVALID_CONFIG" },
+        },
+      });
+      expect(existsSync(testFixture.databasePath)).toBe(false);
+      expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+      expect(await gitOk(testFixture.repositoryPath, [
+        "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
+      ])).toBe(refsBefore);
+    },
+  );
+
   it("rejects multiple task-run projects before journal, worktree, or ref effects", async () => {
     const testFixture = await fixture();
     const config = JSON.parse(readFileSync(testFixture.configPath, "utf8")) as Record<string, unknown>;

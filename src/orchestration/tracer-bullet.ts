@@ -9,6 +9,12 @@ import type {
   ValidationRunner,
 } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
+import {
+  ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
+  artifactEvidenceSha256,
+  type ArtifactKind,
+  type PatchArtifactEvidence,
+} from "../contracts/artifact.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import {
   IntegrationExecutionError,
@@ -186,12 +192,15 @@ export class TracerBulletOrchestrator {
       await validateArtifact(lease, patch, this.git, gitOptions);
       const diffSha256 = sha256(inspected.diff);
 
-      this.tasks.append(
-        input.taskId,
-        "task.validation_started",
-        { patch, diffSha256 },
-        null,
-      );
+      this.recordArtifact(input.taskId, "patch", {
+        diff: inspected.diff,
+        diffSha256,
+        changedPath: patch.path,
+        changedContentSha256: patch.sha256,
+      } satisfies PatchArtifactEvidence, {
+        type: "task.validation_started",
+        payload: { patch, diffSha256 },
+      });
       stage = "validation";
       const validationInvocationId = randomUUID();
       const canonicalLeasePath = await realpath(lease.path);
@@ -202,48 +211,64 @@ export class TracerBulletOrchestrator {
         input.signal,
         { invocationId: validationInvocationId, subjectSha256: diffSha256 },
       );
+      if (validation.provenance.subjectSha256 !== diffSha256) {
+        this.recordArtifact(
+          input.taskId,
+          "validation_report",
+          validation,
+          {
+            type: "task.failed",
+            payload: {
+              stage,
+              reason: "focused validation report subject does not match the patch digest",
+              validation,
+            },
+          },
+        );
+        return this.current(input.taskId);
+      }
       const validationOutcome = failedValidationOutcome(validation);
       if (validationOutcome !== null) {
-        return this.terminate(
-          input.taskId,
-          validationOutcome,
-          stage,
-          "focused validation did not complete successfully",
-          { validation },
-        );
+        this.recordArtifact(input.taskId, "validation_report", validation, {
+          type: `task.${validationOutcome}`,
+          payload: {
+            stage,
+            reason: "focused validation did not complete successfully",
+            validation,
+          },
+        });
+        return this.current(input.taskId);
       }
       if (!isVerifiedValidationReport(validation, {
         invocationId: validationInvocationId,
         canonicalCwd: canonicalLeasePath,
         subjectSha256: diffSha256,
       })) {
-        return this.terminate(
-          input.taskId,
-          "failed",
-          stage,
-          "focused validation report provenance mismatch",
-          { validation },
-        );
+        this.recordArtifact(input.taskId, "validation_report", validation, {
+          type: "task.failed",
+          payload: { stage, reason: "focused validation report provenance mismatch", validation },
+        });
+        return this.current(input.taskId);
       }
       if (
         JSON.stringify(validation.command) !==
         JSON.stringify(project.validations.focused)
       ) {
-        return this.terminate(
-          input.taskId,
-          "failed",
-          stage,
-          "focused validation command does not match project configuration",
-          { validation },
-        );
+        this.recordArtifact(input.taskId, "validation_report", validation, {
+          type: "task.failed",
+          payload: {
+            stage,
+            reason: "focused validation command does not match project configuration",
+            validation,
+          },
+        });
+        return this.current(input.taskId);
       }
 
-      this.tasks.append(
-        input.taskId,
-        "task.review_requested",
-        { reviewerId: input.reviewerId, validation },
-        null,
-      );
+      this.recordArtifact(input.taskId, "validation_report", validation, {
+        type: "task.review_requested",
+        payload: { reviewerId: input.reviewerId, validation },
+      });
       stage = "review";
       const reviewInput: ReviewInput = {
         workerId: input.workerId,
@@ -254,24 +279,20 @@ export class TracerBulletOrchestrator {
       const decision = await this.reviewer.review(reviewInput, input.signal);
       const verifiedEvidence = this.reviews.verifyEvidence(reviewInput, decision);
       if (!verifiedEvidence.approved) {
-        return this.terminate(
-          input.taskId,
-          "denied",
-          stage,
-          verifiedEvidence.reason,
-          { review: verifiedEvidence },
-        );
+        this.recordArtifact(input.taskId, "review_report", verifiedEvidence, {
+          type: "task.denied",
+          payload: { stage, reason: verifiedEvidence.reason, review: verifiedEvidence },
+        });
+        return this.current(input.taskId);
       }
       const verifiedReview = this.reviews.verify(reviewInput, verifiedEvidence);
       if (verifiedReview.diffSha256 !== diffSha256) {
         throw new Error("verified review digest differs from inspected diff digest");
       }
-      this.tasks.append(
-        input.taskId,
-        "task.review_approved",
-        { review: verifiedReview },
-        null,
-      );
+      this.recordArtifact(input.taskId, "review_report", verifiedReview, {
+        type: "task.review_approved",
+        payload: { review: verifiedReview },
+      });
 
       stage = "commit";
       const sourceCommit = await this.worktrees.commit(
@@ -300,6 +321,7 @@ export class TracerBulletOrchestrator {
 
       stage = "integration";
       let receipt: IntegrationReceipt;
+      const prepared = { receipt: null as IntegrationReceipt | null };
       try {
         receipt = await this.integrations.integrate({
           project,
@@ -307,11 +329,16 @@ export class TracerBulletOrchestrator {
           review: verifiedReview,
           signal: input.signal,
           onPrepared: (preparedReceipt) => {
-            this.tasks.append(
+            prepared.receipt = preparedReceipt;
+            this.recordArtifact(
               input.taskId,
-              "task.integration_prepared",
-              { receipt: preparedReceipt },
-              null,
+              "integration_receipt",
+              preparedReceipt,
+              {
+                type: "task.integration_prepared",
+                payload: { receipt: preparedReceipt },
+              },
+              "prepared",
             );
           },
         });
@@ -328,16 +355,25 @@ export class TracerBulletOrchestrator {
         });
       }
       if (receipt.outcome !== "completed") {
-        return this.terminate(
+        const finalReceipt = prepared.receipt === null
+          ? receipt
+          : { ...prepared.receipt, outcome: receipt.outcome };
+        this.recordArtifact(
           input.taskId,
-          receipt.outcome,
-          stage,
-          "integration did not complete successfully",
+          "integration_receipt",
+          finalReceipt,
           {
-            receipt,
-            candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
+            type: `task.${receipt.outcome}`,
+            payload: {
+              stage,
+              reason: "integration did not complete successfully",
+              receipt: finalReceipt,
+              candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
+            },
           },
+          "final",
         );
+        return this.current(input.taskId);
       }
       try {
         await validateIntegrationReceipt({
@@ -479,6 +515,64 @@ export class TracerBulletOrchestrator {
 
   private integrationCleanupFailures(taskId: string): readonly unknown[] {
     return this.integrations.getCleanupFailures().filter((failure) => failure.taskId === taskId);
+  }
+
+  private recordArtifact(
+    taskId: string,
+    kind: ArtifactKind,
+    evidence: unknown,
+    following: { readonly type: string; readonly payload: unknown },
+    phase?: "prepared" | "final",
+  ): void {
+    const digest = artifactEvidenceSha256(kind, evidence);
+    const payload = this.artifactPayload(taskId, kind, evidence, digest, phase) as {
+      readonly artifact: {
+        readonly artifactId: string;
+        readonly kind: ArtifactKind;
+        readonly sha256: string;
+      };
+    };
+    this.tasks.appendBatch(taskId, [
+      {
+        type: ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
+        payload: {
+          artifactProtocolVersion: 1,
+          artifactId: payload.artifact.artifactId,
+          kind: payload.artifact.kind,
+          sha256: payload.artifact.sha256,
+        },
+        causationId: null,
+      },
+      { type: `artifact.${kind}_recorded`, payload, causationId: null },
+      { ...following, causationId: null },
+    ]);
+  }
+
+  private artifactPayload(
+    taskId: string,
+    kind: ArtifactKind,
+    evidence: unknown,
+    digest = artifactEvidenceSha256(kind, evidence),
+    phase?: "prepared" | "final",
+  ): unknown {
+    const logicalPaths: Record<ArtifactKind, string> = {
+      patch: "artifacts/patch.diff",
+      validation_report: "artifacts/focused-validation.json",
+      review_report: "artifacts/review-decision.json",
+      integration_receipt: "artifacts/integration-receipt.json",
+    };
+    return {
+      artifact: {
+        artifactId: randomUUID(),
+        taskId,
+        kind,
+        path: logicalPaths[kind],
+        sha256: digest,
+        createdAt: new Date().toISOString(),
+      },
+      evidence,
+      ...(phase === undefined ? {} : { phase }),
+    };
   }
 
   private current(taskId: string): TaskView {

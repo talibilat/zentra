@@ -1,0 +1,28 @@
+You are the OpenCode implementation agent for Zentra issue 019 (Medium, Pod C1).
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-files-019
+Branch: fix/predeploy-c1-files-019
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: AGENTS.md, docs/issues/019-medium-make-package-contents-deterministic.md, docs/execution/issue-016-implementation-report.md, package.json, scripts/build-package.mjs, scripts/package-files.mjs, scripts/verify-package.mjs.
+
+Context: issue 016 (production build + package lifecycle + tarball e2e) is integrated in this base. Follow its production output layout. Do NOT redesign the build. Issue 018 (license) is not yet landed; add the LICENSE to the allowlist prospectively but do NOT create a LICENSE file (issue 018 owns it) and do NOT set the `license` field.
+
+Implement issue 019: deterministic package contents.
+Acceptance criteria:
+- Add a narrow package `files` allowlist covering issue 016's binary and runtime output, required fixtures, declarations if supported, README, and LICENSE (when present).
+- Exclude tests, coverage, worktrees, planning documents, local databases, secrets, and stale build output.
+- Define and verify deterministic archive paths, file modes, and package metadata for identical source inputs.
+
+Required tests: package manifest snapshot or explicit allowlist test over `npm pack --json` output; forbidden-file canaries proven absent from the tarball (tests, .db, docs/execution, worktrees, source maps if unintended); build+pack twice from clean state and compare normalized file lists and content digests.
+
+Anticipate reviewer criteria: the allowlist must not accidentally include docs/execution, docs/issues, .worktrees, *.db, or test files; the twice-pack determinism check should normalize timestamps; do not promise byte-for-byte gzip identity unless tooling is normalized; verify the bin and required fixtures ARE included.
+
+Final verification: clean production build, `npm pack --dry-run`, inspect every tarball entry is required; pnpm test, pnpm check; issue 016's tarball install test still passes.
+
+Owned files ONLY: package.json (`files` allowlist + any package-content verification script wiring), a new package-content verification test/script, and the report. Do NOT change build scripts' behavior (016), do NOT add `os`/`cpu`/`engines`/`license` (020/021/018), do NOT create LICENSE.
+
+Commit after verification (concise message, no co-author trailer). Push -u origin fix/predeploy-c1-files-019.
+Create docs/execution/issue-019-implementation-report.md (standard sections).
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED.

@@ -1,0 +1,30 @@
+You are the OpenCode implementation agent for Zentra issue 006 (Medium, Pod B).
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-artifacts
+Branch: fix/predeploy-b-artifacts
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: AGENTS.md, docs/design/orchestrator.md, docs/issues/006-medium-record-typed-artifacts.md, src/contracts/artifact.ts, and docs/issues/009 (its review-evidence contract, already integrated).
+
+Context: issue 009 (content-aware review evidence contract) and issue 011 (explicit supervisor protocols) are already integrated in this branch's base. Issue 006 must consume the exact review evidence contract established by issue 009. Preserve artifact path semantics that a future issue 005 enhancement can extend.
+
+Implement issue 006: persist typed artifacts.
+Acceptance criteria:
+- Define explicit artifact-recorded event schemas for patch, validation report, review report, and integration receipt evidence.
+- Persist stable artifact IDs, task IDs, kinds, safe logical paths, content digests, and creation timestamps at the point each artifact becomes durable.
+- Bind artifact digests to the exact evidence consumed by validation, review, commit, integration, and completion.
+- Rebuild an artifact view from journal replay WITHOUT reading mutable worktree files.
+- Reject duplicate identities, contradictory digests, out-of-order artifacts, and lifecycle events that reference missing artifacts.
+
+Required tests: contract tests for every artifact kind + malformed payload; tracer replay tests enumerating all expected artifacts after completion and after each failure stage; tampered-journal tests (digest contradiction, missing references, duplicate IDs, invalid ordering).
+
+Anticipate reviewer criteria: replay must not depend on any mutable temporary path remaining present; digests must be computed over the exact bytes consumed (not copied from another field); ordering/uniqueness validation must fail closed with bounded deterministic errors; do not persist unbounded stdout/stderr/diff; do not introduce remote blob storage; do not replace lifecycle events with artifacts.
+
+Final verification: pnpm test, pnpm check, pnpm build; run one complete tracer task and show replay alone returns typed artifacts whose digests match the reviewed diff and completed receipt.
+
+Owned files ONLY: src/contracts/artifact.ts, src/orchestration/tracer-bullet.ts (artifact recording), task event definitions it requires, and related test files, plus the report. Do NOT edit process-supervisor.ts, validation-runner.ts, project-config.ts, reviewer-adapter.ts, package.json, sqlite-journal.ts, or docs/issues/ briefs. If a shared task-events file is also touched by projection/recovery, keep edits additive and minimal.
+
+Commit after verification passes (concise message, no co-author trailer). Push -u origin fix/predeploy-b-artifacts.
+Create docs/execution/issue-006-implementation-report.md (standard sections).
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED.

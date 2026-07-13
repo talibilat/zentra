@@ -1,0 +1,17 @@
+You are the independent OpenCode reviewer for Zentra issue 026 (Low, documentation-only). READ-ONLY single combined pass (spec + quality). Give a decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c2-docs-026
+Branch: fix/predeploy-c2-docs-026
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/026-low-update-stale-execution-documents.md
+- docs/execution/issue-026-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Confirm: unqualified stale claims (feature unmerged / main unchanged / no PR) are now snapshot-qualified or corrected; obsolete imperative "do not merge" instructions removed or historically framed; historical commit IDs and test numbers preserved (NOT modernized); added repository-relative links resolve; a reader can determine the current merge state unambiguously; no Git branches/tags/commits/PRs were altered; generated changelogs untouched.
+
+Give a decisive verdict: INTEGRATE or BLOCK (with exact file:line for any blocking issue). Return your verdict as your final text output.

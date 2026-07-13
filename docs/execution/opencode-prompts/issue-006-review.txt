@@ -1,0 +1,17 @@
+You are the independent OpenCode reviewer for Zentra issue 006 (Medium). READ-ONLY single combined pass (spec + code quality). Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-artifacts
+Branch: fix/predeploy-b-artifacts
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run state-changing commands.
+
+Read:
+- docs/issues/006-medium-record-typed-artifacts.md
+- docs/execution/issue-006-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Confirm: explicit artifact-recorded event schemas for patch, validation report, review report, and integration receipt; stable artifact IDs/taskIDs/kinds/safe logical paths/content digests/timestamps persisted at durability; digests bound to the exact evidence consumed by validation/review/commit/integration/completion; artifact view rebuilt from journal replay WITHOUT reading mutable worktree files; rejection of duplicate identities, contradictory digests, out-of-order artifacts, and lifecycle events referencing missing artifacts. Required tests exist (per-kind contract + malformed; replay enumerates all artifacts after completion and each failure stage; tampered-journal digest/missing/duplicate/ordering). Code quality: digests computed over exact bytes (not copied from another field); no dependence on a mutable temp path remaining; no unbounded stdout/stderr/diff persisted; fail-closed bounded deterministic errors; consumes the issue 009 review-evidence contract correctly.
+
+Give a decisive verdict: INTEGRATE or BLOCK (Critical/Important only, exact file:line). Return your verdict as your final text output.

@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
+  DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
+  MAX_VALIDATION_TIMEOUT_MS,
+  MIN_VALIDATION_TIMEOUT_MS,
   ProjectConfigSchema,
   type ProjectConfig,
 } from "../../src/projects/project-config.js";
@@ -41,6 +45,61 @@ describe("ProjectConfigSchema", () => {
       "--test",
       "test/greeting.test.mjs",
     ]);
+    expect(parsed.validations.focusedTimeoutMs).toBe(
+      DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
+    );
+    expect(parsed.validations.fullTimeoutMs).toBe(
+      DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
+    );
+  });
+
+  it.each([MIN_VALIDATION_TIMEOUT_MS, MAX_VALIDATION_TIMEOUT_MS])(
+    "accepts the inclusive timeout boundary %dms",
+    (timeoutMs) => {
+      const parsed = ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focusedTimeoutMs: timeoutMs,
+          fullTimeoutMs: timeoutMs,
+        },
+      });
+
+      expect(parsed.validations.focusedTimeoutMs).toBe(timeoutMs);
+      expect(parsed.validations.fullTimeoutMs).toBe(timeoutMs);
+    },
+  );
+
+  it.each([
+    ["below minimum", MIN_VALIDATION_TIMEOUT_MS - 1],
+    ["over maximum", MAX_VALIDATION_TIMEOUT_MS + 1],
+    ["negative", -1],
+    ["zero", 0],
+    ["fractional", MIN_VALIDATION_TIMEOUT_MS + 0.5],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["numeric string", String(MIN_VALIDATION_TIMEOUT_MS)],
+    ["null", null],
+    ["boolean", true],
+  ])("rejects an invalid %s timeout", (_case, timeoutMs) => {
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focusedTimeoutMs: timeoutMs,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          fullTimeoutMs: timeoutMs,
+        },
+      }),
+    ).toThrow();
   });
 
   it.each([
