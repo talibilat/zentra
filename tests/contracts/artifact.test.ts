@@ -189,6 +189,16 @@ describe("artifact recorded event contracts", () => {
     })).toThrow();
   });
 
+  it("measures the retained patch boundary in UTF-8 bytes", () => {
+    const oversizedByBytes = {
+      ...patch,
+      diff: "é".repeat(600_000),
+      diffSha256: digest("é".repeat(600_000)),
+    };
+
+    expect(() => artifactEvent("patch", 4, oversizedByBytes)).toThrow();
+  });
+
   it("rejects unbounded or contradictory validation timeout evidence", () => {
     const recorded = artifactEvent("validation_report", 6, validation);
     const payload = recorded.payload as {

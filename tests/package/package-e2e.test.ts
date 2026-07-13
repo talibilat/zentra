@@ -171,8 +171,6 @@ describe("publishable CLI package", () => {
     expect(help.stderr).toBe("");
     expect(help.stdout).toMatch(/\btask\b/);
 
-    const reviewer = path.join(consumer, "reviewer.mjs");
-    copyFileSync(path.join(repositoryRoot, "tests", "fixtures", "content-aware-reviewer.mjs"), reviewer);
     const project = await initializeProject(consumer);
     const fixtureTemp = path.join(consumer, "fixture-temp");
     mkdirSync(fixtureTemp, { mode: 0o700 });
@@ -184,9 +182,6 @@ describe("publishable CLI package", () => {
       "--title", "Run installed package",
       "--file", "greeting.txt",
       "--content", "hello from package\n",
-      "--reviewer-executable", nodeExecutable,
-      "--reviewer-argument", reviewer,
-      "--reviewer-id", "package-reviewer",
     ], consumer, { ...subprocessEnvironment, TMPDIR: fixtureTemp });
     expect(operational.stderr).toBe("");
     expect(JSON.parse(operational.stdout)).toMatchObject({

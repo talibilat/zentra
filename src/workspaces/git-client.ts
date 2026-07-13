@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
+
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
 
-const MAX_CAPTURED_BYTES_PER_STREAM = 1024 * 1024;
+const MAX_CAPTURED_BYTES_PER_STREAM = MAX_RETAINED_ARTIFACT_BYTES;
 
 export interface CommandResult {
   readonly stdout: string;
