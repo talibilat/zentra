@@ -1,0 +1,52 @@
+You are the OpenCode implementation agent for Zentra issue 009.
+
+Repository worktree:
+/Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+
+Branch:
+fix/predeploy-b-review-artifacts
+
+Read first:
+- AGENTS.md
+- docs/design/orchestrator.md
+- docs/issues/009-high-require-content-aware-independent-review.md
+
+Exclusive ownership:
+- src/reviews/reviewer-adapter.ts
+- src/cli/main.ts (only the reviewer composition and reviewer configuration; keep edits minimal and confined to review wiring)
+- fixtures/deterministic-reviewer.mjs
+- Test files and fixtures you add that cover the reviewer protocol and CLI reviewer configuration.
+
+Forbidden ownership:
+- src/workers/process-supervisor.ts (issue 011).
+- src/projects/project-config.ts, src/capabilities/validation-runner.ts (issue 001).
+- src/journal/sqlite-journal.ts (issue 013).
+- The integration worktree.
+- docs/issues/ briefs. package.json, pnpm-lock.yaml, tsconfig.json, workflow files.
+- Note: another writer (issue 001) is concurrently editing README.md and AGENTS.md. Do NOT edit README.md or AGENTS.md. Do not edit src/capabilities/validation-runner.ts.
+
+Requirements:
+1. Reproduce the failure sequence first: the bundled reviewer approves solely because worker and reviewer identities differ, without inspecting the diff or validation evidence. Write a failing adversarial test proving a dangerous diff that passes focused validation is approved.
+2. Follow test-driven development.
+3. Implement only issue 009.
+4. Satisfy every acceptance criterion: the deployable CLI defaults to DENY when no content-aware reviewer is configured; the independently identified reviewer receives the bounded exact diff and bounded validation evidence via STDIN (not argv); the reviewer returns an explicit content-based decision bound to the exact diff and validation evidence digests; reviewer output is strictly bounded, schema-validated, single-decision, and fails closed on timeout, truncation, malformed content, or evidence-digest mismatch; the deterministic identity-only reviewer remains test-only and cannot be selected accidentally in a production package.
+5. Add every required test: CLI e2e proving missing reviewer configuration denies execution before commit or integration; reviewer protocol tests for actual diff inspection, stdin bounds, evidence-digest mismatch, timeout, malformed output, and same-identity denial; an adversarial diff that passes focused validation but is denied by a configured content-aware reviewer.
+6. Final verification: run pnpm test, pnpm check, pnpm build. Inspect that the production CLI cannot silently use the deterministic reviewer fixture. Run a complete task with no reviewer (deny-by-default) and with a configured reviewer (content-bound approval).
+7. Run pnpm check.
+8. Run focused tests covering the reviewer subsystem and CLI review wiring.
+9-16 (control rules): Do not merge branches. Do not modify main or fix/pre-deployment. Do not force-push or amend. Do not create issues or pull requests. Do not answer human-decision blockers. Preserve exact evidence for any uncertain effect. Commit only after verification passes with a concise issue-specific message and no co-author trailer. Push fix/predeploy-b-review-artifacts with upstream tracking.
+
+Non-goals: do not prescribe a model vendor; do not let reviewer reasoning grant execution authority beyond a bounded decision; do not remove digest verification or worker-reviewer identity separation; authenticated external reviewer protocols, cryptographic challenges, signing, and anti-replay are out of scope.
+
+Create docs/execution/issue-009-implementation-report.md in your worktree with:
+- Status
+- Root cause
+- Files changed
+- Tests added
+- Commands and results
+- Acceptance criteria evidence
+- Security boundary
+- Remaining concerns
+- Commit identity
+
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED with a concise summary.

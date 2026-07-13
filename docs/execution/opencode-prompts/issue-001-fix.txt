@@ -1,0 +1,22 @@
+You are the OpenCode fix agent for Zentra issue 001, addressing independent review findings in this worktree. This is engineering work on input validation and documentation accuracy for a local developer CLI. Keep reasoning concrete: path resolution, file-identity checks, and precise wording.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+Branch: fix/predeploy-a-001
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; the implementation is already committed (2e91baf). Add fixes on top with new commits (no amend, no force-push).
+
+Context: the repository owner selected "Trusted-Project MVP Mode": approved validation executables run with the CLI user's operating-system authority; the allowlist reduces accidental use of unintended executables and is NOT a filesystem sandbox; deployment is restricted to owner-controlled projects. This accepted authority model is the frame for the residual-risk decision below.
+
+The independent code-quality review found these REQUIRED FIXES:
+1. Reduce the check-to-exec race for the approved executable. Immediately before spawning, re-resolve the canonical real path and verify the executable's file identity (for example device+inode via fs.stat and a content hash) matches what was approved, failing closed on mismatch. This shrinks the time-of-check/time-of-use window for a replaced target.
+2. Add explicit rejection tests for dot-segment paths (e.g. ./foo, a/./b), trailing-slash spellings, and platform-relevant case-variant spellings, asserting rejection before process creation.
+3. Add regression tests that (a) replace the approved target at the same pathname and (b) attempt replacement between validation and process creation, asserting fail-closed behavior with the identity/content re-verification in place.
+4. Correct docs/execution/issue-001-implementation-report.md so its completion claim matches the ACTUAL implemented guarantee. Explicitly document the residual limitation: within Trusted-Project MVP Mode (host-user authority, owner-controlled projects), a fully atomic verified-object execution is not provided on the supported platform; the pre-spawn identity/content re-verification shrinks but does not eliminate the TOCTOU window, and this residual is within the accepted host-user-authority model. Do NOT claim absolute replaced-target rejection beyond what is implemented. Do NOT edit the issue brief in docs/issues/.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and the focused project-config and validation-runner tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-a-001
+
+Owned files only: src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md, docs/execution/issue-001-implementation-report.md, and the related test files. Do not touch anything else. Do NOT edit docs/issues/ briefs.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed, the branch is pushed, and a one-line note on the residual TOCTOU disposition.

@@ -1,16 +1,22 @@
 # Zentra MVP Execution Handoff
 
+Immutable historical snapshot: This document preserves the execution state as of commit `5060c2f` on 2026-07-12.
+The MVP was subsequently merged into `main` by commit `b49f17a` through pull request #1 on 2026-07-12.
+See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for current remediation status.
+
 This handoff records the completed Zentra-only local orchestrator MVP.
-The implementation remains on `feature/zentra-mvp` and must not be merged to `main` without a separate human decision.
+At the time of this snapshot, the implementation remained on `feature/zentra-mvp` pending a separate human merge decision.
 
 ## Branch State
+
+The following repository state is historical and applies only to the snapshot identified above.
 
 - Integration worktree: `/Users/talibilat/Documents/Projects/zentra/.worktrees/zentra-mvp`.
 - Integration branch: `feature/zentra-mvp`.
 - Final implementation commit before this documentation update: `5060c2f`.
-- Remote branch: `origin/feature/zentra-mvp` will contain this handoff and the final report after the final push.
-- `main` remains unchanged by the MVP execution.
-- No pull request or GitHub issue was created.
+- Remote branch: `origin/feature/zentra-mvp` was expected to contain this handoff and the final report after the final push.
+- At this snapshot, `main` remained unchanged by the MVP execution.
+- At this snapshot, no pull request or GitHub issue had been created.
 
 ## Completed Work
 
@@ -53,9 +59,11 @@ It covers the complete tracer bullet, exact event replay, cancellation without s
 - The deterministic worker intentionally supports one attested root-level file target.
 - One defense-in-depth Minor remains around malformed missing payload fields sharing an `undefined` canonical snapshot value; strict recovery schemas fail closed on those streams.
 
-## Restrictions
+## Historical Execution Constraints
 
-- Do not merge `feature/zentra-mvp` into `main` as part of this execution.
-- Do not add real coding harnesses, distributed execution, Zoe voice, email, meetings, personal operations, or device capabilities under this MVP.
-- Do not delete the retained worktrees or branches without explicit user authorization.
-- Do not automatically retry an uncertain effect.
+These constraints governed the execution recorded by this snapshot and are not current repository-state instructions.
+
+- Merging `feature/zentra-mvp` into `main` was excluded from this execution.
+- Real coding harnesses, distributed execution, Zoe voice, email, meetings, personal operations, and device capabilities were excluded from this MVP.
+- Deleting the retained worktrees or branches required explicit user authorization during this execution.
+- Uncertain effects were not retried automatically.

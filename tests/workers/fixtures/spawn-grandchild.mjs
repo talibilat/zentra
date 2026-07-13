@@ -5,14 +5,20 @@ import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
 const pidFile = process.argv[2];
+const mode = process.argv[3] ?? "wait";
 if (!pidFile) {
   console.error("spawn-grandchild: missing pid file argument");
   process.exit(1);
 }
 
+const grandchildScript =
+  mode === "exceed-output"
+    ? 'process.stdout.write("x".repeat(4096)); setInterval(() => {}, 1000);'
+    : "setInterval(() => {}, 1000);";
+
 const grandchild = spawn(
   process.execPath,
-  ["-e", "setInterval(() => {}, 1000);"],
+  ["-e", grandchildScript],
   { stdio: "inherit" },
 );
 

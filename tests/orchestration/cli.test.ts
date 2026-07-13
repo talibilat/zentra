@@ -30,6 +30,10 @@ import { GitClient } from "../../src/workspaces/git-client.js";
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
 const ATTACKER_MARKER = "ATTACKER_MARKER_DO_NOT_PRINT";
+const CONTENT_AWARE_REVIEWER = path.resolve(
+  import.meta.dirname,
+  "../fixtures/content-aware-reviewer.mjs",
+);
 
 interface Fixture {
   readonly baseDirectory: string;
@@ -73,8 +77,13 @@ async function fixture(): Promise<Fixture> {
   mkdirSync(path.join(repositoryPath, "test"));
   writeFileSync(path.join(repositoryPath, "greeting.txt"), "hello\n", "utf8");
   writeFileSync(
+    path.join(repositoryPath, "auth.ts"),
+    "export const requireAuthentication = true;\n",
+    "utf8",
+  );
+  writeFileSync(
     path.join(repositoryPath, "test", "greeting.test.mjs"),
-    'import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\ntest("greeting", async () => assert.equal(await readFile(new URL("../greeting.txt", import.meta.url), "utf8"), "hello from CLI\\n"));\n',
+    'import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\ntest("greeting", async () => assert.match(await readFile(new URL("../greeting.txt", import.meta.url), "utf8"), /^hello(?: from CLI)?\\n$/));\n',
     "utf8",
   );
   writeFileSync(
@@ -120,8 +129,12 @@ async function invoke(
   };
 }
 
-function runArguments(testFixture: Fixture, taskId = "task-cli"): readonly string[] {
-  return [
+function runArguments(
+  testFixture: Fixture,
+  taskId = "task-cli",
+  configureReviewer = true,
+): readonly string[] {
+  const args = [
     "task", "run",
     "--config", testFixture.configPath,
     "--database", testFixture.databasePath,
@@ -130,6 +143,14 @@ function runArguments(testFixture: Fixture, taskId = "task-cli"): readonly strin
     "--file", "greeting.txt",
     "--content", "hello from CLI\n",
   ];
+  if (configureReviewer) {
+    args.push(
+      "--reviewer-executable", process.execPath,
+      "--reviewer-argument", CONTENT_AWARE_REVIEWER,
+      "--reviewer-id", "content-reviewer-1",
+    );
+  }
+  return args;
 }
 
 function fileSha256(filePath: string): string {
@@ -147,7 +168,10 @@ function databaseSchema(databasePath: string): unknown[] {
   }
 }
 
-function copiedSourceFixtureLayout(): { readonly anchor: URL; readonly reviewer: string } {
+function copiedSourceFixtureLayout(): {
+  readonly anchor: URL;
+  readonly worker: string;
+} {
   const baseDirectory = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-fixture-layout-")));
   temporaryDirectories.push(baseDirectory);
   const moduleDirectory = path.join(baseDirectory, "src", "fixtures");
@@ -155,15 +179,11 @@ function copiedSourceFixtureLayout(): { readonly anchor: URL; readonly reviewer:
   mkdirSync(moduleDirectory, { recursive: true });
   mkdirSync(fixtureDirectory);
   const root = path.resolve(import.meta.dirname, "../..");
-  copyFileSync(
-    path.join(root, "fixtures", "deterministic-worker.mjs"),
-    path.join(fixtureDirectory, "deterministic-worker.mjs"),
-  );
-  const reviewer = path.join(fixtureDirectory, "deterministic-reviewer.mjs");
-  copyFileSync(path.join(root, "fixtures", "deterministic-reviewer.mjs"), reviewer);
+  const worker = path.join(fixtureDirectory, "deterministic-worker.mjs");
+  copyFileSync(path.join(root, "fixtures", "deterministic-worker.mjs"), worker);
   const anchorPath = path.join(moduleDirectory, "bundled-fixtures.ts");
   writeFileSync(anchorPath, "// isolated resolver anchor\n", "utf8");
-  return { anchor: pathToFileURL(anchorPath), reviewer };
+  return { anchor: pathToFileURL(anchorPath), worker };
 }
 
 describe("Zentra CLI", () => {
@@ -214,6 +234,59 @@ describe("Zentra CLI", () => {
     ]);
     expect(status.code).toBe(0);
     expect(status.json).toEqual({ command: "task.status", task: run.json.task });
+  });
+
+  it("denies by default without reviewer configuration before commit or integration", async () => {
+    const testFixture = await fixture();
+    const initialHead = await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"]);
+
+    const result = await invoke(runArguments(testFixture, "task-no-reviewer", false));
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: {
+        command: "task.run",
+        outcome: "denied",
+        task: {
+          taskId: "task-no-reviewer",
+          lifecycle: "terminal",
+          terminalOutcome: "denied",
+        },
+      },
+    });
+    expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(initialHead);
+    expect((await new GitClient().run(testFixture.repositoryPath, [
+      "show-ref",
+      "--verify",
+      "refs/heads/zentra/integration",
+    ])).exitCode).not.toBe(0);
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
+  it("denies an adversarial diff that passes focused validation without committing it", async () => {
+    const testFixture = await fixture();
+    const initialHead = await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"]);
+    const args = [
+      ...runArguments(testFixture, "task-dangerous-review"),
+      "--file", "auth.ts",
+      "--content", "export const requireAuthentication = false;\n",
+    ];
+
+    const result = await invoke(args);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: {
+        command: "task.run",
+        outcome: "denied",
+        task: { terminalOutcome: "denied" },
+      },
+    });
+    expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(initialHead);
+    expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:auth.ts"]))
+      .toBe("export const requireAuthentication = true;");
   });
 
   it("returns a successful no-op recovery decision for a completed task", async () => {
@@ -565,6 +638,41 @@ describe("Zentra CLI", () => {
     ])).toBe(refsBefore);
   });
 
+  it.each([
+    ["focusedTimeoutMs", 0],
+    ["fullTimeoutMs", 1_800_001],
+    ["focusedTimeoutMs", 100.5],
+    ["fullTimeoutMs", "5000"],
+  ] as const)(
+    "rejects invalid %s configuration before journal, worktree, ref, or integration effects",
+    async (field, value) => {
+      const testFixture = await fixture();
+      const config = JSON.parse(readFileSync(testFixture.configPath, "utf8")) as {
+        validations: Record<string, unknown>;
+      };
+      config.validations[field] = value;
+      writeFileSync(testFixture.configPath, JSON.stringify(config), "utf8");
+      const refsBefore = await gitOk(testFixture.repositoryPath, [
+        "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
+      ]);
+
+      const result = await invoke(runArguments(testFixture, `task-invalid-${field}`));
+
+      expect(result).toMatchObject({
+        code: 1,
+        json: {
+          command: "task.run",
+          error: { code: "INVALID_CONFIG" },
+        },
+      });
+      expect(existsSync(testFixture.databasePath)).toBe(false);
+      expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+      expect(await gitOk(testFixture.repositoryPath, [
+        "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
+      ])).toBe(refsBefore);
+    },
+  );
+
   it("rejects multiple task-run projects before journal, worktree, or ref effects", async () => {
     const testFixture = await fixture();
     const config = JSON.parse(readFileSync(testFixture.configPath, "utf8")) as Record<string, unknown>;
@@ -827,7 +935,7 @@ describe("Zentra CLI", () => {
       "--database", testFixture.databasePath,
       "--task-id", "task-status-no-fixtures",
     ], process, invalidAnchor);
-    rmSync(path.dirname(layout.reviewer), { recursive: true, force: true });
+    rmSync(path.dirname(layout.worker), { recursive: true, force: true });
 
     const result = await invoke([
       "task", "status",
@@ -850,7 +958,7 @@ describe("Zentra CLI", () => {
     const testFixture = await fixture();
     await invoke(runArguments(testFixture, "task-recover-modified-fixtures"));
     const layout = copiedSourceFixtureLayout();
-    writeFileSync(layout.reviewer, "modified reviewer\n", "utf8");
+    writeFileSync(layout.worker, "modified worker\n", "utf8");
     const invalidAnchor = pathToFileURL(path.join(testFixture.baseDirectory, "wrong-layout.ts"));
     const invalidLayout = await invoke([
       "recover",
@@ -877,18 +985,18 @@ describe("Zentra CLI", () => {
     });
   });
 
-  it.each(["invalid layout", "missing fixture", "modified reviewer"] as const)(
+  it.each(["invalid layout", "missing worker", "modified worker"] as const)(
     "rejects %s before the task journal, reviewer adapter, or worktree is reached",
     async (failure) => {
       const testFixture = await fixture();
       const layout = copiedSourceFixtureLayout();
       let anchor = layout.anchor;
       if (failure === "invalid layout") {
-        anchor = pathToFileURL(path.join(path.dirname(layout.reviewer), "bundled-fixtures.ts"));
-      } else if (failure === "missing fixture") {
-        rmSync(layout.reviewer);
+        anchor = pathToFileURL(path.join(path.dirname(layout.worker), "bundled-fixtures.ts"));
+      } else if (failure === "missing worker") {
+        rmSync(layout.worker);
       } else {
-        writeFileSync(layout.reviewer, "process.exit(0);\n", "utf8");
+        writeFileSync(layout.worker, "process.exit(0);\n", "utf8");
       }
 
       const result = await invoke(
@@ -934,7 +1042,7 @@ describe("built CLI help", () => {
     expect(result.stdout).toMatch(/\brecover\b/);
   });
 
-  it("runs the bundled worker and reviewer through the built entry point", async () => {
+  it("runs the bundled worker and configured content-aware reviewer through the built entry point", async () => {
     const root = path.resolve(import.meta.dirname, "../..");
     const testFixture = await fixture();
 
@@ -950,6 +1058,14 @@ describe("built CLI help", () => {
       outcome: "completed",
       task: { taskId: "task-built", terminalOutcome: "completed" },
     });
+  });
+
+  it("does not wire the deterministic test reviewer into the built production CLI", () => {
+    const root = path.resolve(import.meta.dirname, "../..");
+    const builtCli = readFileSync(path.join(root, "dist", "src", "cli", "main.js"), "utf8");
+
+    expect(builtCli).not.toContain("deterministic-reviewer.mjs");
+    expect(builtCli).not.toContain("DeterministicReviewerAdapter");
   });
 
   it("executes help through a real symlink to the built entry point", async () => {

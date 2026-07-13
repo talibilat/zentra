@@ -1,0 +1,28 @@
+You are a fresh independent OpenCode reviewer performing the CONFIRMATION re-review of Zentra issue 013 (LOW severity) after fixes. READ-ONLY. Covers specification and code-quality/security.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-d-persistence
+Branch: fix/predeploy-d-persistence
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/013-low-bound-sqlite-read-work-before-aggregate-scan.md
+- docs/execution/issue-013-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+OUT OF SCOPE - do NOT re-raise as a blocker (dispositioned): better-sqlite3 exposes no async statement interrupt/progress handler, so a hard mid-statement time interrupt is unavailable; the bounded-work guarantee is STRUCTURAL (db/WAL/shm size admission limits + indexed limit-plus-one discovery). This is an accepted residual for this LOW-severity issue.
+
+Confirm these were correctly done:
+1. Production stream and global reads use explicit column projection (no SELECT *), preventing materialization of extra/generated columns.
+2. Monotonic clock for operation deadlines; invalid durations guarded.
+3. Production discovery query plan uses the expected index (SEARCH ... USING INDEX) and fails closed if not the bounded plan.
+4. Malicious-read test measures PEAK memory in an isolated subprocess and stays within budget; append-guard interruption translates to an operation-specific failure with rollback/atomicity.
+5. limit-plus-one binding = MAX_JOURNAL_READ_EVENTS + 1 verified on the actual production statements.
+
+Give a decisive verdict:
+- INTEGRATE (findings resolved or dispositioned, no new blocking defect) or BLOCK (a specific new Critical/Important defect in owned scope, not the out-of-scope item above).
+- List any remaining blocking findings with exact file:line.
+
+Return your verdict and findings as your final text output.

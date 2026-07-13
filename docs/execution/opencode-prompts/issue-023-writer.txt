@@ -1,0 +1,30 @@
+You are the OpenCode implementation agent for Zentra issue 023 (Medium, Pod A).
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-023
+Branch: fix/predeploy-a-023
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash.
+
+Read first: AGENTS.md, docs/design/orchestrator.md, docs/issues/023-medium-configure-validation-timeouts.md.
+
+Context: issue 001 (exact-executable policy) and issue 011 (explicit supervisor protocol kinds) are already integrated in this branch's base. Work on top of them; keep their behavior intact.
+
+Implement issue 023: separate focused and full validation timeouts.
+Acceptance criteria:
+- Add separate focused and full validation timeout fields to project configuration (src/projects/project-config.ts).
+- Define secure defaults, minimums, and hard maximums in milliseconds with integer validation. Reject invalid, negative, fractional, zero, excessively large, or ambiguous values BEFORE any process starts.
+- Pass the selected bounded timeout through validation provenance/diagnostics so an operator can explain a timeout (src/capabilities/validation-runner.ts).
+- Keep process termination and descendant confirmation consistent with issue 011 (do not change the supervisor).
+- Do NOT change the CLI worker timeout constant (out of scope).
+
+Required tests: schema boundary tests (defaults, min, max, invalid); e2e focused vs full with distinct budgets; config errors occur before journal or Git effects; timeout tests verifying terminal outcome, bounded elapsed time, and no surviving process group.
+
+Anticipate reviewer criteria (satisfy up front to avoid rework): use a monotonic basis for any elapsed measurement in tests; validate integers strictly (reject NaN, Infinity, fractional, negative, zero, and values over the hard max); ensure the selected timeout is recorded in diagnostics/provenance and asserted in a test; ensure focused and full both route through the same policy; make README/schema examples agree exactly with the implemented bounds.
+
+Final verification: pnpm test, pnpm check, pnpm build; focused project-config and validation-runner tests.
+
+Owned files ONLY: src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md (timeout docs only), and related test files, plus the report. Do NOT edit process-supervisor.ts, tracer-bullet.ts, reviewer-adapter.ts, package.json, or docs/issues/ briefs.
+
+Commit after verification passes (concise message, no co-author trailer). Push -u origin fix/predeploy-a-023.
+Create docs/execution/issue-023-implementation-report.md (Status, Root cause, Files changed, Tests added, Commands and results, Acceptance criteria evidence, Security boundary, Remaining concerns, Commit identity).
+Return DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED.

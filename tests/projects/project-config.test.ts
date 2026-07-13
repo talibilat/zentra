@@ -1,8 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
+  DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
+  MAX_VALIDATION_TIMEOUT_MS,
+  MIN_VALIDATION_TIMEOUT_MS,
   ProjectConfigSchema,
   type ProjectConfig,
 } from "../../src/projects/project-config.js";
@@ -14,20 +18,88 @@ const validConfig = {
   integrationBranch: "zentra/integration",
   worktreeRoot: "/absolute/path/to/worktrees",
   validations: {
-    focused: ["node", "--test", "test/greeting.test.mjs"],
-    full: ["node", "--test"],
+    focused: [process.execPath, "--test", "test/greeting.test.mjs"],
+    full: [process.execPath, "--test"],
   },
 };
+
+function withDotSegment(executable: string): string {
+  const directory = path.dirname(executable);
+  return `${directory}${path.sep}.${path.sep}${path.basename(executable)}`;
+}
+
+function withCaseVariant(executable: string): string {
+  return executable.replace(/[A-Za-z]/, (character) =>
+    character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase(),
+  );
+}
 
 describe("ProjectConfigSchema", () => {
   it("accepts the supported configuration", () => {
     const parsed = ProjectConfigSchema.parse(validConfig);
     expect(parsed.projectId).toBe("fixture-project");
     expect(parsed.validations.focused).toEqual([
-      "node",
+      process.execPath,
       "--test",
       "test/greeting.test.mjs",
     ]);
+    expect(parsed.validations.focusedTimeoutMs).toBe(
+      DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
+    );
+    expect(parsed.validations.fullTimeoutMs).toBe(
+      DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
+    );
+  });
+
+  it.each([MIN_VALIDATION_TIMEOUT_MS, MAX_VALIDATION_TIMEOUT_MS])(
+    "accepts the inclusive timeout boundary %dms",
+    (timeoutMs) => {
+      const parsed = ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focusedTimeoutMs: timeoutMs,
+          fullTimeoutMs: timeoutMs,
+        },
+      });
+
+      expect(parsed.validations.focusedTimeoutMs).toBe(timeoutMs);
+      expect(parsed.validations.fullTimeoutMs).toBe(timeoutMs);
+    },
+  );
+
+  it.each([
+    ["below minimum", MIN_VALIDATION_TIMEOUT_MS - 1],
+    ["over maximum", MAX_VALIDATION_TIMEOUT_MS + 1],
+    ["negative", -1],
+    ["zero", 0],
+    ["fractional", MIN_VALIDATION_TIMEOUT_MS + 0.5],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["numeric string", String(MIN_VALIDATION_TIMEOUT_MS)],
+    ["null", null],
+    ["boolean", true],
+  ])("rejects an invalid %s timeout", (_case, timeoutMs) => {
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focusedTimeoutMs: timeoutMs,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          fullTimeoutMs: timeoutMs,
+        },
+      }),
+    ).toThrow();
   });
 
   it.each([
@@ -186,20 +258,43 @@ describe("ProjectConfigSchema", () => {
     }
   });
 
-  it("still accepts env-prefixed non-shell commands", () => {
-    const parsed = ProjectConfigSchema.parse({
-      ...validConfig,
-      validations: {
-        ...validConfig.validations,
-        focused: ["env", "NODE_ENV=test", "node", "--test"],
-      },
-    });
-    expect(parsed.validations.focused).toEqual([
-      "env",
-      "NODE_ENV=test",
-      "node",
-      "--test",
-    ]);
+  it.each([
+    ["absolute executable outside the allowlist", "/bin/echo"],
+    ["relative executable", "node"],
+    ["dot-segment executable", withDotSegment(process.execPath)],
+    ["trailing-slash executable", `${process.execPath}${path.sep}`],
+    ["case-variant executable", withCaseVariant(process.execPath)],
+    ["env-prefixed executable", "/usr/bin/env"],
+  ])("rejects an %s", (_case, executable) => {
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validConfig,
+        validations: {
+          ...validConfig.validations,
+          focused: [executable, process.execPath, "--test"],
+        },
+      }),
+    ).toThrow(/approved canonical absolute path/);
+  });
+
+  it("rejects a symlink to the approved executable", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "zentra-executable-"));
+    const executable = path.join(dir, "node-link");
+    symlinkSync(process.execPath, executable);
+
+    try {
+      expect(() =>
+        ProjectConfigSchema.parse({
+          ...validConfig,
+          validations: {
+            ...validConfig.validations,
+            focused: [executable, "--test"],
+          },
+        }),
+      ).toThrow(/approved canonical absolute path/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

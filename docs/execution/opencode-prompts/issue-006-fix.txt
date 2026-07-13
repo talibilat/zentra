@@ -1,0 +1,20 @@
+You are the OpenCode fix agent for Zentra issue 006, addressing the blocking review findings.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-artifacts
+Branch: fix/predeploy-b-artifacts
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+Fix these findings:
+1. Digest binding defeat: the patch artifact digest currently copies evidence.diffSha256 instead of hashing the retained EXACT diff bytes. Change it so the artifact digest is computed from the exact bytes that were hashed (the exact diff bytes at src/orchestration/tracer-bullet.ts:192), and make those exact bytes (or their independently-recomputable digest) available to replay so contradiction detection still works even if BOTH artifact.sha256 and evidence.diffSha256 are altered. Replay must be able to detect a contradiction between the recorded artifact digest and the evidence.
+2. Bounded values/errors: enforce size bounds on attacker-controllable identity and evidence strings in src/contracts/artifact.ts (around lines 21, 186, 193). Replay/validation error messages must NOT interpolate an unbounded artifact ID or a raw unbounded Zod diagnostic; produce bounded, deterministic error messages.
+3. Test coverage: add malformed kind-specific evidence tests for ALL four artifact kinds (patch, validation report, review report, integration receipt), not only patch metadata.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-b-artifacts
+- Update docs/execution/issue-006-implementation-report.md with the fixes and new commit ids.
+
+Owned files: src/contracts/artifact.ts, src/orchestration/tracer-bullet.ts (artifact recording only), related task-event/contract test files, plus the report. Do NOT edit process-supervisor.ts, validation-runner.ts, project-config.ts, reviewer-adapter.ts, package.json, or sqlite-journal.ts.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

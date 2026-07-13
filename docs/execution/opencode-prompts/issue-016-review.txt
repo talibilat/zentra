@@ -1,0 +1,22 @@
+You are the independent OpenCode reviewer for Zentra issue 016 (Critical, packaging). READ-ONLY. Cover BOTH specification compliance AND code-quality/security/supply-chain in this single pass, then give a decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-c1-package
+Branch: fix/predeploy-c1-package
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat, and non-mutating npm pack --dry-run in a temp copy if needed - but do NOT publish or install globally).
+- Do NOT modify, stage, commit, push, or run any state-changing command in the worktree.
+
+Read:
+- AGENTS.md
+- docs/issues/016-critical-build-and-test-publishable-cli-package.md
+- docs/execution/issue-016-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+OUT OF SCOPE (dispositioned to other issues) - do NOT block on these: the `files` allowlist (issue 019), `os`/`cpu` platform metadata (issue 020), `engines` upper bound (issue 021), `license`/SPDX (issue 018), distribution channel (issue 017), CI workflow (issue 024).
+
+Confirm specification: a clean production build emits the runtime CLI at the bin path; package lifecycle (prepack/prepare) builds before tarball selection; package creation fails when the binary or a required bundled fixture is missing/stale; the tarball installs into an empty consumer project and runs the binary WITHOUT repository-relative files; operational execution (not just --help) works from the install, including a SQLite-backed command; shebang/executable-mode/ESM/native better-sqlite3/fixture lookup verified; a negative test proves packaging fails on missing/stale output.
+
+Review quality/security: prepack cannot silently ship stale dist; build is deterministic; no source-tree dependence in the installed artifact; scripts fail closed; no arbitrary code execution or unsafe shell in the packaging scripts; native addon loads from the installed location.
+
+Give a decisive verdict: INTEGRATE (spec met, no blocking defect in owned scope) or BLOCK (specific Critical/Important defect, exact file:line). List Critical/Important findings only; ignore nits. Return your verdict as your final text output.

@@ -1,0 +1,32 @@
+You are the OpenCode implementation agent continuing Zentra issue 009 in this worktree.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+Branch: fix/predeploy-b-review-artifacts
+
+IMPORTANT: Work is ALREADY IN PROGRESS in this worktree. Continue from the current on-disk state; do NOT restart or discard existing edits. Do NOT run `no-mistakes`, `code-review`, or any interactive skill or plugin command.
+
+Current uncommitted state (preserved on disk):
+- Modified: src/cli/main.ts, src/reviews/reviewer-adapter.ts, tests/orchestration/cli.test.ts, tests/reviews/deterministic-reviewer-adapter.test.ts
+- New: tests/fixtures/content-aware-reviewer.mjs
+
+Read first (from this worktree):
+- docs/issues/009-high-require-content-aware-independent-review.md
+
+Finish the issue 009 implementation so every acceptance criterion holds:
+- Deployable CLI defaults to DENY when no content-aware reviewer is configured.
+- The reviewer receives the bounded exact diff and bounded validation evidence via STDIN (not argv).
+- Reviewer returns an explicit content-based decision bound to the exact diff and validation evidence digests.
+- Reviewer output is strictly bounded, schema-validated, single-decision, and fails closed on timeout, truncation, malformed content, or evidence-digest mismatch.
+- The deterministic identity-only reviewer remains test-only and cannot be selected accidentally in a production package.
+
+Then:
+1. pnpm install --frozen-lockfile (lockfile must stay unchanged).
+2. Run pnpm test, pnpm check, pnpm build and capture exact results.
+3. Run focused tests covering the reviewer subsystem and CLI review wiring.
+4. Commit all changes with a concise issue-specific message (no co-author trailer).
+5. Push the branch with upstream tracking: git push -u origin fix/predeploy-b-review-artifacts
+6. Create docs/execution/issue-009-implementation-report.md with: Status, Root cause, Files changed, Tests added, Commands and results, Acceptance criteria evidence, Security boundary, Remaining concerns, Commit identity.
+
+Owned files only: src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring only), fixtures/deterministic-reviewer.mjs, tests you add/modify for the reviewer, tests/fixtures/content-aware-reviewer.mjs, and the report. Do NOT edit README.md or AGENTS.md (owned by issue 001). Do NOT touch validation-runner.ts, process-supervisor.ts, or sqlite-journal.ts.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED with a concise summary stating whether pnpm test/check/build passed and confirming the branch is pushed.

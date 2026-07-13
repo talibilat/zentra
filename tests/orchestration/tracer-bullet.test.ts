@@ -18,6 +18,7 @@ import {
   ValidationRunner,
   type ValidationReport,
 } from "../../src/capabilities/validation-runner.js";
+import { projectArtifacts } from "../../src/contracts/artifact.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -33,12 +34,12 @@ import { ProjectRegistry } from "../../src/projects/project-registry.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
 import {
   canonicalValidationDigest,
-  DeterministicReviewerAdapter,
   ReviewerExecutionError,
   type ReviewDecision,
   type ReviewerAdapter,
   type ReviewInput,
 } from "../../src/reviews/reviewer-adapter.js";
+import { DeterministicReviewerAdapter } from "../support/deterministic-reviewer-adapter.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import type {
@@ -70,7 +71,7 @@ const fixturePath = (name: string): string => {
   return candidate;
 };
 const workerFixture = fixturePath("deterministic-worker.mjs");
-const reviewerFixture = fixturePath("deterministic-reviewer.mjs");
+const reviewerFixture = path.resolve(here, "../fixtures/deterministic-reviewer.mjs");
 const temporaryDirectories: string[] = [];
 const journals: SqliteEventJournal[] = [];
 
@@ -153,6 +154,7 @@ interface SystemOverrides {
   readonly reviewer?: ReviewerAdapter;
   readonly worktrees?: WorktreeManager;
   readonly integrations?: IntegrationQueue;
+  readonly taskService?: (journal: SqliteEventJournal) => TaskService;
 }
 
 function system(configPath: string, overrides: SystemOverrides = {}) {
@@ -161,7 +163,7 @@ function system(configPath: string, overrides: SystemOverrides = {}) {
   const supervisor = new ProcessSupervisor();
   const validations = overrides.validations ?? new ValidationRunner(supervisor);
   const worktrees = overrides.worktrees ?? new WorktreeManager();
-  const tasks = new TaskService(journal);
+  const tasks = overrides.taskService?.(journal) ?? new TaskService(journal);
   const orchestrator = new TracerBulletOrchestrator(
     tasks,
     ProjectRegistry.fromFile(configPath),
@@ -171,6 +173,7 @@ function system(configPath: string, overrides: SystemOverrides = {}) {
     overrides.reviewer ?? new DeterministicReviewerAdapter(supervisor, reviewerFixture),
     new ReviewGate(),
     overrides.integrations ?? new IntegrationQueue(new GitClient(), validations),
+    workerFixture,
   );
   return { journal, orchestrator, tasks };
 }
@@ -249,7 +252,7 @@ describe("TracerBulletOrchestrator", () => {
       title: "Update greeting",
       lifecycle: "terminal",
       terminalOutcome: "completed",
-      streamVersion: 12,
+      streamVersion: 20,
       leaseOwner: "worker-1",
     });
     expect(tasks.get("task-greeting")).toEqual(result);
@@ -265,30 +268,42 @@ describe("TracerBulletOrchestrator", () => {
       "task.created",
       "task.leased",
       "task.started",
+      "task.artifact_recording",
+      "artifact.patch_recorded",
       "task.validation_started",
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
       "task.review_requested",
+      "task.artifact_recording",
+      "artifact.review_report_recorded",
       "task.review_approved",
       "task.integration_started",
+      "task.artifact_recording",
+      "artifact.integration_receipt_recorded",
       "task.integration_prepared",
       "task.integration_observed",
       "task.cleanup_started",
       "task.cleanup_completed",
       "task.completed",
     ]);
-    expect(events[3]?.payload).toMatchObject({
+    const validationStarted = events.find((event) => event.type === "task.validation_started");
+    expect(validationStarted?.payload).toMatchObject({
       patch: { path: "greeting.txt", sha256: sha256("hello from Zentra\n") },
       diffSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    expect(events[4]?.payload).toMatchObject({
+    const reviewRequested = events.find((event) => event.type === "task.review_requested");
+    expect(reviewRequested?.payload).toMatchObject({
       validation: { name: "focused", outcome: "completed", exitCode: 0 },
     });
-    const approved = events[5]?.payload as { review: unknown };
-    expect(events[8]?.payload).toMatchObject({
+    const approved = events.find((event) => event.type === "task.review_approved")?.payload as {
+      review: unknown;
+    };
+    expect(events.find((event) => event.type === "task.integration_observed")?.payload).toMatchObject({
       verification: "verified",
       receipt: { outcome: "completed" },
       cleanupFailures: [],
     });
-    const completed = events[11]?.payload as {
+    const completed = events.find((event) => event.type === "task.completed")?.payload as {
       receipt: { outcome: string; resultCommit: string; review: unknown };
     };
     expect(completed.receipt).toMatchObject({
@@ -302,6 +317,24 @@ describe("TracerBulletOrchestrator", () => {
         "refs/heads/zentra/integration",
       ]),
     );
+    const artifactView = projectArtifacts(events);
+    expect(artifactView.artifacts.map((artifact) => artifact.kind)).toEqual([
+      "patch",
+      "validation_report",
+      "review_report",
+      "integration_receipt",
+    ]);
+    const patchArtifact = artifactView.artifacts.find((artifact) => artifact.kind === "patch")!;
+    const review = approved.review as { diffSha256: string };
+    expect(patchArtifact.sha256).toBe(review.diffSha256);
+    const receiptArtifact = artifactView.artifacts.find(
+      (artifact) => artifact.kind === "integration_receipt",
+    )!;
+    expect(receiptArtifact.sha256).toBe(sha256(JSON.stringify(completed.receipt)));
+    expect(artifactView.phaseByArtifactId[receiptArtifact.artifactId]).toBe("final");
+    expect(artifactView.artifacts.every((artifact) => artifact.path.startsWith("artifacts/"))).toBe(
+      true,
+    );
     expect(existsSync(path.join(fixture.worktreeRoot, runInput.taskId))).toBe(false);
     const ticketRef = await new GitClient().run(fixture.repositoryPath, [
       "show-ref",
@@ -309,6 +342,135 @@ describe("TracerBulletOrchestrator", () => {
       `refs/heads/ticket/${runInput.taskId}`,
     ]);
     expect(ticketRef.exitCode).not.toBe(0);
+  });
+
+  it("appends each successful artifact and consuming lifecycle boundary as one batch", async () => {
+    const fixture = await fixtureRepository();
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
+    const { orchestrator } = system(fixture.configPath, {
+      taskService: (journal) => new RecordingTaskService(journal),
+    });
+
+    await orchestrator.run({ ...runInput, taskId: "task-atomic-boundaries", signal: runSignal() });
+
+    expect(batches).toEqual(expect.arrayContaining([
+      ["task.artifact_recording", "artifact.patch_recorded", "task.validation_started"],
+      ["task.artifact_recording", "artifact.validation_report_recorded", "task.review_requested"],
+      ["task.artifact_recording", "artifact.review_report_recorded", "task.review_approved"],
+      ["task.artifact_recording", "artifact.integration_receipt_recorded", "task.integration_prepared"],
+    ]));
+    expect(batches.filter((batch) => batch.includes("task.artifact_recording"))).toHaveLength(4);
+  });
+
+  it("rejects replay when every typed artifact event is deleted", async () => {
+    const fixture = await fixtureRepository();
+    const { journal, orchestrator } = system(fixture.configPath);
+    await orchestrator.run({ ...runInput, signal: runSignal() });
+
+    const tamperedEvents = journal.readStream(runInput.taskId).filter(
+      (event) => !event.type.startsWith("artifact."),
+    );
+
+    expect(() => projectArtifacts(tamperedEvents)).toThrow("missing patch artifact");
+  });
+
+  it.each([
+    "patch",
+    "validation_report",
+    "review_report",
+    "integration_receipt",
+  ] as const)("detects trailing %s artifact deletion after an immediate crash", async (kind) => {
+    const fixture = await fixtureRepository();
+    class CrashAfterArtifactTaskService extends TaskService {
+      private crashed = false;
+
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        if (this.crashed) throw new Error(`simulated crash after ${kind}`);
+        const view = super.appendBatch(...args);
+        if (args[1].some((input) => input.type === `artifact.${kind}_recorded`)) {
+          this.crashed = true;
+          throw new Error(`simulated crash after ${kind}`);
+        }
+        return view;
+      }
+
+      override get(taskId: string): ReturnType<TaskService["get"]> {
+        if (this.crashed) throw new Error(`simulated crash after ${kind}`);
+        return super.get(taskId);
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      taskService: (stream) => new CrashAfterArtifactTaskService(stream),
+    });
+
+    await expect(orchestrator.run({
+      ...runInput,
+      taskId: `task-crash-${kind}`,
+      signal: runSignal(),
+    })).rejects.toThrow(`simulated crash after ${kind}`);
+    const stream = journal.readStream(`task-crash-${kind}`);
+    expect(stream.some((event) => event.type === `artifact.${kind}_recorded`)).toBe(true);
+
+    expect(() => projectArtifacts(stream.filter(
+      (event) => event.type !== `artifact.${kind}_recorded`,
+    ))).toThrow(
+      `artifact protocol marker references missing ${kind} artifact`,
+    );
+  });
+
+  it("records a final failed receipt when the integration ref moves after preparation", async () => {
+    const fixture = await fixtureRepository();
+    const validations = new ValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new GitClient(), validations);
+    class PostPreparationCasFailure extends IntegrationQueue {
+      override integrate(input: Parameters<IntegrationQueue["integrate"]>[0]): Promise<IntegrationReceipt> {
+        return delegate.integrate({
+          ...input,
+          onPrepared: async (prepared) => {
+            await input.onPrepared?.(prepared);
+            await gitOk(input.project.repositoryPath, ["switch", input.project.integrationBranch]);
+            writeFileSync(path.join(input.project.repositoryPath, "competing.txt"), "competing\n");
+            await gitOk(input.project.repositoryPath, ["add", "--", "competing.txt"]);
+            await gitOk(input.project.repositoryPath, ["commit", "-m", "competing integration"]);
+          },
+        });
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      validations,
+      integrations: new PostPreparationCasFailure(new GitClient(), validations),
+    });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-post-preparation-cas-failure",
+      signal: runSignal(),
+    });
+
+    expect(result).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
+    const events = journal.readStream(result.taskId);
+    expect(events.find((event) => event.type === "task.integration_prepared")?.payload)
+      .toMatchObject({ receipt: { outcome: "completed" } });
+    expect(events.at(-1)).toMatchObject({
+      type: "task.failed",
+      payload: { receipt: { outcome: "failed", resultCommit: expect.any(String) } },
+    });
+    const artifacts = projectArtifacts(events);
+    const receiptArtifact = artifacts.artifacts.find((artifact) =>
+      artifact.kind === "integration_receipt");
+    expect(artifacts.evidenceByArtifactId[receiptArtifact!.artifactId])
+      .toMatchObject({ outcome: "failed", resultCommit: expect.any(String) });
+    expect(artifacts.phaseByArtifactId[receiptArtifact!.artifactId]).toBe("final");
   });
 
   it("completes when integration advances after the ticket source was created", async () => {
@@ -481,6 +643,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new GitClient(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({
@@ -566,6 +729,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new CandidateCleanupFailingGit(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({
@@ -573,7 +737,8 @@ describe("TracerBulletOrchestrator", () => {
       taskId: "task-retained-candidate",
       signal: runSignal(),
     })).rejects.toThrow("observation crash");
-    const prepared = journal.readStream("task-retained-candidate").at(-1)?.payload as {
+    const prepared = journal.readStream("task-retained-candidate").find((event) =>
+      event.type === "task.integration_prepared")?.payload as {
       receipt: { validation: { provenance: { canonicalCwd: string } } };
     };
     expect(existsSync(prepared.receipt.validation.provenance.canonicalCwd)).toBe(true);
@@ -615,6 +780,7 @@ describe("TracerBulletOrchestrator", () => {
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
       new IntegrationQueue(new GitClient(), validations),
+      workerFixture,
     );
 
     await expect(orchestrator.run({
@@ -738,6 +904,7 @@ describe("TracerBulletOrchestrator", () => {
       ],
     });
     expect(result.terminalOutcome).toBe("cancelled");
+    expect(projectArtifacts(journal.readStream(runInput.taskId)).artifacts).toEqual([]);
     expect(journal.readStream(runInput.taskId).map((event) => event.type)).toEqual([
       "task.created",
       "task.leased",
@@ -1024,12 +1191,37 @@ describe("TracerBulletOrchestrator", () => {
     async (outcome) => {
       const fixture = await fixtureRepository();
       class OutcomeValidation extends ValidationRunner {
-        override run(project: ProjectConfig, name: "focused" | "full"): Promise<ValidationReport> {
-          return Promise.resolve(validationReport(project, name, outcome));
+        override run(
+          project: ProjectConfig,
+          name: "focused" | "full",
+          _cwd: string,
+          _signal: AbortSignal,
+          context?: Parameters<ValidationRunner["run"]>[4],
+        ): Promise<ValidationReport> {
+          const report = validationReport(project, name, outcome);
+          return Promise.resolve({
+            ...report,
+            provenance: {
+              ...report.provenance,
+              subjectSha256: context?.subjectSha256 ?? null,
+            },
+          });
         }
       }
       const validations = new OutcomeValidation(new ProcessSupervisor());
-      const { journal, orchestrator } = system(fixture.configPath, { validations });
+      const batches: string[][] = [];
+      class RecordingTaskService extends TaskService {
+        override appendBatch(
+          ...args: Parameters<TaskService["appendBatch"]>
+        ): ReturnType<TaskService["appendBatch"]> {
+          batches.push(args[1].map((input) => input.type));
+          return super.appendBatch(...args);
+        }
+      }
+      const { journal, orchestrator } = system(fixture.configPath, {
+        validations,
+        taskService: (stream) => new RecordingTaskService(stream),
+      });
 
       const result = await orchestrator.run({
         ...runInput,
@@ -1038,11 +1230,22 @@ describe("TracerBulletOrchestrator", () => {
       });
 
       expect(result.terminalOutcome).toBe(outcome);
+      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
+        artifact.kind)).toEqual(["patch", "validation_report"]);
       expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
         "task.created",
         "task.leased",
         "task.started",
+        "task.artifact_recording",
+        "artifact.patch_recorded",
         "task.validation_started",
+        "task.artifact_recording",
+        "artifact.validation_report_recorded",
+        `task.${outcome}`,
+      ]);
+      expect(batches).toContainEqual([
+        "task.artifact_recording",
+        "artifact.validation_report_recorded",
         `task.${outcome}`,
       ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
@@ -1098,9 +1301,19 @@ describe("TracerBulletOrchestrator", () => {
         throw new Error("reviewer must not run");
       },
     };
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
     const { journal, orchestrator } = system(fixture.configPath, {
       validations: new ReplayingValidationRunner(new ProcessSupervisor()),
       reviewer,
+      taskService: (stream) => new RecordingTaskService(stream),
     });
 
     const result = await orchestrator.run({
@@ -1111,7 +1324,26 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.terminalOutcome).toBe("failed");
     expect(reviewerCalls).toBe(0);
-    expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.failed");
+    const events = journal.readStream(result.taskId);
+    expect(events.slice(-3).map((event) => event.type)).toEqual([
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
+      "task.failed",
+    ]);
+    expect(events.at(-1)?.payload).toEqual({
+      stage: "validation",
+      reason: "focused validation report subject does not match the patch digest",
+      validation: oldReport,
+    });
+    expect(batches).toContainEqual([
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
+      "task.failed",
+    ]);
+    const artifacts = projectArtifacts(events);
+    const validationArtifact = artifacts.artifacts.find((artifact) =>
+      artifact.kind === "validation_report");
+    expect(artifacts.evidenceByArtifactId[validationArtifact!.artifactId]).toEqual(oldReport);
   });
 
   it("rejects context-bound validation executed with a substituted focused command", async () => {
@@ -1174,7 +1406,19 @@ describe("TracerBulletOrchestrator", () => {
         );
       },
     };
-    const { journal, orchestrator } = system(fixture.configPath, { reviewer });
+    const batches: string[][] = [];
+    class RecordingTaskService extends TaskService {
+      override appendBatch(
+        ...args: Parameters<TaskService["appendBatch"]>
+      ): ReturnType<TaskService["appendBatch"]> {
+        batches.push(args[1].map((input) => input.type));
+        return super.appendBatch(...args);
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      reviewer,
+      taskService: (stream) => new RecordingTaskService(stream),
+    });
 
     const result = await orchestrator.run({
       ...runInput,
@@ -1183,14 +1427,34 @@ describe("TracerBulletOrchestrator", () => {
     });
 
     expect(result.terminalOutcome).toBe(outcome);
+    expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
+      artifact.kind)).toEqual(
+        kind === "valid"
+          ? ["patch", "validation_report", "review_report"]
+          : ["patch", "validation_report"],
+      );
     expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
       "task.created",
       "task.leased",
       "task.started",
+      "task.artifact_recording",
+      "artifact.patch_recorded",
       "task.validation_started",
+      "task.artifact_recording",
+      "artifact.validation_report_recorded",
       "task.review_requested",
+      ...(kind === "valid"
+        ? ["task.artifact_recording", "artifact.review_report_recorded"]
+        : []),
       `task.${outcome}`,
     ]);
+    if (kind === "valid") {
+      expect(batches).toContainEqual([
+        "task.artifact_recording",
+        "artifact.review_report_recorded",
+        "task.denied",
+      ]);
+    }
   });
 
   it.each([
@@ -1254,7 +1518,7 @@ describe("TracerBulletOrchestrator", () => {
         }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
-      const { orchestrator } = system(fixture.configPath, {
+      const { journal, orchestrator } = system(fixture.configPath, {
         worktrees: new TerminatingWorktrees(),
         integrations: new RecordingIntegration(new GitClient(), validations),
       });
@@ -1267,6 +1531,8 @@ describe("TracerBulletOrchestrator", () => {
 
       expect(result.terminalOutcome).toBe(outcome);
       expect(integrationCalls).toBe(0);
+      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
+        artifact.kind)).toEqual(["patch", "validation_report", "review_report"]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
     },
   );
@@ -1315,8 +1581,18 @@ describe("TracerBulletOrchestrator", () => {
         }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
+      const batches: string[][] = [];
+      class RecordingTaskService extends TaskService {
+        override appendBatch(
+          ...args: Parameters<TaskService["appendBatch"]>
+        ): ReturnType<TaskService["appendBatch"]> {
+          batches.push(args[1].map((input) => input.type));
+          return super.appendBatch(...args);
+        }
+      }
       const { journal, orchestrator } = system(fixture.configPath, {
         integrations: new OutcomeIntegration(new GitClient(), validations),
+        taskService: (stream) => new RecordingTaskService(stream),
       });
 
       const result = await orchestrator.run({
@@ -1326,6 +1602,18 @@ describe("TracerBulletOrchestrator", () => {
       });
 
       expect(result.terminalOutcome).toBe(outcome);
+      expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
+        artifact.kind)).toEqual([
+          "patch",
+          "validation_report",
+          "review_report",
+          "integration_receipt",
+        ]);
+      expect(batches).toContainEqual([
+        "task.artifact_recording",
+        "artifact.integration_receipt_recorded",
+        `task.${outcome}`,
+      ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
       const terminalPayload = journal.readStream(result.taskId).at(-1)?.payload as {
         candidateCleanupFailures: readonly CleanupFailure[];
@@ -1423,7 +1711,8 @@ describe("TracerBulletOrchestrator", () => {
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
     expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.integration_observed");
-    expect(journal.readStream(result.taskId).at(-1)?.payload).toMatchObject({
+    const observation = journal.readStream(result.taskId).at(-1)?.payload;
+    expect(observation).toMatchObject({
       verification: "failed",
       receipt: { outcome: "completed" },
       reason: expect.any(String),

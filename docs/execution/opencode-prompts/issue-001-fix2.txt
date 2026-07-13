@@ -1,0 +1,22 @@
+You are the OpenCode fix agent for Zentra issue 001, round 2, addressing remaining in-scope review findings. Engineering work on input validation and documentation accuracy for a local developer CLI.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+Branch: fix/predeploy-a-001
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; prior work is committed. Add fixes on top with new commits (no amend, no force-push).
+
+NAMED-HUMAN DECISION (already made): The repository owner Md Talib has ACCEPTED the residual replaced-executable TOCTOU as within Trusted-Project MVP Mode (validation executables run with host-user authority on owner-controlled projects; the pre-spawn device/inode/size/content-hash re-verification shrinks but does not eliminate the non-atomic verification-to-exec window). Do NOT attempt atomic verified-object execution. Record this acceptance.
+
+Address these in-scope findings:
+1. Fix the contradictory README security wording (around README.md:120). Clearly distinguish: (a) bundled worker/reviewer executables - callers cannot select these; from (b) configured validation commands - the validation arguments are trusted project configuration and the executable itself must match the approved canonical Node path. Ensure no sentence claims filesystem containment.
+2. Rename or relabel the test at tests/capabilities/validation-runner.test.ts (around lines 154-170) so its name accurately describes the interval it actually covers. Describe the pre-spawn check as "best-effort pre-spawn re-verification", not "completed strict rejection" of replaced targets.
+3. Update docs/execution/issue-001-implementation-report.md to record, under an "Accepted Risk" heading: named acceptor Md Talib; date 2026-07-12; the residual replaced-executable TOCTOU is accepted as within Trusted-Project MVP Mode; best-effort pre-spawn re-verification is in place; atomic verified-object execution is intentionally out of scope for the MVP.
+4. The review also asked for a packaged CLI regression that supplies a denied executable and uses a canary. Packaged/tarball testing is owned by issue 016. Record in the report that the packaged denied-executable canary verification is delegated to issue 016's packaged CLI test and the final package gate; do NOT add package.json or tarball tooling here. You MAY add a built-CLI (dist) test that runs the compiled main.js against a denied executable and asserts the stable configuration error with a canary proving the denied executable was not invoked, IF it stays within your owned files.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and focused project-config and validation-runner tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-a-001
+
+Owned files only: src/projects/project-config.ts, src/capabilities/validation-runner.ts, README.md, AGENTS.md, docs/execution/issue-001-implementation-report.md, and the related test files. Do NOT edit docs/issues/ briefs or package.json.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

@@ -126,6 +126,8 @@ async function fixture(): Promise<Fixture> {
     validations: {
       focused: [process.execPath, "-e", "process.exit(0)"],
       full: [process.execPath, "-e", "process.exit(0)"],
+      focusedTimeoutMs: 5_000,
+      fullTimeoutMs: 5_000,
     },
   };
   const worktrees = new WorktreeManager();
@@ -188,6 +190,7 @@ function completedValidation(
 ): ValidationReport {
   const stdout = `${name} passed\n`;
   const stderr = "";
+  const timeoutMs = provenance.timeoutMs ?? 5_000;
   return {
     name,
     outcome: "completed",
@@ -199,7 +202,8 @@ function completedValidation(
     command: [...command],
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout, stderr })),
-    provenance,
+    timeoutMs,
+    provenance: { ...provenance, timeoutMs },
   };
 }
 
@@ -442,11 +446,11 @@ describe("RecoveryService", () => {
       executable: process.execPath,
       args: [
         "-e",
-        `require("node:fs").writeFileSync("greeting.txt", "worker wrote this\\n")`,
+        `require("node:fs").writeFileSync("greeting.txt", "worker wrote this\\n"); console.log(JSON.stringify({ type: "artifact.ready", path: "greeting.txt", sha256: "${"0".repeat(64)}" }))`,
       ],
       cwd: lease.path,
       timeoutMs: 5_000,
-    }, AbortSignal.timeout(10_000));
+    }, AbortSignal.timeout(10_000), "worker");
     expect(workerResult.outcome).toBe("completed");
     closeJournal(first.journal);
 

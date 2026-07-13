@@ -1,0 +1,17 @@
+You are the independent OpenCode reviewer for Zentra issue 023 (Medium). READ-ONLY single combined pass (spec + code quality). Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-023
+Branch: fix/predeploy-a-023
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run state-changing commands.
+
+Read:
+- docs/issues/023-medium-configure-validation-timeouts.md
+- docs/execution/issue-023-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Confirm: separate focused and full timeout fields; secure defaults, minimums, hard maximums as integers in ms; strict rejection of invalid/negative/fractional/zero/nonfinite/excessive/ambiguous values BEFORE any process starts; selected bounded timeout flows through validation provenance/diagnostics and is asserted in a test; termination + descendant confirmation consistent with issue 011 (supervisor unchanged); focused and full both route through the same policy; README/schema examples agree exactly with implemented bounds; CLI config errors occur before journal/Git effects. Check code quality: monotonic elapsed measurement in timing tests, no integer-parsing bypass, no unbounded/disabled timeout, CLI worker timeout constant NOT changed.
+
+Give a decisive verdict: INTEGRATE or BLOCK (Critical/Important only, exact file:line). Return your verdict as your final text output.

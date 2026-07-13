@@ -115,6 +115,8 @@ describe("IntegrationQueue", () => {
           "-e",
           'process.stdout.write("full validation passed")',
         ],
+        focusedTimeoutMs: 5_000,
+        fullTimeoutMs: 5_000,
       },
     };
     await worktrees.ensureIntegrationBranch(project);
@@ -627,10 +629,11 @@ describe("IntegrationQueue", () => {
       "-e",
       "setInterval(() => {}, 1000)",
     ];
+    project.validations.fullTimeoutMs = 100;
     const reviewed = await ticket("task-timeout", "timeout.txt", "timeout\n");
     const integrationQueue = new IntegrationQueue(
       git,
-      new ValidationRunner(new ProcessSupervisor(), { timeoutMs: 50 }),
+      new ValidationRunner(new ProcessSupervisor()),
     );
 
     const receipt = await integrate(reviewed, integrationQueue);

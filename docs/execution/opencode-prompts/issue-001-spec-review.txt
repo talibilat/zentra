@@ -1,0 +1,30 @@
+You are the independent OpenCode SPECIFICATION reviewer for Zentra issue 001. This is READ-ONLY engineering review of input-validation and documentation-accuracy changes for a local developer CLI. Keep all reasoning focused on concrete software engineering: path resolution, allowlist checks, and documentation wording.
+
+Worktree to review: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-001
+Branch: fix/predeploy-a-001
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command. No edits.
+
+Context: the repository owner selected "Trusted-Project MVP Mode" for issue 001. The implementation must therefore provide a strict exact-executable allowlist with canonical-path resolution (rejecting relative, symlinked, env-prefixed, or otherwise non-approved executable identities before a process starts), and must update AGENTS.md and README.md so the wording accurately describes host-user authority and stops calling the allowlist "containment". The alternative "Contained Mode" (OS sandbox) was NOT selected and is out of scope.
+
+Read:
+- AGENTS.md
+- docs/issues/001-critical-contain-configured-validation-execution.md (evaluate only the Trusted-Project MVP Mode checklist, not Contained Mode)
+- docs/execution/issue-001-implementation-report.md
+- The complete diff from the branch base to HEAD:
+  git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Verify every Trusted-Project MVP Mode acceptance criterion and required test: allowed executables accepted; denied absolute-not-on-list, relative, symlinked (real-path differs), and env-prefixed identities rejected BEFORE process creation; canonical-path awareness; focused and full validation still run through the same policy; documentation wording matches the implemented policy and no longer claims filesystem containment. Confirm the original failure sequence (an unintended executable identity being accepted) is no longer possible.
+
+Return:
+- Spec verdict: COMPLIANT or ISSUES_FOUND
+- Strengths
+- Critical findings
+- Important findings
+- Minor findings
+- Required fixes
+- Final spec verdict
+
+Every finding must cite exact file and line evidence. Return your review as your final text output.

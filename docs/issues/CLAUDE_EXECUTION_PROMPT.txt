@@ -1,0 +1,174 @@
+Execute the Zentra pre-deployment remediation corpus using controlled parallel agents.
+
+Repository:
+/Users/talibilat/Documents/Projects/zentra
+
+Authoritative issue index:
+docs/issues/README.md
+
+Issue corpus:
+There are exactly 28 issue files with IDs 001 through 028.
+There are 27 deployment findings and one deferred enhancement, issue 005.
+
+Goal:
+Close 3 Critical, 7 High, 9 Medium, and 8 Low deployment findings with evidence, or obtain explicit named-human acceptance for a Low finding.
+Do not include deferred enhancement issue 005 in deployment closure or active Wave 3 execution.
+
+Safety rules:
+- Do not work directly on main.
+- Create one integration branch named fix/pre-deployment in a dedicated integration worktree.
+- Reserve fix/pre-deployment and its worktree exclusively for reviewed integration and progress-document edits by the integration steward.
+- No implementation writer may edit any file in the integration worktree.
+- Give every active writer one unique implementation branch and one unique Git worktree.
+- One branch cannot be checked out in multiple worktrees.
+- Create every stage writer branch and worktree from the current reviewed fix/pre-deployment head.
+- Record the stage, owner, branch, worktree, and owned files before the writer edits begin.
+- Keep each writer branch and worktree until its changes are independently reviewed, integrated into fix/pre-deployment, and reviewed in the integration worktree.
+- Remove a writer branch and worktree only after reviewed integration succeeds.
+- Treat dependencies as logical readiness gates even across isolated worktrees.
+- Use at most four concurrent writer agents.
+- Reviewer and tester agents may bring the total active agent count to 8-10 without exceeding four writers.
+- Never allow two branches to edit the same owned file concurrently.
+- Follow the waves, dependencies, and serialization notes in docs/issues/README.md.
+- Use test-driven development for every behavioral fix.
+- Run independent specification and code-quality reviews for every issue or tightly coupled issue group.
+- Fix every Critical and Important review finding before integration.
+- Do not force-push, amend commits, delete remote branches, create issues, or merge to main.
+- Never automatically retry an uncertain Git or external effect.
+- Preserve failed worktrees and exact evidence.
+
+Suggested writer branches and worktrees:
+- Pod A issue 011 uses fix/predeploy-a-011 and .worktrees/predeploy-a-011.
+- Pod A issue 001 uses fix/predeploy-a-001 and .worktrees/predeploy-a-001 after the human decision.
+- Pod A issue 023 uses fix/predeploy-a-023 and .worktrees/predeploy-a-023 when its dependency is satisfied.
+- Pod B uses fix/predeploy-b-review-artifacts and .worktrees/predeploy-b-review-artifacts.
+- Pod C0 focused remediation, when authorized by reproduced evidence, uses fix/predeploy-c0-deprecation and .worktrees/predeploy-c0-deprecation.
+- Pod C1 uses fix/predeploy-c1-package and .worktrees/predeploy-c1-package.
+- Pod C2 uses fix/predeploy-c2-metadata and .worktrees/predeploy-c2-metadata.
+- Any parallel C2 documentation writer uses a unique fix/predeploy-c2-docs-<scope> branch and .worktrees/predeploy-c2-docs-<scope> worktree with nonoverlapping owned files.
+- Pod C3 uses fix/predeploy-c3-ci and .worktrees/predeploy-c3-ci.
+- Pod C4 uses fix/predeploy-c4-distribution and .worktrees/predeploy-c4-distribution.
+- Fixture Integrity uses fix/predeploy-fixture-integrity and .worktrees/predeploy-fixture-integrity.
+- Pod D uses fix/predeploy-d-persistence and .worktrees/predeploy-d-persistence.
+- Pod E issue 014 uses fix/predeploy-e-lease and .worktrees/predeploy-e-lease.
+- Pod E issues 002 and 003 use fix/predeploy-e-recovery and .worktrees/predeploy-e-recovery when one writer retains ownership across both issues.
+- Pod E issue 003 uses fix/predeploy-e-recovery-003 and .worktrees/predeploy-e-recovery-003 only when the issue 002 worktree has already been reviewed, integrated, and removed.
+- Pod E issue 010 uses fix/predeploy-e-integration-safety and .worktrees/predeploy-e-integration-safety after issue 014 is integrated.
+- Pod F issue 015 uses fix/predeploy-f-invocations and .worktrees/predeploy-f-invocations.
+- Pod F issue 028 uses fix/predeploy-f-cleanup and .worktrees/predeploy-f-cleanup.
+- Pod G uses fix/predeploy-g-cli and .worktrees/predeploy-g-cli.
+- Pod I uses fix/predeploy-i-invariants and .worktrees/predeploy-i-invariants.
+- Equivalent unique names are allowed only when the progress ledger records the exact mapping.
+
+Human decisions:
+- Issue 001 requires a named human to select Contained Mode or Trusted-Project MVP Mode.
+- Issue 017 requires a named human to select the distribution model.
+- Issue 018 requires a named human to select the license.
+- Issue 027 requires a named human to approve a private security reporting route.
+- Never use an agent to answer, infer, or invent any of these four decisions.
+- Record these issues as blockers and continue unrelated safe work while decisions are pending.
+
+Initialization:
+1. Inspect Git status, branches, worktrees, remotes, and recent commits.
+2. Confirm the issue corpus is committed and available on the execution base.
+3. Create fix/pre-deployment from the reviewed issue-corpus base in its dedicated integration worktree.
+4. Create docs/execution/pre-deployment-progress.md from the integration worktree.
+5. Record every issue, pod, branch, worktree, owner, dependency, test, review, commit, and integration result.
+6. Run the current baseline with pnpm install --frozen-lockfile, pnpm test, pnpm check, pnpm build, pnpm start -- --help, and pnpm audit --prod.
+
+Wave 1 immediate writers:
+- Pod A owns issues 001, 011, and 023, but only issue 011 may implement immediately.
+- Pod B uses one writer for issue 009 followed by issue 006.
+- Pod D uses one writer for issue 013.
+- Wave 1 therefore starts with three writer agents, while Pod C0 may use a read-only reproducer or tester.
+
+Wave 1 staged work:
+- Issue 001 waits for the named-human trust-model decision.
+- Issue 023 waits for that decision but may proceed before all issue 001 implementation when the approved path leaves timeout work independent.
+- Every issue 023 edit shared with issue 001 in validation configuration or runner files is strictly serialized.
+- Pod C0 runs node --trace-deprecation dist/src/cli/main.js --help and records either a reproduced or not-reproduced outcome.
+- A reproduced outcome retains the complete stack, Node version, lockfile state, responsible dependency version, and call path before focused remediation is authorized.
+- A not-reproduced outcome retains the exact command, Node version, lockfile state, and clean standard error, then closes or explicitly dispositions issue 008 without dependency changes.
+- Pod C1 starts after either deterministic C0 evidence outcome is recorded.
+- Pod C1 implements issue 016 and then issue 019 with one package/build writer.
+- Issue 016 owns the production binary build and output layout.
+- Issue 019 owns deterministic package contents and the files allowlist.
+- Pod C2 starts after C1 and owns issues 018, 020, 021, 026, and 027.
+- Pod C2 uses one package-metadata writer, while documentation-only agents may write in parallel only when their files do not overlap.
+- Issues 018 and 027 remain blocked on their named human decisions.
+- Pod C3 implements issue 024 only after issues 016, 019, 020, and 021.
+- Pod C4 implements issue 017 only after issues 016, 019, and 024 and the named-human distribution decision.
+- The Fixture Integrity pod implements issue 012 only after issues 009 and 016.
+
+Wave 1 integration:
+1. Review each ready pod or stage independently.
+2. Fix all blocking findings.
+3. Commit and push pod branches.
+4. Have the integration steward merge them one at a time into fix/pre-deployment from the integration worktree.
+5. Review the integrated result and run the full baseline after every merge.
+6. Remove the writer branch and worktree only after that reviewed integration succeeds.
+7. Stop and reconcile any unexpected overlap or uncertain effect.
+
+Wave 2:
+- Wave 2 may begin after all ready, non-human-blocked Wave 1 implementation is reviewed and integrated.
+- Issues 001, 017, 018, and 027 remain deployment blockers but do not block unrelated later engineering.
+- If the issue 001 decision affects issue 023, issue 023 waits while other ready Wave 1 work and unrelated later work continue.
+- Issue 014 is first inside Pod E after reviewed integration of all ready, non-human-blocked Wave 1 prerequisites.
+- Issue 002 begins after issue 014 is reviewed and integrated.
+- Issues 002 and 003 use one recovery writer or strictly sequential worktrees for every edit to src/orchestration/recovery.ts.
+- Issue 003 begins only after issue 002 recovery edits are reviewed and integrated on top of issue 014.
+- Issue 010 may use a separate integration writer after issue 014 is reviewed and integrated.
+- No issue 010 edit to src/integration/integration-queue.ts may overlap an issue 014 edit to that file.
+- Pod F owns issue 015 after issue 001 settles validation invocation semantics.
+- Pod F owns issue 028 after issue 014 establishes integration lease semantics.
+- Issue 028 owns durable, bounded, acknowledged integration cleanup-failure evidence and restart behavior.
+
+Wave 3:
+- Pod G owns issues 004, 022, and 025 after issues 003 and 014.
+- Use one CLI writer because all three touch src/cli/main.ts.
+- Do not execute issue 005 in Wave 3 because root-level-only operation is documented MVP behavior.
+
+Wave 4:
+- Pod I owns issue 007 after all recovery behavior stabilizes.
+- Extract one pure event-chain invariant validator used by task projection and recovery.
+- Prove no behavior regression with both projection and recovery suites.
+
+Deferred enhancements:
+- Keep issue 005 deferred unless a named human separately prioritizes post-MVP nested relative paths.
+- Preserve its design and test brief without counting it toward deployment closure.
+
+Per-issue completion gate:
+- Acceptance criteria in the issue file are satisfied.
+- Required tests exist and pass.
+- Final verification commands pass.
+- The original failure sequence is no longer possible.
+- No unrelated scope was added.
+- Independent spec review passes.
+- Independent code-quality review passes.
+- Security review runs for Critical and High issues.
+- Progress ledger is updated.
+
+Final deployment gate:
+- All 3 Critical findings are closed with evidence.
+- All 7 High findings are closed with evidence.
+- All 9 Medium findings are closed with evidence.
+- All 8 Low findings are closed or explicitly accepted by a named human.
+- Each human decision for issues 001, 017, 018, and 027 exists, or a named explicit accepted-risk record states its deployment disposition.
+- Deferred enhancement issue 005 remains outside this gate.
+- pnpm install --frozen-lockfile passes from a clean checkout.
+- pnpm test passes.
+- pnpm check passes.
+- Production build passes.
+- Clean npm pack produces a deterministic tarball.
+- The tarball installs in an empty consumer directory.
+- The installed zentra binary runs help and one deterministic task.
+- Supported-platform metadata matches actual tested platforms.
+- No known production dependency vulnerability remains.
+- Git diff check passes.
+- No unresolved Critical or Important review findings remain.
+- Create docs/execution/pre-deployment-final-report.md with commands, commits, tests, accepted risks, package evidence, and exact Git status.
+
+Completion behavior:
+- Do not claim Zentra is deployable without fresh evidence for every final gate.
+- Do not merge fix/pre-deployment into main.
+- Push the reviewed integration branch and return its final commit, verification results, report path, blockers, and residual accepted risks.

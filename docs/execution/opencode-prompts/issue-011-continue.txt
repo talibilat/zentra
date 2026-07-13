@@ -1,0 +1,33 @@
+You are the OpenCode implementation agent continuing Zentra issue 011 in this worktree.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL OPERATING CONSTRAINT: Do NOT use the `skill` tool. Do NOT invoke ANY skill by any name (for example requesting-code-review, code-review, test-driven-development, no-mistakes, brainstorming, verification). Skills hang in this headless environment. Do all work directly with file edits and bash commands only. If you feel inclined to request a review, DO NOT - just finish, commit, and push; a separate reviewer will run later.
+
+Work is ALREADY IN PROGRESS in this worktree. Continue from the current on-disk state; do NOT restart or discard existing edits.
+
+Current uncommitted state (preserved on disk):
+- Modified: src/workers/process-supervisor.ts, tests/workers/process-supervisor.test.ts
+- New fixtures: tests/workers/fixtures/success-with-live-descendant.mjs, success-with-inherited-streams.mjs, success-with-term-resistant-descendant.mjs, success-with-escaped-session.mjs
+
+Read first (from this worktree): docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+
+Finish issue 011 so every acceptance criterion holds:
+- After a leader exits, allow only a bounded stream-flush grace, then terminate the owned process group even on a successful leader exit.
+- Confirm group termination before reporting completed.
+- Report failure when an owned same-group descendant survives bounded termination.
+- Document the macOS platform boundary for descendants that deliberately escape the process group.
+- Successful completion means leader succeeded AND protocol output valid AND no owned descendant remains.
+
+Then:
+1. pnpm install --frozen-lockfile (lockfile must stay unchanged).
+2. Run pnpm test, pnpm check, pnpm build and capture exact results.
+3. Run focused tests covering worker supervision, cancellation, timeout, and output limits. Capture descendant PIDs and assert they no longer exist before the supervisor promise resolves.
+4. Commit all changes with a concise issue-specific message (no co-author trailer).
+5. Push the branch with upstream tracking: git push -u origin fix/predeploy-a-011
+6. Create docs/execution/issue-011-implementation-report.md with: Status, Root cause, Files changed, Tests added, Commands and results, Acceptance criteria evidence, Security boundary, Remaining concerns, Commit identity.
+
+Owned files only: src/workers/process-supervisor.ts and worker supervision test files/fixtures, plus the report. Do NOT touch any other src file, README.md, AGENTS.md, or package metadata.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED with a concise summary stating whether pnpm test/check/build passed and confirming the branch is pushed.

@@ -1,0 +1,18 @@
+You are the independent OpenCode SPECIFICATION reviewer for Zentra issue 011. READ-ONLY review of process-supervision descendant-termination code for a local developer CLI.
+
+Worktree to review: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-a-011
+Branch: fix/predeploy-a-011
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- AGENTS.md
+- docs/issues/011-high-terminate-descendants-after-successful-parent-exit.md
+- docs/execution/issue-011-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Verify every acceptance criterion and required test: after a leader exits, only a bounded stream-flush grace then the owned process group is terminated even on successful exit; group termination confirmed before reporting completed; failure reported when an owned same-group descendant survives bounded termination; documented macOS platform boundary for descendants that escape the group; successful completion requires leader success AND valid protocol output AND no owned descendant remaining. Confirm the required fixtures exist (successful-parent-leaves-child, inherited-open-streams, descendant-ignoring-graceful-termination, bounded-forced-termination, escaped-session on macOS) and that tests capture descendant PIDs and assert non-existence before the supervisor promise resolves. Confirm the original failure sequence (successful completion reported while a descendant remains alive) is impossible.
+
+Return: Spec verdict (COMPLIANT or ISSUES_FOUND), Strengths, Critical findings, Important findings, Minor findings, Required fixes, Final spec verdict. Cite exact file:line for every finding. Return the review as your final text output.

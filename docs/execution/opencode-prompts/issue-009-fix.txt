@@ -1,0 +1,23 @@
+You are the OpenCode fix agent for Zentra issue 009, addressing independent review findings in this worktree. Engineering work on code-review process wiring for a local developer CLI.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+Branch: fix/predeploy-b-review-artifacts
+
+CRITICAL: Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file edits and bash. Do NOT restart; implementation is already committed (e034742). Add fixes on top with new commits (no amend, no force-push).
+
+The independent spec and code-quality reviews found these REQUIRED FIXES:
+1. Make the deterministic identity-only reviewer impossible to resolve or instantiate in a production build: remove deterministic-reviewer.mjs from the production bundled-fixture registry / resolver surface, and move the deterministic reviewer adapter and fixture entirely under test-only paths. NOTE: you do NOT own package.json; the packed-tarball `files` allowlist that physically excludes test fixtures from the artifact belongs to issue 019. Your job here is to make it code-impossible for shipped code to resolve/select the identity-only reviewer. In the report, record that final tarball exclusion is enforced by issue 019's files allowlist and verified at the 016/019 package gate.
+2. Settle reviewer execution from process `exit` plus a bounded stream-flush grace period rather than waiting indefinitely for `close`. Ensure timeout, cancellation, output-limit, and spawn-error paths all have a final settlement deadline even when a descendant retains inherited pipes.
+3. Treat stdin `error` as reviewer failure, and require the stdin write to complete successfully before accepting exit code zero and parsing stdout.
+4. Add a protocol test that returns the correct diff digest but an incorrect validationSha256, asserting fail-closed behavior.
+5. Update the content-aware reviewer fixture (tests/fixtures/content-aware-reviewer.mjs) to recompute validationSha256 from the RECEIVED validation evidence using the canonical protocol algorithm, rather than echoing the supplied digest.
+6. Add regression tests for: early stdin closure, a reviewer that does not consume the full request, a detached descendant retaining stdio, and timeout settlement within a measured upper bound.
+
+Then:
+- Run pnpm test, pnpm check, pnpm build and the focused reviewer/CLI tests; capture results.
+- Commit with a concise message (no co-author trailer). Push: git push origin fix/predeploy-b-review-artifacts
+- Update docs/execution/issue-009-implementation-report.md with the fixes, new commit ids, and the explicit issue-019 disposition for tarball exclusion.
+
+Owned files only: src/reviews/reviewer-adapter.ts, src/cli/main.ts (review wiring only), fixtures/deterministic-reviewer.mjs, src/fixtures bundled-fixture registry entries related to the reviewer, reviewer test files, tests/fixtures/content-aware-reviewer.mjs, and the report. Do NOT edit README.md, AGENTS.md, package.json, validation-runner.ts, process-supervisor.ts, or sqlite-journal.ts.
+
+Return DONE, DONE_WITH_CONCERNS, or BLOCKED stating whether test/check/build passed and the branch is pushed.

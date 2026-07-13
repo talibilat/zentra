@@ -1,0 +1,28 @@
+You are the independent OpenCode SPECIFICATION reviewer for Zentra issue 009. This is READ-ONLY engineering review of code-review wiring for a local developer CLI. Keep reasoning focused on concrete software engineering: process wiring, STDIN protocol, digest binding, and fail-closed defaults.
+
+Worktree to review: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+Branch: fix/predeploy-b-review-artifacts
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash (git diff, git log, grep, cat).
+- Do NOT modify, stage, commit, push, or run any state-changing command. No edits.
+
+Read:
+- AGENTS.md
+- docs/issues/009-high-require-content-aware-independent-review.md
+- docs/execution/issue-009-implementation-report.md
+- The complete diff from the branch base to HEAD:
+  git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Verify every acceptance criterion and required test: deployable CLI defaults to DENY when no content-aware reviewer is configured; reviewer receives the bounded exact diff and bounded validation evidence via STDIN (not argv); reviewer returns an explicit content-based decision bound to the exact diff and validation evidence digests; output is strictly bounded, schema-validated, single-decision, fails closed on timeout/truncation/malformed content/evidence-digest mismatch; the deterministic identity-only reviewer remains test-only and cannot be selected accidentally in a production package. Confirm required tests exist: missing-reviewer deny e2e, reviewer protocol (diff inspection, stdin bounds, digest mismatch, timeout, malformed output, same-identity denial), and a diff that passes focused validation but is denied by a configured content-aware reviewer.
+
+Return:
+- Spec verdict: COMPLIANT or ISSUES_FOUND
+- Strengths
+- Critical findings
+- Important findings
+- Minor findings
+- Required fixes
+- Final spec verdict
+
+Every finding must cite exact file and line evidence. Return your review as your final text output.

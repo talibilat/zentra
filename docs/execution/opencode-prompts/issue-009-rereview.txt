@@ -1,0 +1,30 @@
+You are a fresh independent OpenCode reviewer performing the CONFIRMATION re-review of Zentra issue 009 after fixes. READ-ONLY. Covers specification and code-quality/security.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-review-artifacts
+Branch: fix/predeploy-b-review-artifacts
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run any state-changing command.
+
+Read:
+- docs/issues/009-high-require-content-aware-independent-review.md
+- docs/execution/issue-009-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+OUT OF SCOPE - do NOT re-raise as blockers (dispositioned to other issues):
+- Physical exclusion of test-only reviewer artifacts from the packed tarball and any packed-artifact enumeration test are owned by issue 019 (files allowlist) and issue 016 (packaged CLI test), verified at the final package gate. Issue 009's obligation is that production source (src/dist) cannot resolve or select the identity-only reviewer - confirm THAT only.
+- Reviewer process-tree containment on unsupported platforms overlaps issues 011/016/020; macOS is the supported target.
+
+Confirm these were correctly done:
+1. Deny-by-default when no content-aware reviewer is configured.
+2. Bounded diff + validation evidence sent via STDIN (not argv); decision bound to exact diff and validation digests; fail-closed on timeout/truncation/malformed/digest-mismatch.
+3. Approval accepted ONLY on successful stdin completion, EOF-complete output, one schema-valid decision, and a digest proving receipt of the complete request; incomplete/unread-stdin output => deny.
+4. Identity-only deterministic reviewer is not resolvable/selectable by production source code.
+5. Required tests exist (missing-reviewer deny, protocol/digest-mismatch/timeout/malformed/same-identity denial, adversarial diff denied, incomplete-output deny, unread-stdin deny).
+
+Give a decisive verdict:
+- INTEGRATE (findings resolved or dispositioned, no new blocking defect in owned scope) or BLOCK (a specific new Critical/Important defect that is NOT one of the out-of-scope items).
+- List any remaining blocking findings with exact file:line.
+
+Return your verdict and findings as your final text output.

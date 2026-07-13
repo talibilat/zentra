@@ -1,0 +1,17 @@
+You are a fresh independent OpenCode reviewer performing the confirmation re-review of Zentra issue 006 after fixes. READ-ONLY. Decisive verdict.
+
+Worktree: /Users/talibilat/Documents/Projects/zentra/.worktrees/predeploy-b-artifacts
+Branch: fix/predeploy-b-artifacts
+
+CRITICAL CONSTRAINTS:
+- Do NOT use the `skill` tool or invoke ANY skill by any name (they hang here). Use only file reads and read-only bash.
+- Do NOT modify, stage, commit, push, or run state-changing commands.
+
+Read:
+- docs/issues/006-medium-record-typed-artifacts.md
+- docs/execution/issue-006-implementation-report.md
+- git diff $(git merge-base fix/pre-deployment HEAD)..HEAD
+
+Prior blocking findings were: (1) patch artifact digest copied evidence.diffSha256 instead of hashing retained exact bytes, defeating contradiction detection; (2) unbounded attacker-controllable identity/evidence strings and unbounded error interpolation; (3) malformed kind-specific evidence tests only covered patch. Confirm all three are fixed: digest is computed from / independently recomputed against the retained exact diff bytes and contradiction is detectable even if both artifact.sha256 and evidence.diffSha256 are altered; identity/evidence strings are size-bounded and replay errors are bounded/deterministic; malformed evidence tests exist for all four kinds (patch, validation report, review report, integration receipt).
+
+Give a decisive verdict: INTEGRATE or BLOCK (exact file:line). Return your verdict as your final text output.

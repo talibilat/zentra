@@ -1,10 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
-import type { ProjectConfig } from "../projects/project-config.js";
+import {
+  assertApprovedValidationExecutable,
+  assertApprovedValidationExecutableIdentity,
+  MAX_VALIDATION_TIMEOUT_MS,
+  MIN_VALIDATION_TIMEOUT_MS,
+  ValidationTimeoutSchema,
+  type ProjectConfig,
+} from "../projects/project-config.js";
 import { z } from "zod";
-
-const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface ValidationReport {
   readonly name: string;
@@ -17,6 +22,7 @@ export interface ValidationReport {
   readonly command: readonly string[];
   readonly argvSha256: string;
   readonly outputSha256: string;
+  readonly timeoutMs?: number;
   readonly provenance: DurableValidationProvenance;
 }
 
@@ -24,6 +30,7 @@ export interface DurableValidationProvenance {
   readonly invocationId: string;
   readonly canonicalCwd: string;
   readonly subjectSha256: string | null;
+  readonly timeoutMs?: number;
 }
 
 export interface ValidationRunContext {
@@ -39,6 +46,7 @@ const ValidationProvenanceSchema = z.strictObject({
   invocationId: z.string().min(1),
   canonicalCwd: z.string().min(1),
   subjectSha256: z.string().min(1).nullable(),
+  timeoutMs: ValidationTimeoutSchema,
 });
 
 export const ValidationReportSchema = z.strictObject({
@@ -52,8 +60,15 @@ export const ValidationReportSchema = z.strictObject({
   command: z.array(z.string()).min(1),
   argvSha256: z.string().regex(/^[a-f0-9]{64}$/),
   outputSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  timeoutMs: ValidationTimeoutSchema,
   provenance: ValidationProvenanceSchema,
 }).superRefine((report, context) => {
+  if (report.timeoutMs !== report.provenance.timeoutMs) {
+    context.addIssue({
+      code: "custom",
+      message: "validation timeout must match provenance",
+    });
+  }
   if (report.outcome === "completed" && report.exitCode !== 0) {
     context.addIssue({ code: "custom", message: "completed validation requires exitCode 0" });
   }
@@ -95,19 +110,8 @@ export function isVerifiedValidationSubject(
   return verifiedValidationReports.get(report)?.subjectSha256 === subjectSha256;
 }
 
-export interface ValidationRunnerOptions {
-  readonly timeoutMs?: number;
-}
-
 export class ValidationRunner {
-  private readonly timeoutMs: number;
-
-  constructor(
-    private readonly supervisor: ProcessSupervisor,
-    options: ValidationRunnerOptions = {}
-  ) {
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  }
+  constructor(private readonly supervisor: ProcessSupervisor) {}
 
   async run(
     project: ProjectConfig,
@@ -116,11 +120,23 @@ export class ValidationRunner {
     signal: AbortSignal,
     context?: ValidationRunContext,
   ): Promise<ValidationReport> {
+    const timeout = ValidationTimeoutSchema.safeParse(
+      name === "focused"
+        ? project.validations.focusedTimeoutMs
+        : project.validations.fullTimeoutMs,
+    );
+    if (!timeout.success) {
+      throw new Error(
+        `${name} validation timeout must be an integer from ${MIN_VALIDATION_TIMEOUT_MS}ms through ${MAX_VALIDATION_TIMEOUT_MS}ms`,
+      );
+    }
+    const timeoutMs = timeout.data;
     const configuredCommand = project.validations[name];
     const command: readonly [string, ...string[]] = [
       configuredCommand[0],
       ...configuredCommand.slice(1),
     ];
+    assertApprovedValidationExecutable(command[0]);
     const invocationId = context?.invocationId ?? randomUUID();
     if (invocationId === "" || usedInvocationIds.has(invocationId)) {
       throw new Error("validation invocationId must be nonempty and single-use");
@@ -131,6 +147,7 @@ export class ValidationRunner {
     usedInvocationIds.add(invocationId);
     const canonicalCwd = await realpath(cwd);
     const startedAt = new Date().toISOString();
+    await assertApprovedValidationExecutableIdentity(command[0]);
 
     const result = await this.supervisor.execute(
       {
@@ -138,9 +155,10 @@ export class ValidationRunner {
         executable: command[0],
         args: command.slice(1),
         cwd: canonicalCwd,
-        timeoutMs: this.timeoutMs,
+        timeoutMs,
       },
-      signal
+      signal,
+      "validation",
     );
 
     const finishedAt = new Date().toISOString();
@@ -158,6 +176,7 @@ export class ValidationRunner {
       invocationId,
       canonicalCwd,
       subjectSha256: context?.subjectSha256 ?? null,
+      timeoutMs,
     });
 
     const parsed = ValidationReportSchema.parse({
@@ -171,6 +190,7 @@ export class ValidationRunner {
       command,
       argvSha256,
       outputSha256,
+      timeoutMs,
       provenance,
     });
     const frozen: ValidationReport = Object.freeze({

@@ -8,8 +8,8 @@ import { Command, CommanderError } from "commander";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
 import {
-  resolveBundledFixtures,
-  type BundledFixturePaths,
+  resolveBundledFixture,
+  type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
@@ -18,7 +18,10 @@ import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
 import { ProjectConfigSchema, type ProjectConfig } from "../projects/project-config.js";
 import { ProjectRegistry } from "../projects/project-registry.js";
 import { ReviewGate } from "../reviews/review-gate.js";
-import { DeterministicReviewerAdapter } from "../reviews/reviewer-adapter.js";
+import {
+  ProcessReviewerAdapter,
+  type ReviewerAdapter,
+} from "../reviews/reviewer-adapter.js";
 import { TaskService } from "../tasks/task-service.js";
 import type { TaskView } from "../tasks/task-projection.js";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
@@ -26,7 +29,6 @@ import { GitClient } from "../workspaces/git-client.js";
 import { WorktreeManager } from "../workspaces/worktree-manager.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
-const REVIEWER_ID = "zentra-deterministic-reviewer";
 const WORKER_TIMEOUT_MS = 120_000;
 const MAX_OPERATIONAL_JSON_BYTES = 16_384;
 const MAX_TASK_ID_LENGTH = 128;
@@ -81,6 +83,9 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
   readonly title: string;
   readonly file: string;
   readonly content: string;
+  readonly reviewerExecutable?: string;
+  readonly reviewerArgument: readonly string[];
+  readonly reviewerId?: string;
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
@@ -180,6 +185,14 @@ function createProgram(
     .requiredOption("--title <title>", "task title")
     .requiredOption("--file <relative-path>", "one root-level file")
     .requiredOption("--content <text>", "replacement file content")
+    .option("--reviewer-executable <path>", "content-aware reviewer executable")
+    .option(
+      "--reviewer-argument <value>",
+      "argument passed to the configured reviewer executable",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--reviewer-id <id>", "independent reviewer identity")
     .action(async (options: RunOptions) => {
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
@@ -195,30 +208,49 @@ function createProgram(
         projectId: projectConfig.projectId,
         title: options.title,
       });
-      const fixtures = attestedFixtures(fixtureAnchor);
-      const result = await withSystem(options.database, configs, "read-write", async (system) => {
-        const taskView = await system.execution(fixtures).orchestrator.run({
-          taskId: options.taskId,
-          projectId: projectConfig.projectId,
-          title: options.title,
-          workerId: WORKER_ID,
-          reviewerId: REVIEWER_ID,
-          workerRequest: {
-            executable: process.execPath,
-            args: [
-              fixtures["deterministic-worker.mjs"],
-              "--file",
-              options.file,
-              "--content",
-              options.content,
-            ],
-            timeoutMs: WORKER_TIMEOUT_MS,
-          },
-          signal,
+      const reviewer = configuredReviewer(options);
+      if (reviewer === null) {
+        const denied = await withSystem(
+          options.database,
+          configs,
+          "read-write",
+          (system) => Promise.resolve(denyMissingReviewer(system.tasks, {
+            taskId: options.taskId,
+            projectId: projectConfig.projectId,
+            title: options.title,
+          })),
+        );
+        setResult(taskRunResult(denied));
+        return;
+      }
+      const workerFixture = attestedWorkerFixture(fixtureAnchor);
+      try {
+        const result = await withSystem(options.database, configs, "read-write", async (system) => {
+          const taskView = await system.execution(workerFixture.path, reviewer.adapter).orchestrator.run({
+            taskId: options.taskId,
+            projectId: projectConfig.projectId,
+            title: options.title,
+            workerId: WORKER_ID,
+            reviewerId: reviewer.reviewerId,
+            workerRequest: {
+              executable: process.execPath,
+              args: [
+                workerFixture.path,
+                "--file",
+                options.file,
+                "--content",
+                options.content,
+              ],
+              timeoutMs: WORKER_TIMEOUT_MS,
+            },
+            signal,
+          });
+          return taskView;
         });
-        return taskView;
-      });
-      setResult(taskRunResult(result));
+        setResult(taskRunResult(result));
+      } finally {
+        workerFixture.cleanup();
+      }
     });
 
   task
@@ -316,7 +348,7 @@ function composeSystem(
       const { projects, git, worktrees } = developmentDependencies();
       return new RecoveryService(journal, tasks, projects, worktrees, git);
     },
-    execution(fixtures: BundledFixturePaths) {
+    execution(workerFixture: string, reviewer: ReviewerAdapter) {
       const { projects, git, worktrees } = developmentDependencies();
       const supervisor = new ProcessSupervisor();
       const validations = new ValidationRunner(supervisor);
@@ -327,12 +359,10 @@ function composeSystem(
           worktrees,
           supervisor,
           validations,
-          new DeterministicReviewerAdapter(
-            supervisor,
-            fixtures["deterministic-reviewer.mjs"],
-          ),
+          reviewer,
           new ReviewGate(),
           new IntegrationQueue(git, validations),
+          workerFixture,
         ),
       };
     },
@@ -373,12 +403,59 @@ function loadProjects(configPath: string): readonly ProjectConfig[] {
   }
 }
 
-function attestedFixtures(anchor?: string | URL): BundledFixturePaths {
+function attestedWorkerFixture(anchor?: string | URL): BundledFixture {
   try {
-    return anchor === undefined ? resolveBundledFixtures() : resolveBundledFixtures(anchor);
+    return anchor === undefined
+      ? resolveBundledFixture("deterministic-worker.mjs")
+      : resolveBundledFixture("deterministic-worker.mjs", anchor);
   } catch {
     throw new CliFailure("BUNDLED_FIXTURE_INVALID");
   }
+}
+
+function configuredReviewer(options: RunOptions): {
+  readonly reviewerId: string;
+  readonly adapter: ReviewerAdapter;
+} | null {
+  const executable = options.reviewerExecutable;
+  const reviewerId = options.reviewerId;
+  if (executable === undefined && reviewerId === undefined && options.reviewerArgument.length === 0) {
+    return null;
+  }
+  if (
+    executable === undefined ||
+    executable.length === 0 ||
+    reviewerId === undefined ||
+    reviewerId.length === 0
+  ) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+  return {
+    reviewerId,
+    adapter: new ProcessReviewerAdapter({
+      executable,
+      args: options.reviewerArgument,
+    }),
+  };
+}
+
+function denyMissingReviewer(
+  tasks: TaskService,
+  input: { readonly taskId: string; readonly projectId: string; readonly title: string },
+): TaskView {
+  tasks.create({
+    ...input,
+    correlationId: input.taskId,
+  });
+  return tasks.append(
+    input.taskId,
+    "task.denied",
+    {
+      stage: "setup",
+      reason: "content-aware reviewer is not configured",
+    },
+    null,
+  );
 }
 
 function assertSafeRootFile(candidate: string): void {

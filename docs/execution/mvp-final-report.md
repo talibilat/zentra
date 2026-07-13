@@ -2,7 +2,10 @@
 
 Date: 2026-07-12
 
-Status: Complete on `feature/zentra-mvp`
+Status: Immutable historical snapshot, complete on `feature/zentra-mvp` as of commit `5060c2f` on 2026-07-12.
+
+The MVP was subsequently merged into `main` by commit `b49f17a` through pull request #1 on 2026-07-12.
+See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for current remediation status.
 
 ## Outcome
 
@@ -12,7 +15,7 @@ The implementation is Zentra-only.
 It does not modify Vox or Zoe and does not add voice, email, meetings, personal tasks, devices, distributed execution, plugins, or real coding harnesses.
 
 The final implementation commit before this report is `5060c2f`.
-The branch is `feature/zentra-mvp` and remains separate from `main`.
+At the time of this snapshot, the branch was `feature/zentra-mvp` and remained separate from `main`.
 
 ## Verification Commands
 
@@ -95,11 +98,13 @@ Final review status:
 - Uncertain cleanup deliberately preserves inspectable state and may require manual reconciliation.
 - Malformed events with missing compared payload fields can share the same `undefined` snapshot representation, but strict recovery schemas reject those streams before authorizing effects.
 
-## Repository State
+## Historical Repository State
 
-- Branch: `feature/zentra-mvp`.
-- Main branch merge: not performed.
-- Pull request: not created.
-- GitHub issues: not created.
-- Force push: not used.
-- Branch deletion: not performed.
+This section records repository state at commit `5060c2f` on 2026-07-12, before the later merge described at the top of this report.
+
+- Snapshot branch: `feature/zentra-mvp`.
+- As of the snapshot, main branch merge: not performed.
+- As of the snapshot, pull request: not created.
+- As of the snapshot, GitHub issues: not created.
+- As of the snapshot, force push: not used.
+- As of the snapshot, branch deletion: not performed.
