@@ -1,5 +1,9 @@
 # Zentra Local Development Orchestrator MVP Implementation Plan
 
+Status: Historical implementation plan for the original MVP delivered at `b49f17a`.
+This document preserves the original task-by-task design and is not current package metadata, CLI, reviewer, validation, or support documentation.
+Current operator behavior is documented in `README.md` and `docs/release/support-policy.md`; current architecture remains governed by `docs/design/orchestrator.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 

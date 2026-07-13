@@ -17,7 +17,8 @@ Package-manager override flags do not convert an unsupported host into a support
 
 The exact Zentra engine range is `>=24 <27`, covering Node.js major versions 24, 25, and 26.
 Node.js 27 and later are unsupported.
-Strict engine enforcement rejects Node.js 27 with `EBADENGINE` before package installation proceeds.
+When npm strict engine enforcement is enabled, installation under Node.js 27 is rejected with `EBADENGINE` before package installation proceeds.
+The `engines` declaration states the supported range even where a package manager is configured to warn rather than fail.
 
 The locked native dependency is `better-sqlite3` 12.11.1.
 Its published package metadata declares `20.x || 22.x || 23.x || 24.x || 25.x || 26.x`, which includes every Zentra-supported major and excludes Node.js 27.

@@ -9,7 +9,8 @@
 
 ## Engineering Rules
 
-- Use Node.js 24 or newer and pnpm 10.
+- Use Node.js `>=24 <27` and pnpm 10.
+- The supported MVP host is Darwin arm64 only.
 - Follow test-driven development for behavioral changes.
 - Invoke subprocesses with executable and argument arrays and `shell: false`.
 - Configure validations with the approved canonical absolute executable path; relative, symlinked, wrapped, and alternate executable identities are rejected.

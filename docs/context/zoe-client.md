@@ -12,7 +12,8 @@ Zoe owns voice interaction, personal memory, user-facing conversation, attention
 
 The first Zentra MVP does not integrate with Zoe at runtime.
 
-It proves a local software-development workflow using deterministic worker and reviewer fixtures.
+It proves a local software-development workflow using a bundled deterministic worker and an explicitly configured independent content-aware reviewer.
+Identity-only deterministic reviewer fixtures exist only under tests and are not selectable by the production CLI.
 
 After that path is reliable, Zoe may submit typed development goals and query task, pod, evidence, approval, and attention state through a narrow API.
 

@@ -18,7 +18,7 @@ After pull request #1 merged the MVP into `main` at `b49f17a`, readers could int
 ## Changes Made
 
 Both execution reports now identify themselves as historical snapshots as of commit `5060c2f` on 2026-07-12.
-Both reports state that commit `b49f17a` subsequently merged the MVP into `main` through pull request #1 and link to the pre-deployment remediation progress ledger for current remediation status.
+Both reports state that commit `b49f17a` subsequently merged the MVP into `main` through pull request #1 and link to the pre-deployment remediation progress ledger for subsequent historical execution details.
 The handoff's obsolete merge prohibition and other imperative restrictions are now descriptions of constraints that governed the historical execution.
 Original commit identities, verification results, evidence, risks, and execution decisions remain unchanged.
 
@@ -38,7 +38,7 @@ All formerly current-looking merge instructions are qualified as historical exec
 
 ## Remaining Concerns
 
-The linked progress ledger tracks active pre-deployment remediation and will continue to change independently of these immutable historical reports.
+The linked progress ledger is now explicitly labeled as a historical execution record through commit `f674bf8`.
 
 ## Commit Identity
 

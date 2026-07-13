@@ -2,7 +2,8 @@
 
 ## Status
 
-Implemented and verified on `fix/predeploy-c2-metadata`.
+Package metadata and local Node.js 24 verification completed on `fix/predeploy-c2-metadata`.
+Node.js 25 and 26 runtime verification remains pending issue 024's Darwin arm64 CI matrix.
 
 ## Runtime Boundary
 

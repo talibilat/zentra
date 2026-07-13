@@ -5,6 +5,10 @@ The deployment findings comprise 3 Critical, 7 High, 9 Medium, and 8 Low issues.
 Issue 005 is the deferred enhancement and is excluded from deployment closure.
 Each linked issue is self-contained and assigns an execution wave, owner scope, dependencies, serialization constraints, acceptance criteria, tests, verification, and non-goals.
 
+The issue statuses, Problem sections, and Repository Evidence sections preserve the pre-deployment audit snapshot at commit `f54ba31`; they are not claims about the current tree.
+Completed remediation evidence is recorded in the matching `docs/execution/issue-*-implementation-report.md` files.
+Issue 024 remains open because the repository still has no automated CI or release workflow.
+
 Use `CLAUDE_EXECUTION_PROMPT.txt` for the detailed remediation waves and ownership model.
 
 Use `CLAUDE_OPENCODE_ORCHESTRATOR_PROMPT.txt` when Claude Code must act only as the orchestrator and every implementation and review agent must run through OpenCode.

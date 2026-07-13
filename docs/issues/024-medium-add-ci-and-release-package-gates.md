@@ -15,8 +15,9 @@ Local source-tree verification can pass while the release artifact is missing or
 ## Repository Evidence
 
 No files exist under `.github/workflows/`.
-`package.json:9-15` defines local build, check, test, and start scripts but no clean package verification command.
-`README.md:144-155` lists manual source-tree verification and does not test a tarball install.
+Local commands now provide `build`, `check`, `test`, `package:verify`, and `package:contents`.
+Package end-to-end tests pack the artifact, install it into an empty consumer, load `better-sqlite3`, run CLI help, and execute a SQLite-backed task.
+The remaining gap is automated execution on fresh Darwin arm64 runners across Node.js 24, 25, and 26, expected Node.js 27 rejection coverage, artifact retention, and release-job protection.
 
 ## Failure Sequence Or User Impact
 
