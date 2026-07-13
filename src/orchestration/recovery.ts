@@ -39,6 +39,12 @@ const LeasePayloadSchema = z.strictObject({
   leaseOwner: z.string().min(1),
   workspace: z.string().min(1),
 });
+const WorktreeCreationStartedPayloadSchema = z.strictObject({
+  taskId: z.string().min(1),
+  branch: z.string().min(1),
+  path: z.string().min(1),
+  base: z.string().min(1),
+});
 const StartedPayloadSchema = z.strictObject({
   workerId: z.string().min(1),
 });
@@ -154,6 +160,7 @@ const CreatedPayloadSchema = z.strictObject({
 
 interface RecoveryChain {
   readonly created: z.infer<typeof CreatedPayloadSchema>;
+  readonly worktreeCreationStarted: z.infer<typeof WorktreeCreationStartedPayloadSchema> | null;
   readonly lease: z.infer<typeof LeasePayloadSchema> | null;
   readonly started: z.infer<typeof StartedPayloadSchema> | null;
   readonly validationStarted: z.infer<typeof ValidationStartedPayloadSchema> | null;
@@ -216,6 +223,7 @@ export class RecoveryService {
     }
 
     const hasUncertainEffect = events.some((event) =>
+      event.type === "task.worktree_creation_started" ||
       event.type === "task.started" ||
       event.type === "task.commit_observed" ||
       event.type === "task.integration_started" ||
@@ -285,6 +293,84 @@ export class RecoveryService {
           );
         }
         return decision(taskId, "resume_preparation", "task creation is durable and workspace preparation has not started");
+      }
+
+      if (last.type === "task.worktree_creation_started") {
+        const intent = chain.worktreeCreationStarted!;
+        // Compare against the raw (non-canonicalized) configured path, the
+        // same identity WorktreeManager.create() recorded and the same
+        // comparison used for the durable task.leased workspace path above.
+        const rawExpectedPath = path.resolve(project.worktreeRoot, taskId);
+        if (
+          intent.path !== rawExpectedPath ||
+          intent.branch !== `ticket/${taskId}` ||
+          intent.base !== project.integrationBranch
+        ) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "prepared worktree creation intent does not match the current project configuration; preserved for operator review",
+          );
+        }
+
+        if (!workspace.registered && !workspace.branchExists && !workspace.pathExists) {
+          // No durable Git effect occurred at all: safe to resume/retry creation.
+          return decision(
+            taskId,
+            "resume_preparation",
+            "prepared worktree creation intent is durable but no Git effect occurred; creation may be resumed",
+          );
+        }
+
+        if (workspace.registered && workspace.branchExists && workspace.pathExists) {
+          // Fully created: verify the branch base is exactly the intended
+          // base before adopting it as if task.leased had been recorded.
+          const baseHead = await this.readRef(
+            project.repositoryPath,
+            `refs/heads/${project.integrationBranch}`,
+          );
+          if (baseHead === null) {
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "intended base branch could not be read while verifying a fully created worktree",
+            );
+          }
+          if (workspace.head !== baseHead) {
+            // Competing identity: a worktree/branch with the intended name
+            // exists but does not point at the intended base. Never delete
+            // or retry automatically; preserve for an operator.
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "ticket branch exists but does not point at the exact intended base commit; preserved for operator review",
+            );
+          }
+          if (workspace.dirty) {
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "fully created ticket worktree is unexpectedly dirty before any worker has started",
+            );
+          }
+          // Exact intended state: adopt it as if task.leased had already
+          // been recorded, so the caller can resume from the leased stage.
+          return decision(
+            taskId,
+            "resume_preparation",
+            "worktree creation reached the exact intended branch, path, and base; safe to adopt and resume from the leased stage",
+          );
+        }
+
+        // Partial or competing state: some but not all of registration,
+        // branch, and path exist, or they exist without matching the
+        // intended identity. Never auto-clean or auto-retry; preserve for
+        // an operator to reconcile.
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "worktree creation left partial or competing Git state that must not be automatically retried or cleaned up",
+        );
       }
 
       if (last.type === "task.cleanup_started") {
@@ -1115,6 +1201,18 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   const first = events[0]!;
   if (first.type !== "task.created") throw new Error("first event is not task.created");
   const created = parseEvent(CreatedPayloadSchema, first);
+  const worktreeCreationStarted = parseLastOccurrence(
+    WorktreeCreationStartedPayloadSchema,
+    events,
+    "task.worktree_creation_started",
+  );
+  if (
+    worktreeCreationStarted !== null &&
+    (worktreeCreationStarted.taskId !== taskId ||
+      worktreeCreationStarted.branch !== `ticket/${taskId}`)
+  ) {
+    throw new Error("worktree creation intent identity does not match the task");
+  }
   const lease = parseOptionalEvent(LeasePayloadSchema, events, "task.leased");
   const started = parseOptionalEvent(StartedPayloadSchema, events, "task.started");
   const validationStarted = parseOptionalEvent(
@@ -1338,6 +1436,7 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   }
   return {
     created,
+    worktreeCreationStarted,
     lease,
     started,
     validationStarted,
@@ -1361,6 +1460,18 @@ function parseOptionalEvent<T extends z.ZodType>(
   const matching = events.filter((event) => event.type === type);
   if (matching.length > 1) throw new Error(`${type} appears more than once`);
   return matching.length === 0 ? null : parseEvent(schema, matching[0]!);
+}
+
+// Some preparation events (e.g. task.worktree_creation_started) may
+// legitimately repeat across a resumed preparation attempt; only the most
+// recent occurrence reflects the current intended state.
+function parseLastOccurrence<T extends z.ZodType>(
+  schema: T,
+  events: readonly StoredEvent[],
+  type: string,
+): z.infer<T> | null {
+  const matching = events.filter((event) => event.type === type);
+  return matching.length === 0 ? null : parseEvent(schema, matching.at(-1)!);
 }
 
 function parseEvent<T extends z.ZodType>(schema: T, event: StoredEvent): z.infer<T> {

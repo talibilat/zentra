@@ -53,6 +53,7 @@ import type {
 } from "../workspaces/worktree-manager.js";
 import {
   WorkspaceCommitUncertainError,
+  WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
 } from "../workspaces/worktree-manager.js";
 
@@ -150,7 +151,14 @@ export class TracerBulletOrchestrator {
 
       const project = this.projects.get(input.projectId);
       await this.worktrees.ensureIntegrationBranch(project, gitOptions);
-      lease = await this.worktrees.create(project, input.taskId, gitOptions);
+      lease = await this.worktrees.create(project, input.taskId, gitOptions, (intent) => {
+        this.tasks.append(
+          input.taskId,
+          "task.worktree_creation_started",
+          intent,
+          null,
+        );
+      });
       this.tasks.append(
         input.taskId,
         "task.leased",
@@ -473,6 +481,19 @@ export class TracerBulletOrchestrator {
         return this.observeIntegration(input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         });
+      }
+      // Worktree creation is effectful: Git may have created the branch or
+      // worktree before an interruption even though create() never returned a
+      // lease. If durable "prepared" evidence exists (task.worktree_creation_started),
+      // leave the task nonterminal so recovery can inspect real Git state and
+      // reconcile instead of hiding an uncertain effect behind a terminal outcome.
+      if (
+        stage === "setup" &&
+        lease === null &&
+        (error instanceof WorkspaceGitTerminationError ||
+          error instanceof WorkspaceCreationUncertainError)
+      ) {
+        return this.current(input.taskId);
       }
       return this.terminate(
         input.taskId,

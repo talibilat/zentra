@@ -183,6 +183,28 @@ async function leaseTask(
   return lease;
 }
 
+function worktreeCreationIntent(testFixture: Fixture, taskId = "task-9") {
+  return {
+    taskId,
+    branch: `ticket/${taskId}`,
+    path: path.resolve(testFixture.project.worktreeRoot, taskId),
+    base: testFixture.project.integrationBranch,
+  };
+}
+
+function recordWorktreeCreationStarted(
+  tasks: TaskService,
+  testFixture: Fixture,
+  taskId = "task-9",
+): void {
+  tasks.append(
+    taskId,
+    "task.worktree_creation_started",
+    worktreeCreationIntent(testFixture, taskId),
+    null,
+  );
+}
+
 function completedValidation(
   command: readonly string[],
   name: "focused" | "full",
@@ -431,6 +453,167 @@ describe("RecoveryService", () => {
     await expect(recovery.inspect("task-9")).resolves.toMatchObject({
       action: "record_failure",
       reason: expect.stringMatching(/exists.*not.*registered/i),
+    });
+  });
+
+  describe("uncertain worktree creation (issue 002)", () => {
+    it("resumes preparation when prepared evidence is durable but no Git effect occurred", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "resume_preparation",
+      });
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(false);
+    });
+
+    it("adopts an exactly completed worktree creation as if task.leased had been recorded", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // The Git effect actually completed exactly as intended, but the
+      // caller never durably recorded task.leased (e.g. interrupted between
+      // Git success and the leased append).
+      await testFixture.worktrees.create(testFixture.project, "task-9");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "resume_preparation",
+        reason: expect.stringMatching(/exact intended branch, path, and base/i),
+      });
+      // Never automatically retried: the branch and worktree remain exactly
+      // as Git created them.
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(true);
+    });
+
+    it("awaits reconciliation and never auto-cleans a partial worktree creation (branch created without registration)", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // Simulate a partial effect: the ticket branch was created, but the
+      // worktree was never registered (e.g. interrupted between the two).
+      await gitOk(testFixture.project.repositoryPath, ["branch", "ticket/task-9"]);
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      const decision = await restarted.recovery.inspect("task-9");
+      expect(decision.action).toBe("await_reconciliation");
+      // The branch must be preserved, not deleted or retried.
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).toBe(0);
+    });
+
+    it("preserves a competing ticket branch that exists with the wrong base commit, never deleting it", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // A branch with the exact intended name exists, but points at a
+      // commit that is not the intended base (e.g. created by a stale or
+      // competing process, or left over from a previous unrelated attempt).
+      await gitOk(testFixture.project.repositoryPath, [
+        "branch", "ticket/task-9", "HEAD",
+      ]);
+      await gitOk(testFixture.project.repositoryPath, [
+        "worktree", "add", path.join(testFixture.project.worktreeRoot, "task-9"), "ticket/task-9",
+      ]);
+      await gitOk(
+        path.join(testFixture.project.worktreeRoot, "task-9"),
+        ["commit", "--allow-empty", "-m", "competing commit not from the intended base"],
+      );
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      const decision = await restarted.recovery.inspect("task-9");
+      expect(decision.action).toBe("await_reconciliation");
+      expect(decision.reason).toMatch(/exact intended base|does not point/i);
+      const branch = await new GitClient().run(testFixture.project.repositoryPath, [
+        "show-ref", "--verify", "refs/heads/ticket/task-9",
+      ]);
+      expect(branch.exitCode).toBe(0);
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(true);
+    });
+
+    it("fails closed (dirty path refusal) when the configured path exists but is not an exact registered worktree", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      // The configured path exists but was never registered by Git at all
+      // (occupied by something else entirely).
+      mkdirSync(path.join(testFixture.project.worktreeRoot, "task-9"));
+      writeFileSync(path.join(testFixture.project.worktreeRoot, "task-9", "occupied.txt"), "dirty\n");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      const decision = await restarted.recovery.inspect("task-9");
+      expect(decision.action).toBe("await_reconciliation");
+      expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9", "occupied.txt"))).toBe(true);
+    });
+
+    it("preserves prepared evidence and never retries when the recorded intent contradicts current project configuration", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      // Record an intent whose base does not match the project's configured
+      // integration branch (e.g. stale evidence from a reconfiguration).
+      first.tasks.append(
+        "task-9",
+        "task.worktree_creation_started",
+        { ...worktreeCreationIntent(testFixture), base: "some-other-branch" },
+        null,
+      );
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "await_reconciliation",
+        reason: expect.stringMatching(/does not match the current project configuration/i),
+      });
+    });
+
+    it("REGRESSION: a terminal outcome must never hide uncertain worktree creation from reconciliation", async () => {
+      // This is the exact bug from issue 002: under the old tracer-bullet
+      // behavior, an interrupted git worktree add was unconditionally
+      // terminalized (task.cancelled), and recovery's blind
+      // `if (task.lifecycle === "terminal") return await_reconciliation`
+      // no-op meant the orphaned branch/worktree could never be reconciled.
+      //
+      // Against the OLD code this test would fail: appending task.cancelled
+      // after only task.created/task.worktree_creation_started would make
+      // the task terminal, and the terminal short-circuit would return a
+      // no-op await_reconciliation decision without ever inspecting Git, so
+      // the assertion on the *reason* mentioning real Git state would fail
+      // (it would instead read "task is already terminal ... no-op").
+      //
+      // Against the fixed code, tracer-bullet never appends a terminal
+      // outcome for an interrupted worktree creation in the first place, so
+      // the task remains nonterminal and this exact Git-inspecting branch is
+      // reached and reconciles the real state instead of hiding it.
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      await testFixture.worktrees.create(testFixture.project, "task-9");
+      closeJournal(first.journal);
+
+      const restarted = openSystem(testFixture);
+      const task = restarted.tasks.get("task-9");
+      expect(task?.lifecycle).not.toBe("terminal");
+
+      const decision = await restarted.recovery.inspect("task-9");
+      expect(decision.action).toBe("resume_preparation");
+      expect(decision.reason).toMatch(/exact intended branch, path, and base/i);
+      expect(decision.reason).not.toMatch(/already terminal/i);
     });
   });
 
