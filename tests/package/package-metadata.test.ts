@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -14,11 +14,9 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const nodeExecutable = realpathSync(process.execPath);
 const npmExecutable = realpathSync(path.join(path.dirname(nodeExecutable), "npm"));
@@ -56,18 +54,135 @@ interface PackResult {
   readonly filename: string;
 }
 
+interface CommandResult {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 afterAll(() => {
   rmSync(temporaryRoot, { recursive: true, force: true });
 });
 
-async function run(executable: string, args: readonly string[], cwd: string) {
+async function run(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  timeoutMs = 120_000,
+): Promise<CommandResult> {
   if (!path.isAbsolute(executable)) throw new Error(`test executable must be absolute: ${executable}`);
-  return execFileAsync(executable, [...args], {
-    cwd,
-    env: commandEnvironment,
-    maxBuffer: 10 * 1_024 * 1_024,
-    timeout: 120_000,
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, [...args], {
+      cwd,
+      detached: true,
+      env: commandEnvironment,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const maxBuffer = 10 * 1_024 * 1_024;
+    let outputBytes = 0;
+    let settling = false;
+    let closed = false;
+    let resolveClosed: (() => void) | undefined;
+    const closedPromise = new Promise<void>((resolveClose) => {
+      resolveClosed = resolveClose;
+    });
+
+    const timer = setTimeout(() => void settle("ETIMEDOUT", false), timeoutMs);
+
+    const capture = (destination: Buffer[], chunk: Buffer): void => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > maxBuffer) {
+        void settle("ENOBUFS", false);
+        return;
+      }
+      destination.push(chunk);
+    };
+
+    const settle = async (code: number | string | null, graceful: boolean): Promise<void> => {
+      if (settling) return;
+      settling = true;
+      clearTimeout(timer);
+      const pid = child.pid;
+      try {
+        if (pid !== undefined) await terminateProcessGroup(pid, graceful);
+        if (!closed) {
+          await new Promise<void>((resolveClose, rejectClose) => {
+            const closeTimer = setTimeout(
+              () => rejectClose(new Error("command streams did not close after process-group termination")),
+              1_000,
+            );
+            void closedPromise.then(() => {
+              clearTimeout(closeTimer);
+              resolveClose();
+            });
+          });
+        }
+        const result = {
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        };
+        if (code === 0) {
+          resolve(result);
+          return;
+        }
+        reject(Object.assign(new Error(`command failed with code ${String(code)}`), result, { code }));
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      settling = true;
+      reject(error);
+    });
+    child.on("exit", (code) => void settle(code, true));
+    child.on("close", () => {
+      closed = true;
+      resolveClosed?.();
+    });
   });
+}
+
+async function terminateProcessGroup(pid: number, graceful: boolean): Promise<void> {
+  if (graceful && processGroupExists(pid)) {
+    signalProcessGroup(pid, "SIGTERM");
+    if (await waitForProcessGroupExit(pid, 250)) return;
+  }
+  if (processGroupExists(pid)) signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, 1_000))) {
+    throw new Error(`command process group ${pid} survived bounded termination`);
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return true;
 }
 
 function runNpm(args: readonly string[], cwd: string) {
@@ -131,6 +246,21 @@ function createSimulationPreload(name: string, source: string): string {
 const tarball = createTarball();
 
 describe("MVP package platform metadata", () => {
+  it("terminates and reaps command descendants before returning", async () => {
+    const source = [
+      'const { spawn } = require("node:child_process");',
+      'const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+      "process.stdout.write(String(child.pid));",
+      "child.unref();",
+    ].join("\n");
+
+    const result = await run(nodeExecutable, ["--eval", source], temporaryRoot, 1_000);
+    const descendantPid = Number(result.stdout);
+
+    expect(descendantPid).toBeGreaterThan(0);
+    expect(() => process.kill(descendantPid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+  });
+
   it("declares only the locally conformed Darwin arm64 target", () => {
     const metadata = readMetadata(path.join(repositoryRoot, "package.json"));
 

@@ -1,8 +1,5 @@
 # Pre-Deployment Remediation Progress Ledger
 
-Historical execution ledger through commit `f674bf8`.
-Active-process, current-head, blocker, and next-action fields below are not current after that commit.
-
 Integration steward: Claude Code (orchestration controller only; no product-code edits).
 All implementation, testing, review, and documentation edits are performed by separate OpenCode processes.
 

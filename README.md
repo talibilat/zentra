@@ -10,8 +10,7 @@ Zoe is a client of Zentra rather than part of this repository, and Zentra does n
 
 The current MVP runs on one local machine for one user and executes one deterministic tracer-bullet task at a time against one configured Git project.
 
-It uses a bundled deterministic worker and requires an explicitly configured independent content-aware reviewer to prove the orchestration contracts without exposing a general coding harness.
-Zentra exposes no dedicated shell command or shell-string execution API.
+It uses bundled deterministic worker and reviewer fixtures to prove the orchestration contracts without exposing a general coding harness or shell interface.
 
 Real coding harnesses, high concurrency, distributed execution, plugin APIs, and Zoe personal capabilities are explicitly not included yet.
 
@@ -101,36 +100,8 @@ pnpm start -- task run \
   --task-id task-greeting \
   --title "Update greeting" \
   --file greeting.txt \
-  --content $'hello from Zentra\n' \
-  --reviewer-executable /absolute/path/to/node \
-  --reviewer-argument /absolute/path/to/content-aware-reviewer.mjs \
-  --reviewer-id independent-reviewer
+  --content $'hello from Zentra\n'
 ```
-
-`--reviewer-executable` and `--reviewer-id` are required together when reviewer configuration is present, and `--reviewer-argument` may be repeated.
-Partial reviewer configuration is rejected as `INVALID_COMMAND`.
-If no reviewer is configured, Zentra creates the task, records a terminal `denied` outcome before worktree creation, and exits nonzero.
-
-### Reviewer Protocol
-
-Zentra starts the configured reviewer with `shell: false`, writes one JSON request to standard input, and requires exactly one nonempty JSON line on standard output.
-The schema-version `1` request contains a random challenge, worker and reviewer identities, the exact diff, the complete focused-validation report, and SHA-256 digests for the diff and validation evidence.
-The reviewer must inspect that evidence and return this strict object with no additional fields:
-
-```json
-{
-  "reviewerId": "independent-reviewer",
-  "decision": "approve",
-  "requestSha256": "sha256-of-the-exact-request-bytes",
-  "diffSha256": "sha256-from-the-request-after-verification",
-  "validationSha256": "sha256-from-the-request-after-verification",
-  "decidedAt": "2026-07-13T12:00:00.000Z",
-  "reason": "The diff and validation evidence satisfy the review policy."
-}
-```
-
-`decision` must be `approve` or `deny`, `reason` is required and limited to 4096 characters, and every identity and digest must match the request.
-The production CLI uses a 30-second reviewer timeout, a 2 MiB request limit, a 16 KiB combined output limit, `/tmp` as the working directory, and an environment restricted to `PATH`, `HOME`, `TMPDIR`, `LANG`, and `LC_ALL` when present.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
@@ -169,17 +140,11 @@ Task identities are also validated as safe single path and ref components before
 
 ## Security Boundary
 
-The CLI chooses Zentra's bundled deterministic worker internally; CLI callers cannot select or replace that worker.
-
-Reviewer configuration is an additional trusted-code boundary.
-The CLI caller selects the reviewer executable and arguments, and that executable runs with the operating-system authority of the user running Zentra.
-Reviewer supervision bounds protocol input, output, runtime, environment inheritance, and descendant handling, but it is not a filesystem sandbox.
-Using `shell: false` prevents implicit shell-string interpretation; it does not make a caller-selected executable safe or prevent selecting a shell explicitly.
-Reviewer executables must come only from an operator-controlled trusted toolchain.
+The CLI chooses Zentra's bundled deterministic worker and reviewer executables internally; CLI callers cannot select or replace those executables.
 
 Configured validations are different: trusted project configuration supplies their argument arrays, while each validation executable must exactly match the approved canonical absolute path of the Node.js executable running Zentra.
 
-CLI callers cannot provide a working directory, workspace, or worker fixture.
+CLI callers cannot provide a working directory, workspace, worker fixture, or reviewer fixture.
 
 Workers, reviewers, and validations receive explicit minimal environments and do not inherit arbitrary parent secrets.
 
@@ -213,23 +178,6 @@ Recovery is read-only classification and never automatically retries a potential
 
 An `await_reconciliation` decision means a human or later bounded workflow must reconcile uncertain state before another effect is authorized.
 
-## Package Verification
-
-`npm pack` runs the `prepack` lifecycle, which removes stale production output, rebuilds `dist`, and verifies the generated manifest before npm selects tarball contents.
-`pnpm package:verify` verifies fresh output against package metadata, the lockfile, configuration, scripts, fixtures, and source inputs.
-`pnpm package:contents` performs independent clean packs under umasks `022` and `077` and compares normalized paths, modes, metadata, and SHA-256 content digests.
-
-The packed artifact contains production output, `fixtures/deterministic-worker.mjs`, README, package metadata, and `LICENSE` when present.
-It excludes tests, TypeScript source, internal documentation, package scripts, and reviewer fixtures.
-Package end-to-end tests install the tarball into an empty consumer, load `better-sqlite3`, open SQLite, run CLI help, and execute a SQLite-backed task.
-
-```bash
-pnpm build
-pnpm package:verify
-pnpm package:contents
-npm pack --silent
-```
-
 ## Tests
 
 Run the complete test suite, type check, build, and built CLI help verification from the repository root.
@@ -238,8 +186,6 @@ Run the complete test suite, type check, build, and built CLI help verification 
 pnpm test
 pnpm check
 pnpm build
-pnpm package:verify
-pnpm package:contents
 pnpm start -- --help
 ```
 

@@ -621,7 +621,7 @@ function parseWorkerInput(args: readonly string[]): DeterministicWorkerInput {
   if (file === undefined || content === undefined || values.size !== 2) {
     throw new Error("worker args require exactly --file and --content");
   }
-  // MVP fixture scope is deliberately one caller-selected safe root-level file.
+  // MVP fixture scope is deliberately one root-level file, currently greeting.txt.
   if (file.includes("/") || file.includes("\\")) {
     throw new Error("worker --file must be one root-level filename without slashes");
   }

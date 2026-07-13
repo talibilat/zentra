@@ -19,6 +19,7 @@ That exact observation is documented as evidence rather than converted into an u
 - Added a dedicated metadata test without changing issue 012's `tests/package/package-e2e.test.ts`.
 - Added a real packed install that loads `better-sqlite3` and runs CLI help on the supported host.
 - Added a controlled Linux-target simulation that launches canonical Node and npm, must return `EBADPLATFORM`, and leaves Zentra uninstalled.
+- Made the package-metadata command helper own a detached process group, terminate lingering descendants within bounded grace periods, and verify group and descendant disappearance before returning.
 - Updated installation guidance and added the release support policy with explicit widening gates.
 
 ## TDD Evidence
@@ -29,7 +30,7 @@ The supported Darwin arm64 packed-install, native-addon load, and CLI help test 
 
 ## Verification
 
-- `pnpm exec vitest run tests/package/package-metadata.test.ts` passed 4 of 4 tests.
+- `pnpm exec vitest run tests/package/package-metadata.test.ts` passed 9 of 9 tests.
 - `pnpm check` passed with no diagnostics.
 - The supported package test performed a clean tarball install, loaded `better-sqlite3` 12.11.1, opened an in-memory SQLite database, and ran packed CLI help on Node 24.2.0, macOS 26.6 arm64.
 - The controlled unsupported-target test preloaded canonical npm 11.8.0 with Linux arm64 runtime identifiers, ran a real strict install of the packed package, observed `EBADPLATFORM` with required OS `darwin` and actual OS `linux`, and confirmed that `node_modules/zentra` was not created.

@@ -2,7 +2,7 @@
 
 Immutable historical snapshot: This document preserves the execution state as of commit `5060c2f` on 2026-07-12.
 The MVP was subsequently merged into `main` by commit `b49f17a` through pull request #1 on 2026-07-12.
-See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for subsequent historical execution details.
+See the [pre-deployment remediation progress ledger](pre-deployment-progress.md) for current remediation status.
 
 This handoff records the completed Zentra-only local orchestrator MVP.
 At the time of this snapshot, the implementation remained on `feature/zentra-mvp` pending a separate human merge decision.

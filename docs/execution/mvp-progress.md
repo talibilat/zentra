@@ -1,8 +1,5 @@
 # Zentra MVP Execution Progress
 
-Immutable historical snapshot: This document preserves the original MVP execution state through commit `5060c2f`.
-Its current-state, blocker, and next-action fields are not current repository status.
-
 ## Current State
 
 - Current phase: MVP implementation and completion gate are complete.

@@ -24,6 +24,7 @@ The implementation host provides Node.js 24.2.0 only, so this report does not in
 - Changed the Zentra package engine from unbounded `>=24` to exact `>=24 <27`.
 - Added source and packed metadata assertions in the dedicated package metadata suite.
 - Added a controlled Node.js 27 simulation that launches canonical Node and npm, runs a real `npm install --engine-strict`, requires `EBADENGINE`, and confirms that Zentra was not installed.
+- Made the package-metadata command helper own a detached process group, terminate lingering descendants within bounded grace periods, and verify group and descendant disappearance before returning.
 - Updated README installation prerequisites and the release support policy.
 - Documented the exact Node.js 24/25/26 matrix that issue 024 must implement without adding a CI workflow in this issue.
 - Required an explicit compatibility issue and successful full matrix before widening the upper bound.
@@ -43,10 +44,10 @@ The native dependency compatibility assertion already passed in that red run.
 
 ## Verification
 
-- `pnpm exec vitest run tests/package/package-metadata.test.ts` passed 8 of 8 tests.
-- `pnpm exec vitest run tests/package/package-metadata.test.ts tests/package/package-e2e.test.ts` passed 24 of 24 package tests.
+- `pnpm exec vitest run tests/package/package-metadata.test.ts` passed 9 of 9 tests.
+- `pnpm exec vitest run tests/package/package-metadata.test.ts tests/package/package-e2e.test.ts` passed 25 of 25 package tests.
 - The package smoke test packed from clean output, installed into an empty consumer, loaded `better-sqlite3`, opened an in-memory SQLite database, ran CLI help, and completed a SQLite-backed task through the packed CLI.
-- `pnpm test` passed 692 of 692 tests across 19 files in 45.43 seconds.
+- `pnpm test` passed 693 of 693 tests across 19 files in 47.35 seconds.
 - `pnpm check` passed with no diagnostics.
 - `pnpm build` passed.
 - `pnpm package:verify` passed against fresh production output.
