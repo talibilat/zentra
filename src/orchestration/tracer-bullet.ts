@@ -10,6 +10,7 @@ import type {
 } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
 import {
+  ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
   artifactEvidenceSha256,
   type ArtifactKind,
   type PatchArtifactEvidence,
@@ -214,6 +215,15 @@ export class TracerBulletOrchestrator {
         input.signal,
         { invocationId: validationInvocationId, subjectSha256: diffSha256 },
       );
+      if (validation.provenance.subjectSha256 !== diffSha256) {
+        return this.terminate(
+          input.taskId,
+          "failed",
+          stage,
+          "focused validation report subject does not match the patch digest",
+          { validation },
+        );
+      }
       this.recordArtifact(input.taskId, "validation_report", validation);
       const validationOutcome = failedValidationOutcome(validation);
       if (validationOutcome !== null) {
@@ -314,7 +324,6 @@ export class TracerBulletOrchestrator {
 
       stage = "integration";
       let receipt: IntegrationReceipt;
-      let receiptRecorded = false;
       try {
         receipt = await this.integrations.integrate({
           project,
@@ -322,13 +331,13 @@ export class TracerBulletOrchestrator {
           review: verifiedReview,
           signal: input.signal,
           onPrepared: (preparedReceipt) => {
-            this.tasks.append(
+            this.recordArtifact(
               input.taskId,
-              "artifact.integration_receipt_recorded",
-              this.artifactPayload(input.taskId, "integration_receipt", preparedReceipt),
-              null,
+              "integration_receipt",
+              preparedReceipt,
+              undefined,
+              "prepared",
             );
-            receiptRecorded = true;
             this.tasks.append(
               input.taskId,
               "task.integration_prepared",
@@ -349,10 +358,14 @@ export class TracerBulletOrchestrator {
           error: { name: errorName(error), message: errorMessage(error) },
         });
       }
-      if (!receiptRecorded) {
-        this.recordArtifact(input.taskId, "integration_receipt", receipt);
-      }
       if (receipt.outcome !== "completed") {
+        this.recordArtifact(
+          input.taskId,
+          "integration_receipt",
+          receipt,
+          undefined,
+          "final",
+        );
         return this.terminate(
           input.taskId,
           receipt.outcome,
@@ -511,11 +524,30 @@ export class TracerBulletOrchestrator {
     kind: ArtifactKind,
     evidence: unknown,
     digest = artifactEvidenceSha256(kind, evidence),
+    phase?: "prepared" | "final",
   ): void {
+    const payload = this.artifactPayload(taskId, kind, evidence, digest, phase) as {
+      readonly artifact: {
+        readonly artifactId: string;
+        readonly kind: ArtifactKind;
+        readonly sha256: string;
+      };
+    };
+    this.tasks.append(
+      taskId,
+      ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
+      {
+        artifactProtocolVersion: 1,
+        artifactId: payload.artifact.artifactId,
+        kind: payload.artifact.kind,
+        sha256: payload.artifact.sha256,
+      },
+      null,
+    );
     this.tasks.append(
       taskId,
       `artifact.${kind}_recorded`,
-      this.artifactPayload(taskId, kind, evidence, digest),
+      payload,
       null,
     );
   }
@@ -525,6 +557,7 @@ export class TracerBulletOrchestrator {
     kind: ArtifactKind,
     evidence: unknown,
     digest = artifactEvidenceSha256(kind, evidence),
+    phase?: "prepared" | "final",
   ): unknown {
     const logicalPaths: Record<ArtifactKind, string> = {
       patch: "artifacts/patch.diff",
@@ -542,6 +575,7 @@ export class TracerBulletOrchestrator {
         createdAt: new Date().toISOString(),
       },
       evidence,
+      ...(phase === undefined ? {} : { phase }),
     };
   }
 

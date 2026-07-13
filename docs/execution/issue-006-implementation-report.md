@@ -7,6 +7,7 @@ Implemented and verified.
 The tracer now records patch, focused-validation, independent-review, and integration-receipt artifacts as explicit typed journal events.
 Artifact replay is independent of mutable worktree and candidate paths.
 The implementation was recovered after integration commit `55076c2` was reverted by `57d812c`, then corrected for the omitted delete-all-artifact-events review finding.
+The subsequent independent review's five Important findings are now resolved with explicit artifact-protocol markers, strict lifecycle evidence requirements, complete provenance binding, prepared-versus-final receipt phases, and canonical validation semantics.
 
 ## Root Cause
 
@@ -51,6 +52,21 @@ Identity, path, timestamp, command, output, diff, review, and receipt strings no
 Malformed payload and duplicate-identity failures use fixed deterministic messages without raw Zod diagnostics or attacker-controlled identity interpolation.
 Contiguous legacy streams without artifact events remain readable, while streams containing artifact events or deleted-event version gaps are validated strictly.
 
+Every newly recorded artifact is preceded by a `task.artifact_recording` marker that binds protocol version, artifact identity, kind, and digest.
+The artifact projection requires the exact marked artifact next and therefore detects deletion of a trailing artifact even when no surviving adjacency reveals a stream-version gap.
+Task projection permits the marker's bounded in-flight state between the two journal appends, while direct artifact replay fails closed on a marker without its artifact.
+
+Lifecycle replay now requires `task.review_requested.validation`, `task.review_approved.review`, `task.integration_started.review`, and `task.integration_prepared.receipt` rather than validating those properties only when present.
+Focused validation provenance must name the exact patch digest, review evidence must use the requested reviewer, and receipt evidence must match the stream task, created project, integration source, retained review, candidate result, and full-validation subject.
+
+Integration receipt artifacts now distinguish optional `prepared` and `final` phases.
+The recoverable pre-CAS completed receipt is recorded as prepared evidence, while a deterministic post-preparation CAS failure records a final failed receipt that supersedes the prepared artifact in the rebuilt view.
+Successful integration retains the prepared receipt as the exact final receipt only after queue provenance and Git state are verified.
+Legacy pre-CAS receipt events without an explicit phase are inferred as prepared only when a later matching `task.integration_prepared` event proves that historical meaning.
+
+Validation artifact evidence now enforces the canonical outcome and exit-code combinations and requires `finishedAt` not to precede `startedAt`.
+Historical reports that predate timeout fields remain accepted, while reports that contain timeout fields must retain matching bounded top-level and provenance values.
+
 ## Tests Added
 
 - Contract acceptance for patch, validation report, review report, and integration receipt events.
@@ -66,6 +82,11 @@ Contiguous legacy streams without artifact events remain readable, while streams
 - Failure-stage artifact enumeration for worker cancellation, validation failure, review denial or rejection, commit termination, and integration failure.
 - End-to-end deletion of every `artifact.*_recorded` event followed by replay rejection for the missing patch artifact.
 - Acceptance and bounded mismatch rejection for issue 023 validation timeout evidence.
+- Crash-after-append deletion tests for patch, validation, review, and integration-receipt artifacts.
+- Missing-property tamper tests for every evidence-bearing lifecycle event.
+- Substitution tests for focused subject, requested reviewer, receipt task, project, source, result, and full-validation provenance.
+- A real-Git tracer test where the integration ref moves after preparation and CAS returns a final terminal failure.
+- Malformed validation tests for outcome and exit-code contradictions, reversed timestamps, and historical timeout omission.
 
 ## Commands And Results
 
@@ -78,6 +99,11 @@ Contiguous legacy streams without artifact events remain readable, while streams
 - `pnpm check`: passed with no TypeScript errors.
 - `pnpm build`: passed.
 - `git diff --check`: passed with no output.
+- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/orchestration/tracer-bullet.test.ts` after the independent-review fixes: passed, 2 test files and 114 tests.
+- `pnpm test` after the independent-review fixes: passed, 18 test files and 618 tests.
+- `pnpm check` after the independent-review fixes: passed with no TypeScript errors.
+- `pnpm build` after the independent-review fixes: passed.
+- `git diff --check` after the independent-review fixes: passed with no output.
 
 ## Acceptance Criteria Evidence
 
@@ -87,6 +113,9 @@ Contiguous legacy streams without artifact events remain readable, while streams
 - `projectArtifacts(journal.readStream(taskId))` enumerates all artifacts after the worktree has been removed.
 - Tampered replay fails closed for identity, digest, order, individual missing-reference violations, and deletion of all artifact events with deterministic bounded errors.
 - Changing both recorded patch digest fields cannot defeat replay because the retained exact diff bytes provide an independent digest source.
+- A surviving artifact-protocol marker makes every trailing artifact deletion detectable without relying on a following event or version gap.
+- Prepared integration evidence remains restart-recoverable, while final failed CAS evidence is exact, typed, terminal, and non-contradictory.
+- Validation, review, and receipt artifacts are bound through the full task, project, identity, digest, commit, result, and validation-provenance chain.
 
 ## Required Test Review
 

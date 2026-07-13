@@ -154,6 +154,7 @@ interface SystemOverrides {
   readonly reviewer?: ReviewerAdapter;
   readonly worktrees?: WorktreeManager;
   readonly integrations?: IntegrationQueue;
+  readonly taskService?: (journal: SqliteEventJournal) => TaskService;
 }
 
 function system(configPath: string, overrides: SystemOverrides = {}) {
@@ -162,7 +163,7 @@ function system(configPath: string, overrides: SystemOverrides = {}) {
   const supervisor = new ProcessSupervisor();
   const validations = overrides.validations ?? new ValidationRunner(supervisor);
   const worktrees = overrides.worktrees ?? new WorktreeManager();
-  const tasks = new TaskService(journal);
+  const tasks = overrides.taskService?.(journal) ?? new TaskService(journal);
   const orchestrator = new TracerBulletOrchestrator(
     tasks,
     ProjectRegistry.fromFile(configPath),
@@ -250,7 +251,7 @@ describe("TracerBulletOrchestrator", () => {
       title: "Update greeting",
       lifecycle: "terminal",
       terminalOutcome: "completed",
-      streamVersion: 16,
+      streamVersion: 20,
       leaseOwner: "worker-1",
     });
     expect(tasks.get("task-greeting")).toEqual(result);
@@ -266,13 +267,17 @@ describe("TracerBulletOrchestrator", () => {
       "task.created",
       "task.leased",
       "task.started",
+      "task.artifact_recording",
       "artifact.patch_recorded",
       "task.validation_started",
+      "task.artifact_recording",
       "artifact.validation_report_recorded",
       "task.review_requested",
+      "task.artifact_recording",
       "artifact.review_report_recorded",
       "task.review_approved",
       "task.integration_started",
+      "task.artifact_recording",
       "artifact.integration_receipt_recorded",
       "task.integration_prepared",
       "task.integration_observed",
@@ -325,6 +330,7 @@ describe("TracerBulletOrchestrator", () => {
       (artifact) => artifact.kind === "integration_receipt",
     )!;
     expect(receiptArtifact.sha256).toBe(sha256(JSON.stringify(completed.receipt)));
+    expect(artifactView.phaseByArtifactId[receiptArtifact.artifactId]).toBe("final");
     expect(artifactView.artifacts.every((artifact) => artifact.path.startsWith("artifacts/"))).toBe(
       true,
     );
@@ -347,6 +353,93 @@ describe("TracerBulletOrchestrator", () => {
     );
 
     expect(() => projectArtifacts(tamperedEvents)).toThrow("missing patch artifact");
+  });
+
+  it.each([
+    "patch",
+    "validation_report",
+    "review_report",
+    "integration_receipt",
+  ] as const)("detects trailing %s artifact deletion after an immediate crash", async (kind) => {
+    const fixture = await fixtureRepository();
+    class CrashAfterArtifactTaskService extends TaskService {
+      private crashed = false;
+
+      override append(...args: Parameters<TaskService["append"]>): ReturnType<TaskService["append"]> {
+        if (this.crashed) throw new Error(`simulated crash after ${kind}`);
+        const view = super.append(...args);
+        if (args[1] === `artifact.${kind}_recorded`) {
+          this.crashed = true;
+          throw new Error(`simulated crash after ${kind}`);
+        }
+        return view;
+      }
+
+      override get(taskId: string): ReturnType<TaskService["get"]> {
+        if (this.crashed) throw new Error(`simulated crash after ${kind}`);
+        return super.get(taskId);
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      taskService: (stream) => new CrashAfterArtifactTaskService(stream),
+    });
+
+    await expect(orchestrator.run({
+      ...runInput,
+      taskId: `task-crash-${kind}`,
+      signal: runSignal(),
+    })).rejects.toThrow(`simulated crash after ${kind}`);
+    const stream = journal.readStream(`task-crash-${kind}`);
+    expect(stream.at(-1)?.type).toBe(`artifact.${kind}_recorded`);
+
+    expect(() => projectArtifacts(stream.slice(0, -1))).toThrow(
+      `artifact protocol marker references missing ${kind} artifact`,
+    );
+  });
+
+  it("records a final failed receipt when the integration ref moves after preparation", async () => {
+    const fixture = await fixtureRepository();
+    const validations = new ValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new GitClient(), validations);
+    class PostPreparationCasFailure extends IntegrationQueue {
+      override integrate(input: Parameters<IntegrationQueue["integrate"]>[0]): Promise<IntegrationReceipt> {
+        return delegate.integrate({
+          ...input,
+          onPrepared: async (prepared) => {
+            await input.onPrepared?.(prepared);
+            await gitOk(input.project.repositoryPath, ["switch", input.project.integrationBranch]);
+            writeFileSync(path.join(input.project.repositoryPath, "competing.txt"), "competing\n");
+            await gitOk(input.project.repositoryPath, ["add", "--", "competing.txt"]);
+            await gitOk(input.project.repositoryPath, ["commit", "-m", "competing integration"]);
+          },
+        });
+      }
+    }
+    const { journal, orchestrator } = system(fixture.configPath, {
+      validations,
+      integrations: new PostPreparationCasFailure(new GitClient(), validations),
+    });
+
+    const result = await orchestrator.run({
+      ...runInput,
+      taskId: "task-post-preparation-cas-failure",
+      signal: runSignal(),
+    });
+
+    expect(result).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
+    const events = journal.readStream(result.taskId);
+    expect(events.find((event) => event.type === "task.integration_prepared")?.payload)
+      .toMatchObject({ receipt: { outcome: "completed" } });
+    expect(events.at(-1)).toMatchObject({
+      type: "task.failed",
+      payload: { receipt: { outcome: "failed", resultCommit: null } },
+    });
+    const artifacts = projectArtifacts(events);
+    const receiptArtifact = artifacts.artifacts.find((artifact) =>
+      artifact.kind === "integration_receipt");
+    expect(artifacts.evidenceByArtifactId[receiptArtifact!.artifactId])
+      .toMatchObject({ outcome: "failed", resultCommit: null });
+    expect(artifacts.phaseByArtifactId[receiptArtifact!.artifactId]).toBe("final");
   });
 
   it("completes when integration advances after the ticket source was created", async () => {
@@ -611,7 +704,8 @@ describe("TracerBulletOrchestrator", () => {
       taskId: "task-retained-candidate",
       signal: runSignal(),
     })).rejects.toThrow("observation crash");
-    const prepared = journal.readStream("task-retained-candidate").at(-1)?.payload as {
+    const prepared = journal.readStream("task-retained-candidate").find((event) =>
+      event.type === "task.integration_prepared")?.payload as {
       receipt: { validation: { provenance: { canonicalCwd: string } } };
     };
     expect(existsSync(prepared.receipt.validation.provenance.canonicalCwd)).toBe(true);
@@ -1063,8 +1157,21 @@ describe("TracerBulletOrchestrator", () => {
     async (outcome) => {
       const fixture = await fixtureRepository();
       class OutcomeValidation extends ValidationRunner {
-        override run(project: ProjectConfig, name: "focused" | "full"): Promise<ValidationReport> {
-          return Promise.resolve(validationReport(project, name, outcome));
+        override run(
+          project: ProjectConfig,
+          name: "focused" | "full",
+          _cwd: string,
+          _signal: AbortSignal,
+          context?: Parameters<ValidationRunner["run"]>[4],
+        ): Promise<ValidationReport> {
+          const report = validationReport(project, name, outcome);
+          return Promise.resolve({
+            ...report,
+            provenance: {
+              ...report.provenance,
+              subjectSha256: context?.subjectSha256 ?? null,
+            },
+          });
         }
       }
       const validations = new OutcomeValidation(new ProcessSupervisor());
@@ -1083,8 +1190,10 @@ describe("TracerBulletOrchestrator", () => {
         "task.created",
         "task.leased",
         "task.started",
+        "task.artifact_recording",
         "artifact.patch_recorded",
         "task.validation_started",
+        "task.artifact_recording",
         "artifact.validation_report_recorded",
         `task.${outcome}`,
       ]);
@@ -1236,11 +1345,15 @@ describe("TracerBulletOrchestrator", () => {
       "task.created",
       "task.leased",
       "task.started",
+      "task.artifact_recording",
       "artifact.patch_recorded",
       "task.validation_started",
+      "task.artifact_recording",
       "artifact.validation_report_recorded",
       "task.review_requested",
-      ...(kind === "valid" ? ["artifact.review_report_recorded"] : []),
+      ...(kind === "valid"
+        ? ["task.artifact_recording", "artifact.review_report_recorded"]
+        : []),
       `task.${outcome}`,
     ]);
   });
@@ -1485,17 +1598,11 @@ describe("TracerBulletOrchestrator", () => {
     expect(result.terminalOutcome).toBeNull();
     expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.integration_observed");
     const observation = journal.readStream(result.taskId).at(-1)?.payload;
-    if (_case === "review provenance") {
-      expect(observation).toMatchObject({
-        verification: "failed",
-        receipt: { outcome: "completed" },
-        reason: expect.any(String),
-      });
-    } else {
-      expect(observation).toMatchObject({
-        error: { message: expect.stringContaining("contradictory integration receipt") },
-      });
-    }
+    expect(observation).toMatchObject({
+      verification: "failed",
+      receipt: { outcome: "completed" },
+      reason: expect.any(String),
+    });
   });
 
   it("rejects a symbolic integration ref in an otherwise completed receipt", async () => {

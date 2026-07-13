@@ -2,6 +2,7 @@ import type {
   StoredEvent,
 } from "../contracts/event.js";
 import {
+  ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
   isArtifactRecordedEventType,
   projectArtifacts,
 } from "../contracts/artifact.js";
@@ -106,7 +107,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     return null;
   }
 
-  projectArtifacts(events);
+  projectArtifacts(events, { allowPendingProtocolMarker: true });
 
   const firstEvent = events[0]!;
   if (firstEvent.type !== "task.created") {
@@ -145,7 +146,10 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       throw new Error("task is already terminal");
     }
 
-    if (isArtifactRecordedEventType(event.type)) {
+    if (
+      isArtifactRecordedEventType(event.type) ||
+      event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE
+    ) {
       state.streamVersion = event.streamVersion;
       continue;
     }

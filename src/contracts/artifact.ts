@@ -68,6 +68,21 @@ const ValidationEvidenceSchema = z.strictObject({
       message: "validation timeout must match provenance",
     });
   }
+  if (report.outcome === "completed" && report.exitCode !== 0) {
+    context.addIssue({ code: "custom", message: "completed validation requires exitCode 0" });
+  }
+  if (report.outcome === "failed" && report.exitCode === 0) {
+    context.addIssue({ code: "custom", message: "failed validation cannot have exitCode 0" });
+  }
+  if (
+    (report.outcome === "cancelled" || report.outcome === "timed_out") &&
+    report.exitCode !== null
+  ) {
+    context.addIssue({ code: "custom", message: `${report.outcome} validation requires null exitCode` });
+  }
+  if (Date.parse(report.finishedAt) < Date.parse(report.startedAt)) {
+    context.addIssue({ code: "custom", message: "validation finishedAt precedes startedAt" });
+  }
 });
 
 const ReviewEvidenceSchema = z.strictObject({
@@ -90,6 +105,13 @@ const IntegrationReceiptEvidenceSchema = z.strictObject({
   outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
 });
 
+const ArtifactProtocolMarkerSchema = z.strictObject({
+  artifactProtocolVersion: z.literal(1),
+  artifactId: IdentitySchema,
+  kind: ArtifactKindSchema,
+  sha256: Sha256Schema,
+});
+
 function artifactFor<TKind extends z.infer<typeof ArtifactKindSchema>>(kind: TKind) {
   return ArtifactSchema.extend({ kind: z.literal(kind) });
 }
@@ -109,6 +131,7 @@ export const ReviewReportArtifactRecordedEventSchema = z.strictObject({
 export const IntegrationReceiptArtifactRecordedEventSchema = z.strictObject({
   artifact: artifactFor("integration_receipt"),
   evidence: IntegrationReceiptEvidenceSchema,
+  phase: z.enum(["prepared", "final"]).optional(),
 });
 
 export const ArtifactRecordedEventSchema = z.discriminatedUnion("type", [
@@ -138,6 +161,7 @@ export type PatchArtifactEvidence = z.infer<typeof PatchEvidenceSchema>;
 export interface ArtifactView {
   readonly artifacts: readonly Artifact[];
   readonly evidenceByArtifactId: Readonly<Record<string, unknown>>;
+  readonly phaseByArtifactId: Readonly<Record<string, "prepared" | "final">>;
 }
 
 const ARTIFACT_EVENT_TYPES = new Set([
@@ -146,6 +170,7 @@ const ARTIFACT_EVENT_TYPES = new Set([
   "artifact.review_report_recorded",
   "artifact.integration_receipt_recorded",
 ]);
+export const ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE = "task.artifact_recording";
 
 export function isArtifactRecordedEventType(type: string): boolean {
   return ARTIFACT_EVENT_TYPES.has(type);
@@ -190,19 +215,47 @@ export function artifactEvidenceSha256(
   return sha256(JSON.stringify(parseEvidence(IntegrationReceiptEvidenceSchema, evidence, kind)));
 }
 
-export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
+export function projectArtifacts(
+  events: readonly StoredEvent[],
+  options: { readonly allowPendingProtocolMarker?: boolean } = {},
+): ArtifactView {
   const artifacts: Artifact[] = [];
   const evidenceByArtifactId: Record<string, unknown> = {};
-  const byKind = new Map<ArtifactKind, { artifact: Artifact; evidence: unknown }>();
+  const phaseByArtifactId: Record<string, "prepared" | "final"> = {};
+  const byKind = new Map<ArtifactKind, {
+    artifact: Artifact;
+    evidence: unknown;
+    phase: "prepared" | "final";
+  }>();
   const ids = new Set<string>();
   let artifactMode = hasArtifactEventGap(events);
   let terminal = false;
+  let pendingMarker: z.infer<typeof ArtifactProtocolMarkerSchema> | null = null;
 
   for (const event of events) {
-    if (terminal && (artifactMode || isArtifactRecordedEventType(event.type))) {
+    if (
+      pendingMarker !== null &&
+      options.allowPendingProtocolMarker !== true &&
+      event.type !== `artifact.${pendingMarker.kind}_recorded`
+    ) {
+      throw missingMarkedArtifact(pendingMarker.kind);
+    }
+    if (
+      terminal &&
+      (artifactMode || isArtifactRecordedEventType(event.type) ||
+        event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE)
+    ) {
       throw new Error("artifact replay encountered an event after task terminalization");
     }
     if (event.type.startsWith("task.") && isTerminalEvent(event.type)) terminal = true;
+
+    if (event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE) {
+      artifactMode = true;
+      const parsed = ArtifactProtocolMarkerSchema.safeParse(event.payload);
+      if (!parsed.success) throw new Error("invalid task.artifact_recording payload");
+      pendingMarker = parsed.data;
+      continue;
+    }
 
     if (isArtifactRecordedEventType(event.type)) {
       artifactMode = true;
@@ -214,13 +267,34 @@ export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
         throw new Error(`invalid ${event.type} payload`);
       }
       const { artifact, evidence } = parsed.data.payload;
+      const explicitPhase = artifact.kind === "integration_receipt" &&
+          "phase" in parsed.data.payload
+        ? parsed.data.payload.phase
+        : undefined;
+      const phase = explicitPhase ?? (
+          artifact.kind === "integration_receipt" &&
+          hasMatchingLaterPreparation(events, event.streamVersion, artifact.sha256)
+        ? "prepared"
+        : "final"
+      );
+      if (
+        pendingMarker !== null &&
+        (pendingMarker.artifactId !== artifact.artifactId ||
+          pendingMarker.kind !== artifact.kind ||
+          pendingMarker.sha256 !== artifact.sha256)
+      ) {
+        throw new Error("artifact protocol marker contradicts its recorded artifact");
+      }
       if (artifact.taskId !== event.streamId) {
         throw new Error(`${event.type} artifact taskId does not match its stream`);
       }
       if (ids.has(artifact.artifactId)) {
         throw new Error("duplicate artifact identity");
       }
-      if (byKind.has(artifact.kind)) {
+      const previousKind = byKind.get(artifact.kind);
+      const replacesPreparedReceipt = artifact.kind === "integration_receipt" &&
+        phase === "final" && previousKind?.phase === "prepared";
+      if (previousKind !== undefined && !replacesPreparedReceipt) {
         throw new Error(`duplicate artifact kind: ${artifact.kind}`);
       }
       const expectedDigest = artifactEvidenceSha256(artifact.kind, evidence);
@@ -228,26 +302,54 @@ export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
         throw new Error(`${artifact.kind} artifact digest contradicts its evidence`);
       }
       assertArtifactOrder(event.type, events, event.streamVersion);
-      validateArtifactChain(artifact.kind, evidence, byKind);
+      validateArtifactChain(artifact.kind, evidence, phase, byKind, event, events);
       ids.add(artifact.artifactId);
-      byKind.set(artifact.kind, { artifact, evidence });
+      if (replacesPreparedReceipt) {
+        const priorIndex = artifacts.findIndex((candidate) =>
+          candidate.artifactId === previousKind.artifact.artifactId);
+        if (priorIndex !== -1) artifacts.splice(priorIndex, 1);
+        delete evidenceByArtifactId[previousKind.artifact.artifactId];
+        delete phaseByArtifactId[previousKind.artifact.artifactId];
+      }
+      byKind.set(artifact.kind, { artifact, evidence, phase });
       artifacts.push(artifact);
       evidenceByArtifactId[artifact.artifactId] = evidence;
+      phaseByArtifactId[artifact.artifactId] = phase;
+      pendingMarker = null;
       continue;
     }
 
-    if (artifactMode) validateLifecycleArtifactReference(event, byKind);
+    if (artifactMode) {
+      validateLifecycleArtifactReference(event, byKind);
+      const payload = objectPayload(event);
+      if (
+        event.type === "task.integration_observed" &&
+        payload.verification === "verified"
+      ) {
+        const receipt = requireArtifact(byKind, "integration_receipt", event.type);
+        phaseByArtifactId[receipt.artifact.artifactId] = "final";
+      }
+    }
+  }
+
+  if (pendingMarker !== null && options.allowPendingProtocolMarker !== true) {
+    throw missingMarkedArtifact(pendingMarker.kind);
   }
 
   return Object.freeze({
     artifacts: Object.freeze([...artifacts]),
     evidenceByArtifactId: Object.freeze({ ...evidenceByArtifactId }),
+    phaseByArtifactId: Object.freeze({ ...phaseByArtifactId }),
   });
 }
 
 function validateLifecycleArtifactReference(
   event: StoredEvent,
-  byKind: ReadonlyMap<ArtifactKind, { artifact: Artifact; evidence: unknown }>,
+  byKind: ReadonlyMap<ArtifactKind, {
+    artifact: Artifact;
+    evidence: unknown;
+    phase: "prepared" | "final";
+  }>,
 ): void {
   const payload = objectPayload(event);
   if (event.type === "task.validation_started") {
@@ -266,6 +368,9 @@ function validateLifecycleArtifactReference(
       throw new Error("task.validation_started references contradictory changed-file evidence");
     }
   }
+  if (event.type === "task.review_requested" && !("validation" in payload)) {
+    throw new Error("task.review_requested payload must carry validation evidence");
+  }
   if (event.type === "task.review_requested" || "validation" in payload) {
     if ("validation" in payload) {
       const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
@@ -273,6 +378,12 @@ function validateLifecycleArtifactReference(
         throw new Error("lifecycle event references contradictory validation evidence");
       }
     }
+  }
+  if (
+    (event.type === "task.review_approved" || event.type === "task.integration_started") &&
+    !("review" in payload)
+  ) {
+    throw new Error(`${event.type} payload must carry review evidence`);
   }
   if (event.type === "task.review_approved" || event.type === "task.integration_started" || "review" in payload) {
     if ("review" in payload) {
@@ -282,12 +393,37 @@ function validateLifecycleArtifactReference(
       }
     }
   }
+  if (event.type === "task.integration_prepared" && !("receipt" in payload)) {
+    throw new Error("task.integration_prepared payload must carry receipt evidence");
+  }
+  if (event.type === "task.integration_prepared" && "receipt" in payload) {
+    const receipt = requireArtifact(byKind, "integration_receipt", event.type);
+    if (
+      receipt.phase !== "prepared" ||
+      sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256
+    ) {
+      throw new Error("task.integration_prepared references contradictory prepared receipt evidence");
+    }
+  }
   if (
-    event.type === "task.integration_prepared" ||
+    event.type === "task.integration_observed" &&
+    payload.verification === "verified" &&
+    "receipt" in payload
+  ) {
+    const receipt = requireArtifact(byKind, "integration_receipt", event.type);
+    if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
+      throw new Error("task.integration_observed references contradictory final receipt evidence");
+    }
+  }
+  if (
     event.type === "task.completed" ||
     "receipt" in payload
   ) {
-    if ("receipt" in payload) {
+    if (
+      "receipt" in payload &&
+      event.type !== "task.integration_prepared" &&
+      event.type !== "task.integration_observed"
+    ) {
       const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
       if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
         throw new Error("lifecycle event references contradictory integration receipt evidence");
@@ -299,13 +435,19 @@ function validateLifecycleArtifactReference(
 function validateArtifactChain(
   kind: ArtifactKind,
   evidence: unknown,
-  byKind: ReadonlyMap<ArtifactKind, { artifact: Artifact; evidence: unknown }>,
+  phase: "prepared" | "final",
+  byKind: ReadonlyMap<ArtifactKind, {
+    artifact: Artifact;
+    evidence: unknown;
+    phase: "prepared" | "final";
+  }>,
+  event: StoredEvent,
+  events: readonly StoredEvent[],
 ): void {
   if (kind === "validation_report") {
     const report = ValidationEvidenceSchema.parse(evidence);
     const patch = requireArtifact(byKind, "patch", "validation_report artifact");
     if (
-      report.provenance.subjectSha256 !== null &&
       report.provenance.subjectSha256 !== patch.artifact.sha256
     ) {
       throw new Error("validation report artifact contradicts the patch artifact");
@@ -315,27 +457,88 @@ function validateArtifactChain(
     const decision = ReviewEvidenceSchema.parse(evidence);
     const patch = requireArtifact(byKind, "patch", "review_report artifact");
     const validation = requireArtifact(byKind, "validation_report", "review_report artifact");
+    const request = priorEvent(events, event.streamVersion, "task.review_requested");
     if (
       decision.diffSha256 !== patch.artifact.sha256 ||
-      decision.validationSha256 !== validation.artifact.sha256
+      decision.validationSha256 !== validation.artifact.sha256 ||
+      decision.reviewerId !== objectPayload(request).reviewerId
     ) {
-      throw new Error("review report artifact contradicts its patch or validation artifacts");
+      throw new Error("review report artifact contradicts its patch, validation, or requested reviewer evidence");
     }
   }
   if (kind === "integration_receipt") {
     const receipt = IntegrationReceiptEvidenceSchema.parse(evidence);
     const review = requireArtifact(byKind, "review_report", "integration_receipt artifact");
-    if (JSON.stringify(receipt.review) !== JSON.stringify(review.evidence)) {
-      throw new Error("integration receipt artifact contradicts the review artifact");
+    const created = priorEvent(events, event.streamVersion, "task.created");
+    const integrationStarted = priorEvent(events, event.streamVersion, "task.integration_started");
+    const prepared = optionalPriorEvent(events, event.streamVersion, "task.integration_prepared");
+    const preparedValue = prepared === null ? null : objectPayload(prepared).receipt;
+    const preparedReceipt = typeof preparedValue === "object" && preparedValue !== null
+      ? preparedValue as Record<string, unknown>
+      : null;
+    const expectedValidationSubject = receipt.resultCommit ??
+      (typeof preparedReceipt?.resultCommit === "string" ? preparedReceipt.resultCommit : null);
+    if (
+      receipt.taskId !== event.streamId ||
+      receipt.projectId !== objectPayload(created).projectId ||
+      receipt.sourceCommit !== objectPayload(integrationStarted).sourceCommit ||
+      JSON.stringify(receipt.review) !== JSON.stringify(review.evidence) ||
+      JSON.stringify(receipt.review) !== JSON.stringify(objectPayload(integrationStarted).review) ||
+      receipt.validation.name !== "full" ||
+      receipt.validation.provenance.subjectSha256 !== expectedValidationSubject ||
+      (phase === "prepared" && receipt.outcome !== "completed") ||
+      (receipt.outcome === "completed" &&
+        preparedReceipt !== null &&
+        JSON.stringify(receipt) !== JSON.stringify(preparedReceipt))
+    ) {
+      throw new Error("integration receipt artifact contradicts task, project, source, result, review, or validation provenance");
     }
   }
 }
 
+function priorEvent(
+  events: readonly StoredEvent[],
+  version: number,
+  type: string,
+): StoredEvent {
+  const found = optionalPriorEvent(events, version, type);
+  if (found === null) throw new Error(`integration evidence references missing ${type}`);
+  return found;
+}
+
+function optionalPriorEvent(
+  events: readonly StoredEvent[],
+  version: number,
+  type: string,
+): StoredEvent | null {
+  return events.findLast((candidate) =>
+    candidate.streamVersion < version && candidate.type === type) ?? null;
+}
+
+function hasMatchingLaterPreparation(
+  events: readonly StoredEvent[],
+  version: number,
+  receiptSha256: string,
+): boolean {
+  return events.some((candidate) =>
+    candidate.streamVersion > version &&
+    candidate.type === "task.integration_prepared" &&
+    sha256(JSON.stringify(objectPayload(candidate).receipt)) === receiptSha256);
+}
+
+function missingMarkedArtifact(kind: ArtifactKind): Error {
+  return new Error(`artifact protocol marker references missing ${kind} artifact`);
+}
+
 function requireArtifact(
-  byKind: ReadonlyMap<ArtifactKind, { artifact: Artifact; evidence: unknown }>,
+  byKind: ReadonlyMap<ArtifactKind, {
+    artifact: Artifact;
+    evidence: unknown;
+    phase: "prepared" | "final";
+  }>,
   kind: ArtifactKind,
   eventType: string,
-): { artifact: Artifact; evidence: unknown } {
+): { artifact: Artifact; evidence: unknown; phase: "prepared" | "final" } {
   const artifact = byKind.get(kind);
   if (artifact === undefined) {
     throw new Error(`${eventType} references missing ${kind} artifact`);
@@ -349,7 +552,6 @@ function assertArtifactOrder(type: string, events: readonly StoredEvent[], versi
     "artifact.patch_recorded": "task.validation_started",
     "artifact.validation_report_recorded": "task.review_requested",
     "artifact.review_report_recorded": "task.review_approved",
-    "artifact.integration_receipt_recorded": "task.integration_prepared",
   };
   const requiredPrior: Record<string, string> = {
     "artifact.patch_recorded": "task.started",
