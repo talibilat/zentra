@@ -45,12 +45,22 @@ The CLI reads a JSON object containing the project identity, absolute repository
   "worktreeRoot": "/absolute/path/to/zentra-worktrees",
   "validations": {
     "focused": ["/absolute/path/to/node", "--test", "test/greeting.test.mjs"],
-    "full": ["/absolute/path/to/node", "--test"]
+    "full": ["/absolute/path/to/node", "--test"],
+    "focusedTimeoutMs": 30000,
+    "fullTimeoutMs": 300000
   }
 }
 ```
 
 Each validation executable must exactly match the canonical absolute real path of the Node.js executable running Zentra.
+
+`focusedTimeoutMs` and `fullTimeoutMs` are finite integer millisecond budgets from `100` through `1800000`, inclusive.
+
+The fields may be omitted, in which case focused validation defaults to `30000` ms and full validation defaults to `300000` ms.
+
+Zero, negative, fractional, nonnumeric, nonfinite, and over-limit timeout values are rejected while parsing project configuration, before a validation process can start.
+
+Every validation report and its durable provenance record the selected bounded `timeoutMs`, including timed-out results.
 
 Relative paths, symlinks, `env` and similar wrappers, alternate spellings, missing targets, and absolute executables outside that allowlist are rejected during configuration parsing and checked again before process creation.
 

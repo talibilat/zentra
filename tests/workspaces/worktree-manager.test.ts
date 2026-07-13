@@ -76,6 +76,8 @@ describe("WorktreeManager", () => {
       validations: {
         focused: ["node", "--test", "test/greeting.test.mjs"],
         full: ["node", "--test"],
+        focusedTimeoutMs: 5_000,
+        fullTimeoutMs: 5_000,
       },
     };
   });

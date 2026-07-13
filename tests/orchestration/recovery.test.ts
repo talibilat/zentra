@@ -126,6 +126,8 @@ async function fixture(): Promise<Fixture> {
     validations: {
       focused: [process.execPath, "-e", "process.exit(0)"],
       full: [process.execPath, "-e", "process.exit(0)"],
+      focusedTimeoutMs: 5_000,
+      fullTimeoutMs: 5_000,
     },
   };
   const worktrees = new WorktreeManager();
@@ -188,6 +190,7 @@ function completedValidation(
 ): ValidationReport {
   const stdout = `${name} passed\n`;
   const stderr = "";
+  const timeoutMs = provenance.timeoutMs ?? 5_000;
   return {
     name,
     outcome: "completed",
@@ -199,7 +202,8 @@ function completedValidation(
     command: [...command],
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout, stderr })),
-    provenance,
+    timeoutMs,
+    provenance: { ...provenance, timeoutMs },
   };
 }
 
