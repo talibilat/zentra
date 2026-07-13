@@ -54,3 +54,8 @@ They were not modified in this metadata branch, waived, or accepted as risks.
 Its test, document, lint, and push steps completed.
 Rebase was skipped to preserve reviewed base `49d6378`, and PR and CI were skipped because no PR was requested and issue 024 owns CI.
 The pipeline push produced remote commit `be6bca0` before this report-only follow-up.
+
+The report-only follow-up commit `a2c40d0` passed `no-mistakes` run `01KXDQ5VD3167AQKYC33XY4DHH`.
+That run completed scoped review, tests, lint, and push, while document, rebase, PR, and CI remained skipped.
+Its follow-up review also surfaced `review-004`, error, in unchanged `src/workers/process-supervisor.ts`, concerning surviving process groups after cancellation or timeout.
+That newly surfaced inherited finding was not modified, waived, or accepted as a risk in this metadata branch and requires dedicated remediation triage before final whole-branch review.
