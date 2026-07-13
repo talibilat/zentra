@@ -53,6 +53,7 @@ import type {
 } from "../workspaces/worktree-manager.js";
 import {
   WorkspaceCommitUncertainError,
+  WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
 } from "../workspaces/worktree-manager.js";
 
@@ -105,17 +106,7 @@ export class TracerBulletOrchestrator {
     workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
     signal: AbortSignal;
   }): Promise<TaskView> {
-    const workerTimeoutMs = input.workerRequest.timeoutMs;
-    if (
-      !Number.isFinite(workerTimeoutMs) ||
-      !Number.isInteger(workerTimeoutMs) ||
-      workerTimeoutMs <= 0 ||
-      workerTimeoutMs > MAX_WORKER_TIMEOUT_MS
-    ) {
-      throw new Error(
-        `worker timeout must be a finite positive integer at most ${MAX_WORKER_TIMEOUT_MS}ms`,
-      );
-    }
+    const workerTimeoutMs = assertValidWorkerTimeout(input.workerRequest.timeoutMs);
     this.tasks.create({
       taskId: input.taskId,
       projectId: input.projectId,
@@ -123,8 +114,10 @@ export class TracerBulletOrchestrator {
       correlationId: input.taskId,
     });
 
-    let lease: WorkspaceLease | null = null;
-    let stage: Stage = "setup";
+    const stage: Stage = "setup";
+    let project: ReturnType<ProjectRegistry["get"]>;
+    let lease: WorkspaceLease;
+    let gitOptions: GitRunOptions;
     try {
       if (input.workerId === input.reviewerId) {
         return this.terminate(
@@ -142,21 +135,192 @@ export class TracerBulletOrchestrator {
           "worker args must contain a fixture entry point and omit --workspace",
         );
       }
-      const workerInput = await validateWorkerAuthority(input.workerRequest, this.workerFixture);
-      const gitOptions: GitRunOptions = {
+      await validateWorkerAuthority(input.workerRequest, this.workerFixture);
+      gitOptions = {
         signal: input.signal,
         timeoutMs: workerTimeoutMs,
       };
 
-      const project = this.projects.get(input.projectId);
+      project = this.projects.get(input.projectId);
       await this.worktrees.ensureIntegrationBranch(project, gitOptions);
-      lease = await this.worktrees.create(project, input.taskId, gitOptions);
+      lease = await this.worktrees.create(project, input.taskId, gitOptions, (intent) => {
+        this.tasks.append(
+          input.taskId,
+          "task.worktree_creation_started",
+          intent,
+          null,
+        );
+      });
       this.tasks.append(
         input.taskId,
         "task.leased",
         { leaseOwner: input.workerId, workspace: lease.path },
         null,
       );
+    } catch (error) {
+      if (
+        error instanceof WorkspaceGitTerminationError ||
+        error instanceof WorkspaceCreationUncertainError
+      ) {
+        // Worktree creation is effectful: Git may have created the branch
+        // or worktree before an interruption even though create() never
+        // returned a lease. If durable "prepared" evidence exists
+        // (task.worktree_creation_started), leave the task nonterminal so
+        // recovery can inspect real Git state and reconcile instead of
+        // hiding an uncertain effect behind a terminal outcome.
+        return this.current(input.taskId);
+      }
+      return this.terminate(
+        input.taskId,
+        signalOutcome(input.signal) ?? "failed",
+        stage,
+        errorMessage(error),
+      );
+    }
+    // Anything runFromLease() throws propagates untouched: its own internal
+    // try/catch is the sole authority over post-lease error handling (e.g.
+    // the stage === "completion" rethrow), so it must never be caught again
+    // here.
+    return this.runFromLease(input, project, lease, gitOptions);
+  }
+
+  /**
+   * Resumes a task that has durable `task.worktree_creation_started`
+   * evidence but was interrupted before `task.leased` was ever recorded.
+   * This is a distinct, explicit entry point (parallel to how
+   * `RecoveryService.recordCompletion` is a distinct authorized action
+   * beyond plain `inspect()`): it never re-runs `TaskService.create()`
+   * (which would throw "already exists"), and it never blindly calls
+   * `WorktreeManager.create()` again. Instead it:
+   *
+   *  1. Requires the durable chain to already be exactly "prepared, not
+   *     yet leased" (last event is `task.worktree_creation_started`, no
+   *     `task.leased`); it does not itself decide whether the underlying
+   *     Git state is adoptable.
+   *  2. Calls `WorktreeManager.adopt()`, which independently re-verifies
+   *     the exact branch/registration/path/base facts immediately before
+   *     treating the state as leased -- it never trusts a possibly-stale
+   *     recovery decision label, and it throws (never deletes or
+   *     overwrites) on any mismatch.
+   *  3. Appends `task.leased` as durable evidence only once adoption is
+   *     confirmed, then continues through the normal shared pipeline
+   *     (worker execution onward) exactly as `run()` would have, reusing
+   *     the same `runFromLease` machinery.
+   */
+  async resume(input: {
+    taskId: string;
+    projectId: string;
+    title: string;
+    workerId: string;
+    reviewerId: string;
+    workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
+    signal: AbortSignal;
+  }): Promise<TaskView> {
+    const workerTimeoutMs = assertValidWorkerTimeout(input.workerRequest.timeoutMs);
+    const current = this.tasks.get(input.taskId);
+    if (current === null) {
+      throw new Error(`task ${input.taskId} not found; resume requires an existing durable task`);
+    }
+    if (current.lifecycle !== "queued") {
+      throw new Error(
+        `task ${input.taskId} is not in a resumable queued/prepared state (lifecycle: ${current.lifecycle})`,
+      );
+    }
+    const events = this.tasks.readStream(input.taskId);
+    const last = events.at(-1);
+    if (last === undefined || last.type !== "task.worktree_creation_started") {
+      throw new Error(
+        `task ${input.taskId} has no durable worktree_creation_started evidence to resume from`,
+      );
+    }
+    const intent = last.payload as {
+      readonly taskId: string;
+      readonly branch: string;
+      readonly path: string;
+      readonly base: string;
+    };
+    if (intent.taskId !== input.taskId) {
+      throw new Error("durable worktree creation intent identity does not match the resumed task");
+    }
+
+    const stage: Stage = "setup";
+    let project: ReturnType<ProjectRegistry["get"]>;
+    let lease: WorkspaceLease;
+    let gitOptions: GitRunOptions;
+    try {
+      if (input.workerId === input.reviewerId) {
+        return this.terminate(
+          input.taskId,
+          "denied",
+          stage,
+          "reviewer identity must differ from worker identity",
+        );
+      }
+      if (
+        input.workerRequest.args.length === 0 ||
+        input.workerRequest.args.includes("--workspace")
+      ) {
+        throw new Error(
+          "worker args must contain a fixture entry point and omit --workspace",
+        );
+      }
+      await validateWorkerAuthority(input.workerRequest, this.workerFixture);
+      gitOptions = {
+        signal: input.signal,
+        timeoutMs: workerTimeoutMs,
+      };
+
+      project = this.projects.get(input.projectId);
+      // Never trust a possibly-stale recovery decision label: re-verify the
+      // exact branch/registration/path/base facts immediately before
+      // treating this task as leased.
+      lease = await this.worktrees.adopt(project, intent, gitOptions);
+      this.tasks.append(
+        input.taskId,
+        "task.leased",
+        { leaseOwner: input.workerId, workspace: lease.path },
+        null,
+      );
+    } catch (error) {
+      if (
+        error instanceof WorkspaceGitTerminationError ||
+        error instanceof WorkspaceCreationUncertainError
+      ) {
+        return this.current(input.taskId);
+      }
+      return this.terminate(
+        input.taskId,
+        signalOutcome(input.signal) ?? "failed",
+        stage,
+        errorMessage(error),
+      );
+    }
+    // Anything runFromLease() throws propagates untouched: see run()'s
+    // matching comment above.
+    return this.runFromLease(input, project, lease, gitOptions);
+  }
+
+  // Shared post-lease pipeline: worker execution through completion. Both
+  // run() (fresh worktree creation) and resume() (adoption of an
+  // already-created worktree) call this once a durable task.leased fact
+  // exists, so there is exactly one implementation of the worker-onward
+  // machinery.
+  private async runFromLease(
+    input: {
+      taskId: string;
+      title: string;
+      workerId: string;
+      reviewerId: string;
+      workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
+      signal: AbortSignal;
+    },
+    project: ReturnType<ProjectRegistry["get"]>,
+    lease: WorkspaceLease,
+    gitOptions: GitRunOptions,
+  ): Promise<TaskView> {
+    let stage: Stage = "setup";
+    try {
+      const workerInput = parseWorkerInput(input.workerRequest.args);
       this.tasks.append(
         input.taskId,
         "task.started",
@@ -474,6 +638,11 @@ export class TracerBulletOrchestrator {
           error: { name: errorName(error), message: errorMessage(error) },
         });
       }
+      // Unlike run()/resume()'s own setup stage, runFromLease() is only ever
+      // invoked after a durable task.leased fact already exists, so a
+      // "setup"-stage error here (e.g. worker authority validation) can
+      // never be an uncertain worktree-creation effect: the lease is always
+      // present by construction.
       return this.terminate(
         input.taskId,
         dependencyOutcome ?? signalOutcome(input.signal) ?? "failed",
@@ -880,6 +1049,20 @@ async function validateIntegrationReceipt(input: {
   ) {
     throw new Error("receipt result does not have the exact integration-base/source merge shape");
   }
+}
+
+function assertValidWorkerTimeout(workerTimeoutMs: number): number {
+  if (
+    !Number.isFinite(workerTimeoutMs) ||
+    !Number.isInteger(workerTimeoutMs) ||
+    workerTimeoutMs <= 0 ||
+    workerTimeoutMs > MAX_WORKER_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `worker timeout must be a finite positive integer at most ${MAX_WORKER_TIMEOUT_MS}ms`,
+    );
+  }
+  return workerTimeoutMs;
 }
 
 function signalOutcome(

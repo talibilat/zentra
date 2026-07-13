@@ -32,7 +32,14 @@ type TaskProjectionState = {
 };
 
 const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
-  queued: ["task.leased", "task.cancelled", "task.failed", "task.timed_out", "task.denied"],
+  queued: [
+    "task.worktree_creation_started",
+    "task.leased",
+    "task.cancelled",
+    "task.failed",
+    "task.timed_out",
+    "task.denied",
+  ],
   leased: ["task.started", "task.cancelled", "task.failed", "task.timed_out", "task.denied"],
   running: [
     "task.validation_started",
@@ -80,6 +87,7 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
 
 const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> = {
   "task.created": "queued",
+  "task.worktree_creation_started": "queued",
   "task.leased": "leased",
   "task.started": "running",
   "task.validation_started": "validating",

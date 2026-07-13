@@ -39,6 +39,12 @@ const LeasePayloadSchema = z.strictObject({
   leaseOwner: z.string().min(1),
   workspace: z.string().min(1),
 });
+const WorktreeCreationStartedPayloadSchema = z.strictObject({
+  taskId: z.string().min(1),
+  branch: z.string().min(1),
+  path: z.string().min(1),
+  base: z.string().min(1),
+});
 const StartedPayloadSchema = z.strictObject({
   workerId: z.string().min(1),
 });
@@ -154,6 +160,7 @@ const CreatedPayloadSchema = z.strictObject({
 
 interface RecoveryChain {
   readonly created: z.infer<typeof CreatedPayloadSchema>;
+  readonly worktreeCreationStarted: z.infer<typeof WorktreeCreationStartedPayloadSchema> | null;
   readonly lease: z.infer<typeof LeasePayloadSchema> | null;
   readonly started: z.infer<typeof StartedPayloadSchema> | null;
   readonly validationStarted: z.infer<typeof ValidationStartedPayloadSchema> | null;
@@ -216,6 +223,7 @@ export class RecoveryService {
     }
 
     const hasUncertainEffect = events.some((event) =>
+      event.type === "task.worktree_creation_started" ||
       event.type === "task.started" ||
       event.type === "task.commit_observed" ||
       event.type === "task.integration_started" ||
@@ -285,6 +293,84 @@ export class RecoveryService {
           );
         }
         return decision(taskId, "resume_preparation", "task creation is durable and workspace preparation has not started");
+      }
+
+      if (last.type === "task.worktree_creation_started") {
+        const intent = chain.worktreeCreationStarted!;
+        // Compare against the raw (non-canonicalized) configured path, the
+        // same identity WorktreeManager.create() recorded and the same
+        // comparison used for the durable task.leased workspace path above.
+        const rawExpectedPath = path.resolve(project.worktreeRoot, taskId);
+        if (
+          intent.path !== rawExpectedPath ||
+          intent.branch !== `ticket/${taskId}` ||
+          intent.base !== project.integrationBranch
+        ) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "prepared worktree creation intent does not match the current project configuration; preserved for operator review",
+          );
+        }
+
+        if (!workspace.registered && !workspace.branchExists && !workspace.pathExists) {
+          // No durable Git effect occurred at all: safe to resume/retry creation.
+          return decision(
+            taskId,
+            "resume_preparation",
+            "prepared worktree creation intent is durable but no Git effect occurred; creation may be resumed",
+          );
+        }
+
+        if (workspace.registered && workspace.branchExists && workspace.pathExists) {
+          // Fully created: verify the branch base is exactly the intended
+          // base before adopting it as if task.leased had been recorded.
+          const baseHead = await this.readRef(
+            project.repositoryPath,
+            `refs/heads/${project.integrationBranch}`,
+          );
+          if (baseHead === null) {
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "intended base branch could not be read while verifying a fully created worktree",
+            );
+          }
+          if (workspace.head !== baseHead) {
+            // Competing identity: a worktree/branch with the intended name
+            // exists but does not point at the intended base. Never delete
+            // or retry automatically; preserve for an operator.
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "ticket branch exists but does not point at the exact intended base commit; preserved for operator review",
+            );
+          }
+          if (workspace.dirty) {
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "fully created ticket worktree is unexpectedly dirty before any worker has started",
+            );
+          }
+          // Exact intended state: adopt it as if task.leased had already
+          // been recorded, so the caller can resume from the leased stage.
+          return decision(
+            taskId,
+            "resume_preparation",
+            "worktree creation reached the exact intended branch, path, and base; safe to adopt and resume from the leased stage",
+          );
+        }
+
+        // Partial or competing state: some but not all of registration,
+        // branch, and path exist, or they exist without matching the
+        // intended identity. Never auto-clean or auto-retry; preserve for
+        // an operator to reconcile.
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "worktree creation left partial or competing Git state that must not be automatically retried or cleaned up",
+        );
       }
 
       if (last.type === "task.cleanup_started") {
@@ -515,6 +601,72 @@ export class RecoveryService {
         taskId,
         hasUncertainEffect ? "await_reconciliation" : "record_failure",
         `recovery inspection failed closed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Explicit, human-authorized action to abandon a task that is stuck at
+   * the `task.worktree_creation_started` stage: the worktree/branch were
+   * created exactly as intended, but no worker ever started
+   * (`task.leased` was never recorded) and an operator has decided not to
+   * resume it. This never runs automatically; it requires this distinct
+   * method call, is never reachable from `inspect()` alone, and -- like
+   * `recordCompletion` -- re-authorizes immediately before performing any
+   * effect to avoid a TOCTOU gap between inspection and action.
+   *
+   * Scope is intentionally narrow: it only ever removes worktree/branch
+   * state that exactly matches the durably recorded creation intent (same
+   * branch, path, and base as `WorktreeManager.adopt()` requires) and is
+   * clean/unmodified. Any competing, partial, dirty, or already-leased
+   * state is refused with no effect, preserving it for manual operator
+   * inspection.
+   */
+  async authorizeBoundedCleanup(taskId: string): Promise<TaskView> {
+    await this.assertBoundedCleanupAuthorized(taskId);
+
+    const events = this.journal.readStream(taskId);
+    const chain = reconstructChain(taskId, events);
+    const intent = chain.worktreeCreationStarted;
+    if (intent === null) throw new Error("durable worktree creation intent is missing");
+    const task = this.tasks.get(taskId);
+    if (task === null) throw new Error(`task ${taskId} could not be projected`);
+    const project = this.projects.get(task.projectId);
+
+    // Re-authorize immediately before the effect: never trust the first
+    // inspection alone (TOCTOU avoidance), the same pattern recordCompletion
+    // uses before its cleanup effect.
+    await this.assertBoundedCleanupAuthorized(taskId);
+    const refreshedEvents = this.journal.readStream(taskId);
+    if (refreshedEvents.at(-1)?.type !== "task.worktree_creation_started") {
+      throw new Error("bounded cleanup state changed after reinspection");
+    }
+
+    await this.worktrees.removeUnleased(project, intent, { timeoutMs: GIT_READ_TIMEOUT_MS });
+
+    return this.tasks.append(
+      taskId,
+      "task.cancelled",
+      {
+        stage: "setup",
+        reason: "operator authorized bounded cleanup of an unleased, exactly-matched worktree",
+      },
+      null,
+    );
+  }
+
+  private async assertBoundedCleanupAuthorized(taskId: string): Promise<void> {
+    const authorization = await this.inspect(taskId);
+    if (authorization.action !== "resume_preparation") {
+      throw new Error(
+        `bounded cleanup is not authorized: ${authorization.action}`,
+      );
+    }
+    const events = this.journal.readStream(taskId);
+    const last = events.at(-1);
+    if (last === undefined || last.type !== "task.worktree_creation_started") {
+      throw new Error(
+        "bounded cleanup is only authorized for a task stuck at task.worktree_creation_started",
       );
     }
   }
@@ -1115,6 +1267,18 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   const first = events[0]!;
   if (first.type !== "task.created") throw new Error("first event is not task.created");
   const created = parseEvent(CreatedPayloadSchema, first);
+  const worktreeCreationStarted = parseLastOccurrence(
+    WorktreeCreationStartedPayloadSchema,
+    events,
+    "task.worktree_creation_started",
+  );
+  if (
+    worktreeCreationStarted !== null &&
+    (worktreeCreationStarted.taskId !== taskId ||
+      worktreeCreationStarted.branch !== `ticket/${taskId}`)
+  ) {
+    throw new Error("worktree creation intent identity does not match the task");
+  }
   const lease = parseOptionalEvent(LeasePayloadSchema, events, "task.leased");
   const started = parseOptionalEvent(StartedPayloadSchema, events, "task.started");
   const validationStarted = parseOptionalEvent(
@@ -1338,6 +1502,7 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   }
   return {
     created,
+    worktreeCreationStarted,
     lease,
     started,
     validationStarted,
@@ -1361,6 +1526,18 @@ function parseOptionalEvent<T extends z.ZodType>(
   const matching = events.filter((event) => event.type === type);
   if (matching.length > 1) throw new Error(`${type} appears more than once`);
   return matching.length === 0 ? null : parseEvent(schema, matching[0]!);
+}
+
+// Some preparation events (e.g. task.worktree_creation_started) may
+// legitimately repeat across a resumed preparation attempt; only the most
+// recent occurrence reflects the current intended state.
+function parseLastOccurrence<T extends z.ZodType>(
+  schema: T,
+  events: readonly StoredEvent[],
+  type: string,
+): z.infer<T> | null {
+  const matching = events.filter((event) => event.type === type);
+  return matching.length === 0 ? null : parseEvent(schema, matching.at(-1)!);
 }
 
 function parseEvent<T extends z.ZodType>(schema: T, event: StoredEvent): z.infer<T> {
