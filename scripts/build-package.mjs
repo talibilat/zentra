@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -10,8 +10,15 @@ import {
   packageRoot,
   requiredBinaries,
   requiredFixture,
+  validatePackageDirectory,
+  validatePackageFile,
 } from "./package-files.mjs";
 
+validatePackagedFile(requiredFixture);
+validatePackagedFile("README.md");
+validatePackagedFile("LICENSE");
+const buildInputs = collectBuildInputs();
+validatePackageDirectory("dist", { optional: true });
 rmSync(path.join(packageRoot, "dist"), { recursive: true, force: true });
 const tsc = path.join(packageRoot, "node_modules", "typescript", "bin", "tsc");
 const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
@@ -32,30 +39,30 @@ const packagedFiles = [...new Set([
   "README.md",
   "LICENSE",
 ])];
-const presentPackagedFiles = packagedFiles.filter((file) => assertPackagedFile(file));
-for (const file of presentPackagedFiles) {
-  chmodSync(path.join(packageRoot, file), 0o644);
+const presentPackagedFiles = packagedFiles
+  .map((file) => validatePackagedFile(file))
+  .filter((validated) => validated !== null);
+for (const { absolutePath } of presentPackagedFiles) {
+  chmodSync(absolutePath, 0o644);
 }
 
 for (const binary of requiredBinaries) {
-  chmodSync(path.join(packageRoot, binary), 0o755);
+  chmodSync(validatePackageFile(binary).absolutePath, 0o755);
 }
 const manifest = {
   schemaVersion: 1,
-  inputs: digestFiles(collectBuildInputs()),
+  inputs: digestFiles(buildInputs),
   outputs: digestFiles(buildOutputs),
 };
-mkdirSync(path.dirname(manifestPath), { recursive: true });
+validatePackageDirectory("dist");
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-chmodSync(manifestPath, 0o644);
+chmodSync(validatePackageFile("dist/package-manifest.json").absolutePath, 0o644);
 
-function assertPackagedFile(file) {
-  let stat;
+function validatePackagedFile(file) {
   try {
-    stat = lstatSync(path.join(packageRoot, file));
+    return validatePackageFile(file, { optional: file === "LICENSE" });
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      if (file === "LICENSE") return false;
       if (requiredBinaries.includes(file)) {
         failBuild(`declared binary ${file} was not emitted`);
       }
@@ -63,10 +70,6 @@ function assertPackagedFile(file) {
     }
     throw error;
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    failBuild(`packaged path ${file} must be a regular non-symlink file`);
-  }
-  return true;
 }
 
 function failBuild(message) {

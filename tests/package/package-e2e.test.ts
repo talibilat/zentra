@@ -218,6 +218,32 @@ describe("publishable CLI package", () => {
     expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
   }, 30_000);
 
+  it("rejects a symlinked packaged ancestor without modifying its external target", async () => {
+    const sandbox = packageSandbox();
+    const externalFixtures = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-fixtures-")));
+    temporaryDirectories.push(externalFixtures);
+    const externalTarget = path.join(externalFixtures, "deterministic-worker.mjs");
+    writeFileSync(externalTarget, "external target\n", "utf8");
+    chmodSync(externalTarget, 0o600);
+    rmSync(path.join(sandbox, "fixtures"), { recursive: true });
+    symlinkSync(externalFixtures, path.join(sandbox, "fixtures"));
+    const destination = path.join(sandbox, "artifacts");
+    mkdirSync(destination);
+
+    await expect(run(
+      "npm",
+      ["pack", "--silent", "--json", "--pack-destination", destination],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path fixtures/deterministic-worker.mjs has symbolic-link component fixtures",
+      ),
+    });
+    expect(statSync(externalTarget).mode & 0o777).toBe(0o600);
+    expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
   it("does not resolve package verification tools from ambient PATH", async () => {
     const fakeBin = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-fake-bin-")));
     temporaryDirectories.push(fakeBin);
@@ -251,6 +277,25 @@ describe("publishable CLI package", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("deterministic package files");
   }, 130_000);
+
+  it("rejects a symlinked production-output ancestor during package verification", async () => {
+    const sandbox = packageSandbox();
+    await run("npm", ["run", "build"], sandbox);
+    const externalRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-external-cli-")));
+    temporaryDirectories.push(externalRoot);
+    const externalCli = path.join(externalRoot, "cli");
+    const cliDirectory = path.join(sandbox, "dist", "src", "cli");
+    cpSync(cliDirectory, externalCli, { recursive: true });
+    rmSync(cliDirectory, { recursive: true });
+    symlinkSync(externalCli, cliDirectory);
+
+    await expect(run("npm", ["run", "package:verify"], sandbox)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "packaged path dist/src/cli/main.js has symbolic-link component dist/src/cli",
+      ),
+    });
+  }, 30_000);
 
   it.each([
     ["missing binary", (sandbox: string) => rmSync(path.join(sandbox, "dist", "src", "cli", "main.js"))],
