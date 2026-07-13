@@ -10,6 +10,7 @@ const MAX_PATH_LENGTH = 4_096;
 const MAX_TEXT_LENGTH = 4_096;
 const MAX_COMMAND_ARGUMENTS = 256;
 const MAX_RETAINED_BYTES = 1_024 * 1_024;
+const ValidationTimeoutSchema = z.number().int().min(100).max(30 * 60 * 1_000);
 
 const IdentitySchema = z.string().min(1).max(MAX_ID_LENGTH);
 const BoundedTextSchema = z.string().max(MAX_TEXT_LENGTH);
@@ -53,11 +54,20 @@ const ValidationEvidenceSchema = z.strictObject({
   command: z.array(BoundedTextSchema).min(1).max(MAX_COMMAND_ARGUMENTS),
   argvSha256: Sha256Schema,
   outputSha256: Sha256Schema,
+  timeoutMs: ValidationTimeoutSchema.optional(),
   provenance: z.strictObject({
     invocationId: IdentitySchema,
     canonicalCwd: z.string().min(1).max(MAX_PATH_LENGTH),
     subjectSha256: z.string().min(1).max(64).nullable(),
+    timeoutMs: ValidationTimeoutSchema.optional(),
   }),
+}).superRefine((report, context) => {
+  if (report.timeoutMs !== report.provenance.timeoutMs) {
+    context.addIssue({
+      code: "custom",
+      message: "validation timeout must match provenance",
+    });
+  }
 });
 
 const ReviewEvidenceSchema = z.strictObject({
@@ -185,7 +195,7 @@ export function projectArtifacts(events: readonly StoredEvent[]): ArtifactView {
   const evidenceByArtifactId: Record<string, unknown> = {};
   const byKind = new Map<ArtifactKind, { artifact: Artifact; evidence: unknown }>();
   const ids = new Set<string>();
-  let artifactMode = false;
+  let artifactMode = hasArtifactEventGap(events);
   let terminal = false;
 
   for (const event of events) {
@@ -365,6 +375,13 @@ function isTerminalEvent(type: string): boolean {
     "task.timed_out",
     "task.failed",
   ]).has(type);
+}
+
+function hasArtifactEventGap(events: readonly StoredEvent[]): boolean {
+  return events.some((event, index) => {
+    const previous = events[index - 1];
+    return previous !== undefined && event.streamVersion !== previous.streamVersion + 1;
+  });
 }
 
 function isSafeLogicalPath(candidate: string): boolean {

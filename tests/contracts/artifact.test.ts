@@ -23,10 +23,12 @@ const validation = {
   command: ["/usr/bin/node", "--test"],
   argvSha256: digest(JSON.stringify(["/usr/bin/node", "--test"])),
   outputSha256: digest(JSON.stringify({ stdout: "ok\n", stderr: "" })),
+  timeoutMs: 10_000,
   provenance: {
     invocationId: "validation-1",
     canonicalCwd: "/workspace",
     subjectSha256: digest("diff"),
+    timeoutMs: 10_000,
   },
 };
 const review = {
@@ -161,6 +163,28 @@ describe("artifact recorded event contracts", () => {
       payload: {
         ...payload,
         evidence: { ...payload.evidence, diff: "d".repeat(2_000_000) },
+      },
+    })).toThrow();
+  });
+
+  it("rejects unbounded or contradictory validation timeout evidence", () => {
+    const recorded = artifactEvent("validation_report", 6, validation);
+    const payload = recorded.payload as {
+      artifact: unknown;
+      evidence: Record<string, unknown>;
+    };
+    expect(() => ArtifactRecordedEventSchema.parse({
+      type: recorded.type,
+      payload: {
+        ...payload,
+        evidence: { ...payload.evidence, timeoutMs: 99 },
+      },
+    })).toThrow();
+    expect(() => ArtifactRecordedEventSchema.parse({
+      type: recorded.type,
+      payload: {
+        ...payload,
+        evidence: { ...payload.evidence, timeoutMs: 20_000 },
       },
     })).toThrow();
   });

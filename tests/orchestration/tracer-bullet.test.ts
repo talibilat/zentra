@@ -337,6 +337,18 @@ describe("TracerBulletOrchestrator", () => {
     expect(ticketRef.exitCode).not.toBe(0);
   });
 
+  it("rejects replay when every typed artifact event is deleted", async () => {
+    const fixture = await fixtureRepository();
+    const { journal, orchestrator } = system(fixture.configPath);
+    await orchestrator.run({ ...runInput, signal: runSignal() });
+
+    const tamperedEvents = journal.readStream(runInput.taskId).filter(
+      (event) => !event.type.startsWith("artifact."),
+    );
+
+    expect(() => projectArtifacts(tamperedEvents)).toThrow("missing patch artifact");
+  });
+
   it("completes when integration advances after the ticket source was created", async () => {
     const fixture = await fixtureRepository();
     const validations = new ValidationRunner(new ProcessSupervisor());
