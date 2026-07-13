@@ -8,7 +8,7 @@ import {
   digestFiles,
   manifestPath,
   packageRoot,
-  requiredBinary,
+  requiredBinaries,
 } from "./package-files.mjs";
 
 rmSync(path.join(packageRoot, "dist"), { recursive: true, force: true });
@@ -22,7 +22,17 @@ const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
 if (result.error !== undefined) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
-chmodSync(path.join(packageRoot, requiredBinary), 0o755);
+for (const binary of requiredBinaries) {
+  try {
+    chmodSync(path.join(packageRoot, binary), 0o755);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      console.error(`Package build failed: declared binary ${binary} was not emitted`);
+      process.exit(1);
+    }
+    throw error;
+  }
+}
 const manifest = {
   schemaVersion: 1,
   inputs: digestFiles(collectBuildInputs()),

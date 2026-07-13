@@ -168,9 +168,41 @@ describe("publishable CLI package", () => {
       .toBe("hello from package\n");
   }, 120_000);
 
+  it("fails npm pack when the declared binary target is not produced", async () => {
+    const sandbox = packageSandbox();
+    const packageJsonPath = path.join(sandbox, "package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as Record<string, unknown>;
+    packageJson.bin = { zentra: "./dist/src/cli/missing.js" };
+    writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
+    const destination = path.join(sandbox, "artifacts");
+    mkdirSync(destination);
+
+    await expect(run(
+      "npm",
+      ["pack", "--silent", "--json", "--pack-destination", destination],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "Package build failed: declared binary dist/src/cli/missing.js was not emitted",
+      ),
+    });
+    expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
   it.each([
     ["missing binary", (sandbox: string) => rmSync(path.join(sandbox, "dist", "src", "cli", "main.js"))],
     ["missing fixture", (sandbox: string) => rmSync(path.join(sandbox, "fixtures", "deterministic-worker.mjs"))],
+    ["stale package metadata", (sandbox: string) => writeFileSync(
+      path.join(sandbox, "package.json"),
+      `${readFileSync(path.join(sandbox, "package.json"), "utf8")}\n`,
+      "utf8",
+    )],
+    ["stale inherited TypeScript configuration", (sandbox: string) => writeFileSync(
+      path.join(sandbox, "tsconfig.json"),
+      `${readFileSync(path.join(sandbox, "tsconfig.json"), "utf8")}\n`,
+      "utf8",
+    )],
     ["stale source", (sandbox: string) => writeFileSync(
       path.join(sandbox, "src", "contracts", "ids.ts"),
       `${readFileSync(path.join(sandbox, "src", "contracts", "ids.ts"), "utf8")}\n`,

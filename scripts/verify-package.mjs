@@ -7,21 +7,23 @@ import {
   digestFiles,
   manifestPath,
   packageRoot,
-  requiredBinary,
+  requiredBinaries,
   requiredFixture,
 } from "./package-files.mjs";
 
 try {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (manifest.schemaVersion !== 1) throw new Error("unsupported production manifest");
-  assertRegularFile(requiredBinary);
   assertRegularFile(requiredFixture);
-  const binary = path.join(packageRoot, requiredBinary);
-  if (!readFileSync(binary, "utf8").startsWith("#!/usr/bin/env node\n")) {
-    throw new Error("production CLI has no Node.js shebang");
-  }
-  if ((lstatSync(binary).mode & 0o111) === 0) {
-    throw new Error("production CLI is not executable");
+  for (const requiredBinary of requiredBinaries) {
+    assertRegularFile(requiredBinary);
+    const binary = path.join(packageRoot, requiredBinary);
+    if (!readFileSync(binary, "utf8").startsWith("#!/usr/bin/env node\n")) {
+      throw new Error(`${requiredBinary} has no Node.js shebang`);
+    }
+    if ((lstatSync(binary).mode & 0o111) === 0) {
+      throw new Error(`${requiredBinary} is not executable`);
+    }
   }
   assertExactHashes("input", manifest.inputs, digestFiles(collectBuildInputs()));
   assertExactHashes("output", manifest.outputs, digestFiles(collectBuildOutputs()));
