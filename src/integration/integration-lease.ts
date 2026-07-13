@@ -28,26 +28,36 @@ interface LeaseRow {
   readonly hostname: string;
 }
 
+const INIT_BUSY_RETRY_ATTEMPTS = 20;
+const INIT_BUSY_RETRY_DELAY_MS = 25;
+
 export class IntegrationLeaseStore {
   private readonly db: Database.Database;
 
   constructor(databasePath: string) {
     this.db = new Database(databasePath, { timeout: 1_000 });
     try {
-      this.db.pragma("journal_mode = WAL");
-      this.db.pragma("synchronous = FULL");
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS integration_leases (
-          common_directory TEXT NOT NULL,
-          integration_ref TEXT NOT NULL,
-          owner_token TEXT NOT NULL,
-          acquired_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL,
-          pid INTEGER NOT NULL,
-          hostname TEXT NOT NULL,
-          PRIMARY KEY (common_directory, integration_ref)
-        ) WITHOUT ROWID;
-      `);
+      // Two separate OS processes can race to open and initialize the same
+      // fresh database file. WAL-mode setup and schema creation are
+      // idempotent and non-effectful for the domain (they do not touch lease
+      // ownership), so a short bounded busy-retry here is safe: unlike lease
+      // acquisition itself, there is no uncertain effect to double-apply.
+      runWithBusyRetry(() => {
+        this.db.pragma("journal_mode = WAL");
+        this.db.pragma("synchronous = FULL");
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS integration_leases (
+            common_directory TEXT NOT NULL,
+            integration_ref TEXT NOT NULL,
+            owner_token TEXT NOT NULL,
+            acquired_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            pid INTEGER NOT NULL,
+            hostname TEXT NOT NULL,
+            PRIMARY KEY (common_directory, integration_ref)
+          ) WITHOUT ROWID;
+        `);
+      });
     } catch (error) {
       this.db.close();
       throw error;
@@ -162,5 +172,33 @@ function assertDuration(durationMs: number): void {
     durationMs > MAX_INTEGRATION_LEASE_MS
   ) {
     throw new Error("integration lease duration is out of bounds");
+  }
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException & { code?: string }).code === "SQLITE_BUSY"
+  );
+}
+
+function runWithBusyRetry(operation: () => void): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      operation();
+      return;
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt >= INIT_BUSY_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      // Synchronous bounded backoff: better-sqlite3's API is synchronous, so
+      // this cannot be an async retry. Idempotent, non-effectful setup only.
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        INIT_BUSY_RETRY_DELAY_MS,
+      );
+    }
   }
 }
