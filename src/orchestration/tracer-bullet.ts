@@ -48,6 +48,7 @@ import {
   type GitRunOptions,
 } from "../workspaces/git-client.js";
 import type {
+  WorkspaceCreationIntent,
   WorkspaceLease,
   WorktreeManager,
 } from "../workspaces/worktree-manager.js";
@@ -233,12 +234,7 @@ export class TracerBulletOrchestrator {
         `task ${input.taskId} has no durable worktree_creation_started evidence to resume from`,
       );
     }
-    const intent = last.payload as {
-      readonly taskId: string;
-      readonly branch: string;
-      readonly path: string;
-      readonly base: string;
-    };
+    const intent = last.payload as WorkspaceCreationIntent;
     if (intent.taskId !== input.taskId) {
       throw new Error("durable worktree creation intent identity does not match the resumed task");
     }
@@ -274,7 +270,7 @@ export class TracerBulletOrchestrator {
       // Never trust a possibly-stale recovery decision label: re-verify the
       // exact branch/registration/path/base facts immediately before
       // treating this task as leased.
-      lease = await this.worktrees.adopt(project, intent, gitOptions);
+      lease = await this.worktrees.resume(project, intent, gitOptions);
       this.tasks.append(
         input.taskId,
         "task.leased",

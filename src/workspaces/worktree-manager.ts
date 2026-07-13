@@ -16,6 +16,7 @@ const SAFE_GIT_ARGS = [
 ] as const;
 const EXTERNAL_PROGRAM_CONFIG =
   "^(merge\\..*\\.driver|diff\\.external|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process))$";
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export interface WorkspaceLease {
   readonly taskId: string;
@@ -27,7 +28,7 @@ export interface WorkspaceCreationIntent {
   readonly taskId: string;
   readonly branch: string;
   readonly path: string;
-  readonly base: string;
+  readonly baseCommit: string;
 }
 
 export class WorkspaceCreationUncertainError extends Error {
@@ -109,6 +110,14 @@ export class WorktreeManager {
     await this.assertSafeGitConfiguration(project.repositoryPath, options);
     const branch = `ticket/${taskId}`;
     const worktreePath = path.join(project.worktreeRoot, taskId);
+    const baseCommit = (
+      await this.runOrThrow(project.repositoryPath, [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${project.integrationBranch}^{commit}`,
+      ], options)
+    ).stdout.trim();
+    if (!COMMIT_ID.test(baseCommit)) throw new Error("integration base commit identity is invalid");
 
     if (existsSync(worktreePath)) {
       const status = await this.run(worktreePath, ["status", "--porcelain"], options);
@@ -129,25 +138,13 @@ export class WorktreeManager {
       taskId,
       branch,
       path: worktreePath,
-      base: project.integrationBranch,
+      baseCommit,
     };
     if (onPrepared !== undefined) {
       await onPrepared(intent);
     }
 
-    await this.runOrThrow(project.repositoryPath, [
-      "worktree",
-      "add",
-      "-b",
-      branch,
-      worktreePath,
-      project.integrationBranch,
-    ], options);
-
-    // Do not trust exit code 0 alone: verify the exact branch, registration,
-    // path, and base facts before returning a lease that callers will treat
-    // as a durable "task.leased" fact.
-    await this.verifyExactCreation(project, intent, options);
+    await this.performCreation(project, intent, options);
 
     return { taskId, branch, path: worktreePath };
   }
@@ -172,12 +169,118 @@ export class WorktreeManager {
     return { taskId: intent.taskId, branch: intent.branch, path: intent.path };
   }
 
+  async resume(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions = {},
+  ): Promise<WorkspaceLease> {
+    await this.assertSafeGitConfiguration(project.repositoryPath, options);
+    this.assertIntent(project, intent);
+    const evidence = Object.freeze({ ...intent });
+    let base: CommandResult;
+    try {
+      base = await this.run(project.repositoryPath, [
+        "rev-parse",
+        "--verify",
+        `${intent.baseCommit}^{commit}`,
+      ], options);
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(evidence, error instanceof Error ? error.message : String(error));
+    }
+    if (
+      base.termination !== null || base.exitCode !== 0 || base.truncated ||
+      base.stdout.trim() !== intent.baseCommit
+    ) {
+      throw new WorkspaceCreationUncertainError(evidence, "prepared base commit is unavailable");
+    }
+
+    if (await this.creationStatePresent(project, intent, options)) {
+      return this.adopt(project, intent, options);
+    }
+
+    await this.performCreation(project, intent, options);
+    return { taskId: intent.taskId, branch: intent.branch, path: intent.path };
+  }
+
+  private async performCreation(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions,
+  ): Promise<void> {
+    const evidence = Object.freeze({ ...intent });
+    let result: CommandResult;
+    try {
+      result = await this.run(project.repositoryPath, [
+        "worktree",
+        "add",
+        "-b",
+        intent.branch,
+        intent.path,
+        intent.baseCommit,
+      ], options);
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(evidence, error instanceof Error ? error.message : String(error));
+    }
+    if (result.termination !== null || result.exitCode !== 0 || result.truncated) {
+      throw new WorkspaceCreationUncertainError(
+        evidence,
+        result.termination === null ? `Git exited ${result.exitCode}` : `Git was ${result.termination}`,
+      );
+    }
+    await this.verifyExactCreation(project, intent, options);
+  }
+
+  private async creationStatePresent(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions,
+  ): Promise<boolean> {
+    const evidence = Object.freeze({ ...intent });
+    try {
+      const registration = await this.run(project.repositoryPath, [
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+      ], options);
+      const branch = await this.run(project.repositoryPath, [
+        "show-ref",
+        "--verify",
+        "--quiet",
+        `refs/heads/${intent.branch}`,
+      ], options);
+      if (
+        registration.termination !== null || registration.exitCode !== 0 || registration.truncated ||
+        branch.termination !== null || branch.truncated || (branch.exitCode !== 0 && branch.exitCode !== 1)
+      ) {
+        throw new Error("creation absence could not be proved");
+      }
+      return existsSync(intent.path) ||
+        registration.stdout.split("\0").some((field) =>
+          field === `worktree ${intent.path}` || field === `branch refs/heads/${intent.branch}`
+        ) || branch.exitCode === 0;
+    } catch (error) {
+      throw new WorkspaceCreationUncertainError(evidence, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private assertIntent(project: ProjectConfig, intent: WorkspaceCreationIntent): void {
+    if (
+      intent.path !== path.join(project.worktreeRoot, intent.taskId) ||
+      intent.branch !== `ticket/${intent.taskId}` ||
+      !COMMIT_ID.test(intent.baseCommit)
+    ) {
+      throw new WorkspaceCreationUncertainError({ ...intent }, "prepared creation intent is invalid");
+    }
+  }
+
   private async verifyExactCreation(
     project: ProjectConfig,
     intent: WorkspaceCreationIntent,
     options: GitRunOptions,
   ): Promise<void> {
     const evidence = Object.freeze({ ...intent });
+    this.assertIntent(project, intent);
     let canonicalPath: string;
     try {
       const stat = lstatSync(intent.path);
@@ -218,7 +321,8 @@ export class WorktreeManager {
       return (
         (fields.includes(`worktree ${intent.path}`) ||
           fields.includes(`worktree ${canonicalPath}`)) &&
-        fields.includes(branchRef)
+        fields.includes(branchRef) &&
+        fields.includes(`HEAD ${intent.baseCommit}`)
       );
     });
     if (exactRegistration.length !== 1) {
@@ -227,14 +331,8 @@ export class WorktreeManager {
         "ticket worktree registration is not exact",
       );
     }
-    let baseHead: CommandResult;
     let branchHead: CommandResult;
     try {
-      baseHead = await this.run(project.repositoryPath, [
-        "rev-parse",
-        "--verify",
-        `refs/heads/${intent.base}^{commit}`,
-      ], options);
       branchHead = await this.run(project.repositoryPath, [
         "rev-parse",
         "--verify",
@@ -247,7 +345,6 @@ export class WorktreeManager {
       );
     }
     if (
-      baseHead.termination !== null || baseHead.exitCode !== 0 || baseHead.truncated ||
       branchHead.termination !== null || branchHead.exitCode !== 0 || branchHead.truncated
     ) {
       throw new WorkspaceCreationUncertainError(
@@ -255,7 +352,7 @@ export class WorktreeManager {
         "base or branch identity could not be read",
       );
     }
-    if (baseHead.stdout.trim() !== branchHead.stdout.trim()) {
+    if (intent.baseCommit !== branchHead.stdout.trim()) {
       throw new WorkspaceCreationUncertainError(
         evidence,
         "created branch does not point at the exact intended base commit",
@@ -535,7 +632,7 @@ export class WorktreeManager {
       if (
         intent.path !== expectedPath ||
         intent.branch !== expectedBranch ||
-        intent.base !== project.integrationBranch
+        !COMMIT_ID.test(intent.baseCommit)
       ) {
         throw new Error("worktree creation intent is not exact");
       }
@@ -607,13 +704,7 @@ export class WorktreeManager {
       options,
       evidence,
     );
-    const baseHead = await this.cleanupRead(
-      project.repositoryPath,
-      ["rev-parse", "--verify", `refs/heads/${intent.base}^{commit}`],
-      options,
-      evidence,
-    );
-    if (head.stdout.trim() !== baseHead.stdout.trim()) {
+    if (head.stdout.trim() !== intent.baseCommit) {
       throw new WorkspaceCleanupError(
         "verification",
         false,

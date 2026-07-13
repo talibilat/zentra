@@ -103,6 +103,7 @@ interface Fixture {
   readonly project: ProjectConfig;
   readonly registry: ProjectRegistry;
   readonly worktrees: WorktreeManager;
+  readonly integrationBase: string;
 }
 
 async function fixture(): Promise<Fixture> {
@@ -132,12 +133,14 @@ async function fixture(): Promise<Fixture> {
   };
   const worktrees = new WorktreeManager();
   await worktrees.ensureIntegrationBranch(project);
+  const integrationBase = await gitOk(repositoryPath, ["rev-parse", project.integrationBranch]);
   return {
     baseDirectory,
     databasePath: path.join(baseDirectory, "journal.sqlite"),
     project,
     registry: new ProjectRegistry([project]),
     worktrees,
+    integrationBase,
   };
 }
 
@@ -188,7 +191,7 @@ function worktreeCreationIntent(testFixture: Fixture, taskId = "task-9") {
     taskId,
     branch: `ticket/${taskId}`,
     path: path.resolve(testFixture.project.worktreeRoot, taskId),
-    base: testFixture.project.integrationBranch,
+    baseCommit: testFixture.integrationBase,
   };
 }
 
@@ -492,6 +495,24 @@ describe("RecoveryService", () => {
       expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9"))).toBe(true);
     });
 
+    it("adopts the prepared commit after the integration branch advances", async () => {
+      const testFixture = await fixture();
+      const first = openSystem(testFixture);
+      createTask(first.tasks);
+      recordWorktreeCreationStarted(first.tasks, testFixture);
+      await testFixture.worktrees.create(testFixture.project, "task-9");
+      await gitOk(testFixture.project.repositoryPath, ["switch", testFixture.project.integrationBranch]);
+      writeFileSync(path.join(testFixture.project.repositoryPath, "advanced.txt"), "advanced\n");
+      await gitOk(testFixture.project.repositoryPath, ["add", "--", "advanced.txt"]);
+      await gitOk(testFixture.project.repositoryPath, ["commit", "-m", "advance integration"]);
+      closeJournal(first.journal);
+
+      await expect(openSystem(testFixture).recovery.inspect("task-9")).resolves.toMatchObject({
+        action: "resume_preparation",
+        reason: expect.stringMatching(/exact intended branch, path, and base/i),
+      });
+    });
+
     it("awaits reconciliation and never auto-cleans a partial worktree creation (branch created without registration)", async () => {
       const testFixture = await fixture();
       const first = openSystem(testFixture);
@@ -560,7 +581,7 @@ describe("RecoveryService", () => {
       expect(existsSync(path.join(testFixture.project.worktreeRoot, "task-9", "occupied.txt"))).toBe(true);
     });
 
-    it("preserves prepared evidence and never retries when the recorded intent contradicts current project configuration", async () => {
+    it("preserves prepared evidence and never retries when the recorded base commit is unavailable", async () => {
       const testFixture = await fixture();
       const first = openSystem(testFixture);
       createTask(first.tasks);
@@ -569,7 +590,7 @@ describe("RecoveryService", () => {
       first.tasks.append(
         "task-9",
         "task.worktree_creation_started",
-        { ...worktreeCreationIntent(testFixture), base: "some-other-branch" },
+        { ...worktreeCreationIntent(testFixture), baseCommit: "f".repeat(40) },
         null,
       );
       closeJournal(first.journal);
@@ -577,7 +598,7 @@ describe("RecoveryService", () => {
       const restarted = openSystem(testFixture);
       await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
         action: "await_reconciliation",
-        reason: expect.stringMatching(/does not match the current project configuration/i),
+        reason: expect.stringMatching(/failed closed|unavailable/i),
       });
     });
 

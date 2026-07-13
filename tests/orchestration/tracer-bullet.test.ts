@@ -2227,7 +2227,7 @@ describe("TracerBulletOrchestrator", () => {
     //       (mirrors a mid-effect cancellation/timeout),
     //   (c) after the effect is fully known to have succeeded.
     class WorktreeAddInterceptingGitClient extends GitClient {
-      constructor(private readonly mode: "before" | "uncertain" | "after") {
+      constructor(private readonly mode: "before" | "uncertain" | "branch-only" | "after") {
         super();
       }
 
@@ -2246,6 +2246,18 @@ describe("TracerBulletOrchestrator", () => {
             termination: "cancelled",
           };
         }
+        if (isWorktreeAdd && this.mode === "branch-only") {
+          const branch = args[args.indexOf("-b") + 1]!;
+          const baseCommit = args.at(-1)!;
+          await super.run(cwd, ["branch", branch, baseCommit], options);
+          return {
+            stdout: "",
+            stderr: "worktree add failed after creating branch",
+            exitCode: 1,
+            truncated: false,
+            termination: null,
+          };
+        }
         const result = await super.run(cwd, args, options);
         if (isWorktreeAdd && this.mode === "uncertain") {
           // The real "git worktree add" subprocess above already ran to
@@ -2261,7 +2273,7 @@ describe("TracerBulletOrchestrator", () => {
     async function runWithInterceptedCreation(
       fixture: Awaited<ReturnType<typeof fixtureRepository>>,
       taskId: string,
-      mode: "before" | "uncertain" | "after",
+      mode: "before" | "uncertain" | "branch-only" | "after",
       databasePath: string,
     ) {
       const worktrees = new WorktreeManager(new WorktreeAddInterceptingGitClient(mode));
@@ -2354,6 +2366,39 @@ describe("TracerBulletOrchestrator", () => {
       );
       await expect(recovery.inspect("task-interrupt-uncertain")).resolves.toMatchObject({
         action: "resume_preparation",
+      });
+    });
+
+    it("records branch-only partial effect evidence as nonterminal and awaits reconciliation", async () => {
+      const fixture = await fixtureRepository();
+      const databasePath = path.join(fixture.baseDirectory, "branch-only.sqlite");
+      const { journal, worktrees, projects, result } = await runWithInterceptedCreation(
+        fixture,
+        "task-branch-only",
+        "branch-only",
+        databasePath,
+      );
+
+      expect(result).toMatchObject({ lifecycle: "queued", terminalOutcome: null });
+      expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
+        "task.created",
+        "task.worktree_creation_started",
+      ]);
+      expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(false);
+      expect(await gitOk(fixture.repositoryPath, [
+        "rev-parse",
+        `refs/heads/ticket/${result.taskId}`,
+      ])).toMatch(/^[a-f0-9]{40}$/);
+
+      const recovery = new RecoveryService(
+        journal,
+        new TaskService(journal),
+        projects,
+        worktrees,
+        new GitClient(),
+      );
+      await expect(recovery.inspect(result.taskId)).resolves.toMatchObject({
+        action: "await_reconciliation",
       });
     });
 
@@ -2497,7 +2542,7 @@ describe("TracerBulletOrchestrator", () => {
       expect(registered).not.toContain(lease.path + "\n" + lease.path);
     });
 
-    it("(e) adopt path refuses to resume when the recorded intent no longer matches an exact Git state, preserving it untouched", async () => {
+    it("(e) proven no-effect path retries creation exactly once and completes", async () => {
       const fixture = await fixtureRepository();
       const databasePath = path.join(fixture.baseDirectory, "adopt-refuse.sqlite");
       const taskId = "task-adopt-refuse";
@@ -2506,7 +2551,18 @@ describe("TracerBulletOrchestrator", () => {
       journals.push(journal);
       const tasks = new TaskService(journal);
       const projects = ProjectRegistry.fromFile(fixture.configPath);
-      const worktrees = new WorktreeManager(new GitClient());
+      let creationAttempts = 0;
+      class CountingGitClient extends GitClient {
+        override run(
+          cwd: string,
+          args: readonly string[],
+          options: GitRunOptions = {},
+        ): Promise<CommandResult> {
+          if (args.includes("worktree") && args.includes("add")) creationAttempts += 1;
+          return super.run(cwd, args, options);
+        }
+      }
+      const worktrees = new WorktreeManager(new CountingGitClient());
       const project = projects.get("greeting-project");
 
       tasks.create({
@@ -2520,10 +2576,10 @@ describe("TracerBulletOrchestrator", () => {
         taskId,
         branch: `ticket/${taskId}`,
         path: path.join(fixture.worktreeRoot, taskId),
-        base: project.integrationBranch,
+        baseCommit: await gitOk(project.repositoryPath, ["rev-parse", project.integrationBranch]),
       };
       tasks.append(taskId, "task.worktree_creation_started", intent, null);
-      // No Git effect ever occurred: nothing exists to adopt.
+      // No Git effect ever occurred: recovery may retry once after proving absence.
 
       const supervisor = new ProcessSupervisor();
       const validations = new ValidationRunner(supervisor);
@@ -2539,20 +2595,18 @@ describe("TracerBulletOrchestrator", () => {
         workerFixture,
       );
 
-      // Adoption re-verification fails closed (no exact worktree exists to
-      // adopt). Like the orchestrator's own setup-stage handling of an
-      // uncertain worktree-creation effect, this must never be hidden
-      // behind an automatically-retried Git effect or a terminal outcome:
-      // the task is left nonterminal, exactly as recovery.inspect() found
-      // it, for an operator or a later resume attempt to reconcile.
       const result = await orchestrator.resume({ ...runInput, taskId, signal: runSignal() });
-      expect(result.lifecycle).toBe("queued");
-      expect(result.terminalOutcome).toBeNull();
+      expect(result.lifecycle).toBe("terminal");
+      expect(result.terminalOutcome).toBe("completed");
 
-      // No Git effect and no task.leased must ever be appended when the
-      // adopt-time re-verification fails.
       const types = journal.readStream(taskId).map((event) => event.type);
-      expect(types).toEqual(["task.created", "task.worktree_creation_started"]);
+      expect(types.slice(0, 3)).toEqual([
+        "task.created",
+        "task.worktree_creation_started",
+        "task.leased",
+      ]);
+      expect(types).toContain("task.completed");
+      expect(creationAttempts).toBe(1);
       expect(existsSync(intent.path)).toBe(false);
     });
   });

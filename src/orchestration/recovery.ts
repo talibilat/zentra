@@ -43,7 +43,7 @@ const WorktreeCreationStartedPayloadSchema = z.strictObject({
   taskId: z.string().min(1),
   branch: z.string().min(1),
   path: z.string().min(1),
-  base: z.string().min(1),
+  baseCommit: z.string().regex(COMMIT_ID),
 });
 const StartedPayloadSchema = z.strictObject({
   workerId: z.string().min(1),
@@ -304,7 +304,7 @@ export class RecoveryService {
         if (
           intent.path !== rawExpectedPath ||
           intent.branch !== `ticket/${taskId}` ||
-          intent.base !== project.integrationBranch
+          !COMMIT_ID.test(intent.baseCommit)
         ) {
           return decision(
             taskId,
@@ -314,6 +314,14 @@ export class RecoveryService {
         }
 
         if (!workspace.registered && !workspace.branchExists && !workspace.pathExists) {
+          const preparedBase = await this.readCommit(project.repositoryPath, intent.baseCommit);
+          if (preparedBase !== intent.baseCommit) {
+            return decision(
+              taskId,
+              "await_reconciliation",
+              "prepared integration base commit is unavailable; creation must not be retried",
+            );
+          }
           // No durable Git effect occurred at all: safe to resume/retry creation.
           return decision(
             taskId,
@@ -325,18 +333,7 @@ export class RecoveryService {
         if (workspace.registered && workspace.branchExists && workspace.pathExists) {
           // Fully created: verify the branch base is exactly the intended
           // base before adopting it as if task.leased had been recorded.
-          const baseHead = await this.readRef(
-            project.repositoryPath,
-            `refs/heads/${project.integrationBranch}`,
-          );
-          if (baseHead === null) {
-            return decision(
-              taskId,
-              "await_reconciliation",
-              "intended base branch could not be read while verifying a fully created worktree",
-            );
-          }
-          if (workspace.head !== baseHead) {
+          if (workspace.head !== intent.baseCommit) {
             // Competing identity: a worktree/branch with the intended name
             // exists but does not point at the intended base. Never delete
             // or retry automatically; preserve for an operator.

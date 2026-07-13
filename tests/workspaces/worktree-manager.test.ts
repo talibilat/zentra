@@ -719,6 +719,7 @@ describe("WorktreeManager", () => {
 
   it("invokes onPrepared with the exact intended branch, path, and base before the Git effect runs", async () => {
     await manager.ensureIntegrationBranch(project);
+    const integrationBase = (await gitOk(repoPath, ["rev-parse", project.integrationBranch])).trim();
     const observed: WorkspaceCreationIntent[] = [];
     let effectRan = false;
     class RecordingGitClient extends GitClient {
@@ -742,9 +743,57 @@ describe("WorktreeManager", () => {
       taskId: "task-prepared-evidence",
       branch: "ticket/task-prepared-evidence",
       path: lease.path,
-      base: project.integrationBranch,
+      baseCommit: integrationBase,
     }]);
   });
+
+  it("creates from the prepared commit when the integration branch advances before worktree add", async () => {
+    await manager.ensureIntegrationBranch(project);
+    const integrationBase = (await gitOk(repoPath, ["rev-parse", project.integrationBranch])).trim();
+
+    const lease = await manager.create(project, "task-immutable-base", {}, async (intent) => {
+      expect(intent.baseCommit).toBe(integrationBase);
+      await gitOk(repoPath, ["switch", project.integrationBranch]);
+      writeFileSync(path.join(repoPath, "advanced.txt"), "advanced\n");
+      await gitOk(repoPath, ["add", "--", "advanced.txt"]);
+      await gitOk(repoPath, ["commit", "-m", "advance integration"]);
+    });
+
+    expect((await gitOk(lease.path, ["rev-parse", "HEAD"])).trim()).toBe(integrationBase);
+    expect((await gitOk(repoPath, ["rev-parse", project.integrationBranch])).trim()).not.toBe(
+      integrationBase,
+    );
+  });
+
+  it.each(["nonzero", "termination", "rejection", "truncated"] as const)(
+    "reports a post-preparation worktree add %s as uncertain",
+    async (outcome) => {
+      await manager.ensureIntegrationBranch(project);
+      class UncertainAddGitClient extends GitClient {
+        override async run(
+          cwd: string,
+          args: readonly string[],
+          options: GitRunOptions = {},
+        ): Promise<CommandResult> {
+          if (args.includes("worktree") && args.includes("add")) {
+            if (outcome === "rejection") throw new Error("transport rejected");
+            return {
+              stdout: "",
+              stderr: "unknown result",
+              exitCode: outcome === "nonzero" ? 1 : outcome === "truncated" ? 0 : -1,
+              truncated: outcome === "truncated",
+              termination: outcome === "termination" ? "timed_out" : null,
+            };
+          }
+          return super.run(cwd, args, options);
+        }
+      }
+
+      await expect(
+        new WorktreeManager(new UncertainAddGitClient()).create(project, `task-add-${outcome}`),
+      ).rejects.toBeInstanceOf(WorkspaceCreationUncertainError);
+    },
+  );
 
   it("propagates a thrown onPrepared error before invoking the Git effect", async () => {
     await manager.ensureIntegrationBranch(project);
