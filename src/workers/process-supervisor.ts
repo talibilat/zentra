@@ -183,10 +183,7 @@ export class ProcessSupervisor implements WorkerAdapter {
         if (processGroupExists()) {
           signalProcessGroup("SIGKILL");
         }
-        if (
-          !(await waitForProcessGroupExit(this.forcedTerminationMs)) &&
-          decision?.kind === "exit"
-        ) {
+        if (!(await waitForProcessGroupExit(this.forcedTerminationMs))) {
           const exitCode = decision?.kind === "exit" ? decision.code : null;
           decision = { kind: "descendant_survived", code: exitCode };
         }
