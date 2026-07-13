@@ -28,11 +28,6 @@ const npmInstallChecks = require(path.resolve(
   path.dirname(npmExecutable),
   "../node_modules/npm-install-checks",
 )) as {
-  checkPlatform(
-    target: PackageMetadata,
-    force: boolean,
-    environment: { readonly os: string; readonly cpu: string },
-  ): void;
   checkEngine(target: PackageMetadata, npmVersion: string, nodeVersion: string): void;
 };
 const temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-metadata-test-")));
@@ -127,6 +122,12 @@ function createConsumer(name: string): string {
   return consumer;
 }
 
+function createSimulationPreload(name: string, source: string): string {
+  const preload = path.join(temporaryRoot, `${name}.cjs`);
+  writeFileSync(preload, `${source}\n`, "utf8");
+  return preload;
+}
+
 const tarball = createTarball();
 
 describe("MVP package platform metadata", () => {
@@ -164,20 +165,27 @@ describe("MVP package platform metadata", () => {
     expect(help.stdout).toContain("Usage: zentra");
   }, 120_000);
 
-  it("makes npm reject the packed package for a controlled Linux target", async () => {
+  it("makes npm reject installation for a controlled Linux target", async () => {
     const packageTarball = await tarball;
-    const metadata = await readPackedMetadata(packageTarball);
+    const consumer = createConsumer("unsupported-linux");
+    const preload = createSimulationPreload("linux-arm64", [
+      'Object.defineProperty(process, "platform", { value: "linux" });',
+      'Object.defineProperty(process, "arch", { value: "arm64" });',
+    ].join("\n"));
 
-    expect(() => npmInstallChecks.checkPlatform(metadata, false, {
-      os: "linux",
-      cpu: "arm64",
-    })).toThrow(expect.objectContaining({
-      code: "EBADPLATFORM",
-      message: "Unsupported platform",
-      current: expect.objectContaining({ os: "linux", cpu: "arm64" }),
-      required: expect.objectContaining({ os: ["darwin"], cpu: ["arm64"] }),
-    }));
-    expect(existsSync(path.join(temporaryRoot, "node_modules", "zentra"))).toBe(false);
+    await expect(run(nodeExecutable, [
+      "--require",
+      preload,
+      npmExecutable,
+      "install",
+      "--no-audit",
+      "--no-fund",
+      packageTarball,
+    ], consumer)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringMatching(/EBADPLATFORM[\s\S]*wanted.*darwin[\s\S]*actual.*linux/i),
+    });
+    expect(existsSync(path.join(consumer, "node_modules", "zentra"))).toBe(false);
   });
 });
 
@@ -206,14 +214,28 @@ describe("MVP package Node.js metadata", () => {
       .toThrow(expect.objectContaining({ code: "EBADENGINE" }));
   });
 
-  it("makes strict engine enforcement reject Node.js 27 for the packed package", async () => {
-    const metadata = await readPackedMetadata(await tarball);
+  it("makes strict npm installation reject a controlled Node.js 27 runtime", async () => {
+    const consumer = createConsumer("unsupported-node-27");
+    const preload = createSimulationPreload("node-27", [
+      'Object.defineProperty(process, "version", { value: "v27.0.0" });',
+      'Object.defineProperty(process, "versions", {',
+      '  value: { ...process.versions, node: "27.0.0" },',
+      "});",
+    ].join("\n"));
 
-    expect(() => npmInstallChecks.checkEngine(metadata, "11.8.0", "27.0.0"))
-      .toThrow(expect.objectContaining({
-        code: "EBADENGINE",
-        current: { node: "27.0.0", npm: "11.8.0" },
-        required: { node: ">=24 <27" },
-      }));
+    await expect(run(nodeExecutable, [
+      "--require",
+      preload,
+      npmExecutable,
+      "install",
+      "--engine-strict",
+      "--no-audit",
+      "--no-fund",
+      await tarball,
+    ], consumer)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringMatching(/EBADENGINE[\s\S]*required.*>=24 <27[\s\S]*actual.*v27\.0\.0/i),
+    });
+    expect(existsSync(path.join(consumer, "node_modules", "zentra"))).toBe(false);
   });
 });

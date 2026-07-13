@@ -22,7 +22,7 @@ The implementation host provides Node.js 24.2.0 only, so this report does not in
 
 - Changed the Zentra package engine from unbounded `>=24` to exact `>=24 <27`.
 - Added source and packed metadata assertions in the dedicated package metadata suite.
-- Added a controlled Node.js 27 strict-engine simulation through npm's installed `npm-install-checks` implementation.
+- Added a controlled Node.js 27 simulation that launches canonical Node and npm, runs a real `npm install --engine-strict`, requires `EBADENGINE`, and confirms that Zentra was not installed.
 - Updated README installation prerequisites and the release support policy.
 - Documented the exact Node.js 24/25/26 matrix that issue 024 must implement without adding a CI workflow in this issue.
 - Required an explicit compatibility issue and successful full matrix before widening the upper bound.
