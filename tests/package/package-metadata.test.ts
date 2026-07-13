@@ -45,6 +45,7 @@ interface PackageMetadata {
   readonly _id?: string;
   readonly name?: string;
   readonly version?: string;
+  readonly license?: string;
   readonly engines?: { readonly node?: string };
   readonly os?: readonly string[];
   readonly cpu?: readonly string[];
@@ -316,6 +317,21 @@ describe("MVP package platform metadata", () => {
       stderr: expect.stringMatching(/EBADPLATFORM[\s\S]*wanted.*darwin[\s\S]*actual.*linux/i),
     });
     expect(existsSync(path.join(consumer, "node_modules", "zentra"))).toBe(false);
+  });
+});
+
+describe("MVP package license metadata", () => {
+  it("declares the MIT SPDX license identifier", () => {
+    const metadata = readMetadata(path.join(repositoryRoot, "package.json"));
+
+    expect(metadata.license).toBe("MIT");
+  });
+
+  it("retains the MIT SPDX license identifier in the packed package", async () => {
+    const packageTarball = await tarball;
+    const metadata = await readPackedMetadata(packageTarball);
+
+    expect(metadata.license).toBe("MIT");
   });
 });
 
