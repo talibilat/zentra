@@ -5,6 +5,16 @@ import path from "node:path";
 import { z } from "zod";
 
 export const APPROVED_VALIDATION_EXECUTABLE = realpathSync(process.execPath);
+export const MIN_VALIDATION_TIMEOUT_MS = 100;
+export const MAX_VALIDATION_TIMEOUT_MS = 30 * 60 * 1_000;
+export const DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS = 30_000;
+export const DEFAULT_FULL_VALIDATION_TIMEOUT_MS = 5 * 60 * 1_000;
+
+export const ValidationTimeoutSchema = z
+  .number()
+  .int()
+  .min(MIN_VALIDATION_TIMEOUT_MS)
+  .max(MAX_VALIDATION_TIMEOUT_MS);
 
 interface ExecutableIdentity {
   readonly device: number;
@@ -209,6 +219,12 @@ export const ProjectConfigSchema = z.object({
   validations: z.object({
     focused: CommandSchema,
     full: CommandSchema,
+    focusedTimeoutMs: ValidationTimeoutSchema.default(
+      DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
+    ),
+    fullTimeoutMs: ValidationTimeoutSchema.default(
+      DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
+    ),
   }),
 });
 
