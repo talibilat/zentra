@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -239,6 +240,22 @@ const runInput = {
 
 function runSignal(): AbortSignal {
   return AbortSignal.timeout(20_000);
+}
+
+function snapshotDirectory(directory: string): Readonly<Record<string, string>> {
+  const snapshot: Record<string, string> = {};
+  const visit = (current: string, relative: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    )) {
+      const entryRelative = path.join(relative, entry.name);
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(entryPath, entryRelative);
+      else snapshot[entryRelative] = readFileSync(entryPath).toString("base64");
+    }
+  };
+  visit(directory, "");
+  return snapshot;
 }
 
 describe("TracerBulletOrchestrator", () => {
@@ -1798,6 +1815,187 @@ describe("TracerBulletOrchestrator", () => {
       verification: "failed",
       reason: expect.stringMatching(/replace/i),
     });
+  });
+
+  it.each([
+    ["replacement refs", async (input: Parameters<IntegrationQueue["integrate"]>[0]) => {
+      const source = await gitOk(input.project.repositoryPath, [
+        "rev-parse",
+        `refs/heads/${input.lease.branch}`,
+      ]);
+      const integration = await gitOk(input.project.repositoryPath, [
+        "rev-parse",
+        `refs/heads/${input.project.integrationBranch}`,
+      ]);
+      await gitOk(input.project.repositoryPath, ["replace", source, integration]);
+    }],
+    ["a graft file", async (input: Parameters<IntegrationQueue["integrate"]>[0]) => {
+      const source = await gitOk(input.project.repositoryPath, [
+        "rev-parse",
+        `refs/heads/${input.lease.branch}`,
+      ]);
+      const integration = await gitOk(input.project.repositoryPath, [
+        "rev-parse",
+        `refs/heads/${input.project.integrationBranch}`,
+      ]);
+      writeFileSync(
+        path.join(input.project.repositoryPath, ".git", "info", "grafts"),
+        `${source} ${integration}\n`,
+      );
+    }],
+  ] as const)("rejects pre-existing %s before integration effects", async (_name, substitute) => {
+    const fixture = await fixtureRepository();
+    const taskId = `task-pre-existing-${_name.replaceAll(" ", "-")}`;
+    let sourceRead = false;
+    let candidateCreated = false;
+    let mergeAttempted = false;
+    let updateRefAttempted = false;
+    let fullValidationAttempted = false;
+    let integrationRefBefore = "";
+    let worktreeBefore: Readonly<Record<string, string>> = {};
+    let completionEvidenceBefore = "";
+    let journal!: SqliteEventJournal;
+
+    class EffectTrackingGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (args[0] === "rev-parse" && args.at(-1)?.includes(`ticket/${taskId}`)) sourceRead = true;
+        if (args.includes("worktree") && args.includes("add")) candidateCreated = true;
+        if (args.includes("merge") && !args.includes("merge-base")) mergeAttempted = true;
+        if (args.includes("update-ref") && args.includes("--no-deref")) updateRefAttempted = true;
+        return super.run(cwd, args, options);
+      }
+    }
+    class EffectTrackingValidationRunner extends ValidationRunner {
+      override run(...args: Parameters<ValidationRunner["run"]>): Promise<ValidationReport> {
+        fullValidationAttempted = true;
+        return super.run(...args);
+      }
+    }
+    const integrationValidation = new EffectTrackingValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new EffectTrackingGitClient(), integrationValidation);
+    class PreExistingSubstitutionIntegration extends IntegrationQueue {
+      override async integrate(input: Parameters<IntegrationQueue["integrate"]>[0]) {
+        integrationRefBefore = await gitOk(input.project.repositoryPath, [
+          "rev-parse",
+          `refs/heads/${input.project.integrationBranch}`,
+        ]);
+        worktreeBefore = snapshotDirectory(input.lease.path);
+        completionEvidenceBefore = JSON.stringify(
+          journal.readStream(taskId).filter((event) => event.type === "task.completed"),
+        );
+        await substitute(input);
+        return delegate.integrate(input);
+      }
+    }
+    const setup = system(fixture.configPath, {
+      integrations: new PreExistingSubstitutionIntegration(
+        new GitClient(),
+        new ValidationRunner(new ProcessSupervisor()),
+      ),
+    });
+    journal = setup.journal;
+
+    const result = await setup.orchestrator.run({ ...runInput, taskId, signal: runSignal() });
+
+    expect(result.terminalOutcome).toBe("failed");
+    expect(sourceRead).toBe(false);
+    expect(candidateCreated).toBe(false);
+    expect(mergeAttempted).toBe(false);
+    expect(fullValidationAttempted).toBe(false);
+    expect(updateRefAttempted).toBe(false);
+    expect(await gitOk(fixture.repositoryPath, [
+      "rev-parse",
+      "refs/heads/zentra/integration",
+    ])).toBe(integrationRefBefore);
+    expect(snapshotDirectory(path.join(fixture.worktreeRoot, taskId))).toEqual(worktreeBefore);
+    expect(JSON.stringify(
+      journal.readStream(taskId).filter((event) => event.type === "task.completed"),
+    )).toBe(completionEvidenceBefore);
+  });
+
+  it("rejects a graft introduced after candidate validation and before update-ref", async () => {
+    const fixture = await fixtureRepository();
+    const taskId = "task-racing-graft";
+    let updateRefAttempted = false;
+    let validationCompleted = false;
+    let integrationRefBefore = "";
+    let worktreeBefore: Readonly<Record<string, string>> = {};
+    let completionEvidenceBefore = "";
+    let journal!: SqliteEventJournal;
+
+    class UpdateTrackingGitClient extends GitClient {
+      override run(
+        cwd: string,
+        args: readonly string[],
+        options?: GitRunOptions,
+      ): Promise<CommandResult> {
+        if (args.includes("update-ref") && args.includes("--no-deref")) updateRefAttempted = true;
+        return super.run(cwd, args, options);
+      }
+    }
+    class CompletingValidationRunner extends ValidationRunner {
+      override async run(
+        ...args: Parameters<ValidationRunner["run"]>
+      ): Promise<ValidationReport> {
+        const report = await super.run(...args);
+        validationCompleted = true;
+        return report;
+      }
+    }
+    const integrationValidation = new CompletingValidationRunner(new ProcessSupervisor());
+    const delegate = new IntegrationQueue(new UpdateTrackingGitClient(), integrationValidation);
+    class RacingSubstitutionIntegration extends IntegrationQueue {
+      override async integrate(input: Parameters<IntegrationQueue["integrate"]>[0]) {
+        integrationRefBefore = await gitOk(input.project.repositoryPath, [
+          "rev-parse",
+          `refs/heads/${input.project.integrationBranch}`,
+        ]);
+        worktreeBefore = snapshotDirectory(input.lease.path);
+        completionEvidenceBefore = JSON.stringify(
+          journal.readStream(taskId).filter((event) => event.type === "task.completed"),
+        );
+        return delegate.integrate({
+          ...input,
+          onPrepared: async (receipt) => {
+            expect(validationCompleted).toBe(true);
+            await input.onPrepared?.(receipt);
+            const commonDirectory = await gitOk(input.project.repositoryPath, [
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-common-dir",
+            ]);
+            writeFileSync(path.join(commonDirectory, "info", "grafts"), `${receipt.resultCommit}\n`);
+          },
+        });
+      }
+    }
+    const setup = system(fixture.configPath, {
+      integrations: new RacingSubstitutionIntegration(
+        new GitClient(),
+        new ValidationRunner(new ProcessSupervisor()),
+      ),
+    });
+    journal = setup.journal;
+
+    const result = await setup.orchestrator.run({ ...runInput, taskId, signal: runSignal() });
+
+    expect(result.lifecycle).toBe("integrating");
+    expect(updateRefAttempted).toBe(false);
+    expect(await gitOk(fixture.repositoryPath, [
+      "rev-parse",
+      "refs/heads/zentra/integration",
+    ])).toBe(integrationRefBefore);
+    expect(snapshotDirectory(path.join(fixture.worktreeRoot, taskId))).toEqual(worktreeBefore);
+    expect(journal.readStream(taskId).some((event) => event.type === "task.integration_prepared")).toBe(
+      true,
+    );
+    expect(JSON.stringify(
+      journal.readStream(taskId).filter((event) => event.type === "task.completed"),
+    )).toBe(completionEvidenceBefore);
   });
 
   it("rejects a result commit that does not descend from the reviewed source", async () => {

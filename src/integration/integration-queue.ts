@@ -16,7 +16,11 @@ import {
   ReviewDecisionSchema,
 } from "../reviews/reviewer-adapter.js";
 import { isVerifiedReviewDecision } from "../reviews/review-gate.js";
-import type { CommandResult, GitClient } from "../workspaces/git-client.js";
+import {
+  assertNoGitObjectSubstitution,
+  type CommandResult,
+  type GitClient,
+} from "../workspaces/git-client.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
 import {
   IntegrationLeaseStore,
@@ -189,6 +193,11 @@ export class IntegrationQueue {
     let source: CommandResult;
     try {
       assertLease();
+      await assertNoGitObjectSubstitution(
+        this.git,
+        project.repositoryPath,
+        GIT_OPERATION_TIMEOUT_MS,
+      );
       source = await this.git.run(
         project.repositoryPath,
         ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
@@ -615,6 +624,15 @@ export class IntegrationQueue {
       let update: CommandResult;
       let uncertainUpdateReason: string | null = null;
       assertLease();
+      try {
+        await assertNoGitObjectSubstitution(
+          this.git,
+          project.repositoryPath,
+          GIT_OPERATION_TIMEOUT_MS,
+        );
+      } catch (error) {
+        throw new IntegrationPreparationError(errorMessage(error));
+      }
       try {
         update = await this.git.run(
           project.repositoryPath,

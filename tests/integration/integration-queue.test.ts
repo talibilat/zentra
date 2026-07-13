@@ -928,6 +928,11 @@ describe("IntegrationQueue", () => {
             stdout: `${cwd}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
           });
         }
+        if (args.includes("refs/replace/")) {
+          return Promise.resolve({
+            stdout: "", stderr: "", exitCode: 0, truncated: false, termination: null,
+          });
+        }
         if (args[0] === "rev-parse" && args[1] === "--verify") {
           concurrentSourceReads += 1;
           return new Promise((resolve) => sourceResolvers.push(() => resolve({
@@ -970,6 +975,11 @@ describe("IntegrationQueue", () => {
         if (args.includes("--git-common-dir")) {
           return Promise.resolve({
             stdout: `${repositoryPath}\n`, stderr: "", exitCode: 0, truncated: false, termination: null,
+          });
+        }
+        if (args.includes("refs/replace/")) {
+          return Promise.resolve({
+            stdout: "", stderr: "", exitCode: 0, truncated: false, termination: null,
           });
         }
         if (args[0] === "rev-parse" && args[1] === "--verify") {
