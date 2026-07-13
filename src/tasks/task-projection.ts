@@ -1,6 +1,10 @@
 import type {
   StoredEvent,
 } from "../contracts/event.js";
+import {
+  isArtifactRecordedEventType,
+  projectArtifacts,
+} from "../contracts/artifact.js";
 import type {
   TaskLifecycleState,
   TerminalOutcome,
@@ -102,6 +106,8 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     return null;
   }
 
+  projectArtifacts(events);
+
   const firstEvent = events[0]!;
   if (firstEvent.type !== "task.created") {
     throw new Error("first event must be task.created");
@@ -137,6 +143,11 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
 
     if (state.lifecycle === "terminal") {
       throw new Error("task is already terminal");
+    }
+
+    if (isArtifactRecordedEventType(event.type)) {
+      state.streamVersion = event.streamVersion;
+      continue;
     }
 
     const nextState = EVENT_TO_LIFECYCLE[event.type];

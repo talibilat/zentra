@@ -9,6 +9,11 @@ import type {
   ValidationRunner,
 } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
+import {
+  artifactEvidenceSha256,
+  type ArtifactKind,
+  type PatchArtifactEvidence,
+} from "../contracts/artifact.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import { resolveBundledFixture } from "../fixtures/bundled-fixtures.js";
 import {
@@ -186,6 +191,13 @@ export class TracerBulletOrchestrator {
       await validateArtifact(lease, patch, this.git, gitOptions);
       const diffSha256 = sha256(inspected.diff);
 
+      this.recordArtifact(input.taskId, "patch", {
+        diff: inspected.diff,
+        diffSha256,
+        changedPath: patch.path,
+        changedContentSha256: patch.sha256,
+      } satisfies PatchArtifactEvidence);
+
       this.tasks.append(
         input.taskId,
         "task.validation_started",
@@ -202,6 +214,7 @@ export class TracerBulletOrchestrator {
         input.signal,
         { invocationId: validationInvocationId, subjectSha256: diffSha256 },
       );
+      this.recordArtifact(input.taskId, "validation_report", validation);
       const validationOutcome = failedValidationOutcome(validation);
       if (validationOutcome !== null) {
         return this.terminate(
@@ -253,6 +266,7 @@ export class TracerBulletOrchestrator {
       };
       const decision = await this.reviewer.review(reviewInput, input.signal);
       const verifiedEvidence = this.reviews.verifyEvidence(reviewInput, decision);
+      this.recordArtifact(input.taskId, "review_report", verifiedEvidence);
       if (!verifiedEvidence.approved) {
         return this.terminate(
           input.taskId,
@@ -300,6 +314,7 @@ export class TracerBulletOrchestrator {
 
       stage = "integration";
       let receipt: IntegrationReceipt;
+      let receiptRecorded = false;
       try {
         receipt = await this.integrations.integrate({
           project,
@@ -307,6 +322,13 @@ export class TracerBulletOrchestrator {
           review: verifiedReview,
           signal: input.signal,
           onPrepared: (preparedReceipt) => {
+            this.tasks.append(
+              input.taskId,
+              "artifact.integration_receipt_recorded",
+              this.artifactPayload(input.taskId, "integration_receipt", preparedReceipt),
+              null,
+            );
+            receiptRecorded = true;
             this.tasks.append(
               input.taskId,
               "task.integration_prepared",
@@ -326,6 +348,9 @@ export class TracerBulletOrchestrator {
         return this.observeIntegration(input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         });
+      }
+      if (!receiptRecorded) {
+        this.recordArtifact(input.taskId, "integration_receipt", receipt);
       }
       if (receipt.outcome !== "completed") {
         return this.terminate(
@@ -479,6 +504,45 @@ export class TracerBulletOrchestrator {
 
   private integrationCleanupFailures(taskId: string): readonly unknown[] {
     return this.integrations.getCleanupFailures().filter((failure) => failure.taskId === taskId);
+  }
+
+  private recordArtifact(
+    taskId: string,
+    kind: ArtifactKind,
+    evidence: unknown,
+    digest = artifactEvidenceSha256(kind, evidence),
+  ): void {
+    this.tasks.append(
+      taskId,
+      `artifact.${kind}_recorded`,
+      this.artifactPayload(taskId, kind, evidence, digest),
+      null,
+    );
+  }
+
+  private artifactPayload(
+    taskId: string,
+    kind: ArtifactKind,
+    evidence: unknown,
+    digest = artifactEvidenceSha256(kind, evidence),
+  ): unknown {
+    const logicalPaths: Record<ArtifactKind, string> = {
+      patch: "artifacts/patch.diff",
+      validation_report: "artifacts/focused-validation.json",
+      review_report: "artifacts/review-decision.json",
+      integration_receipt: "artifacts/integration-receipt.json",
+    };
+    return {
+      artifact: {
+        artifactId: randomUUID(),
+        taskId,
+        kind,
+        path: logicalPaths[kind],
+        sha256: digest,
+        createdAt: new Date().toISOString(),
+      },
+      evidence,
+    };
   }
 
   private current(taskId: string): TaskView {
