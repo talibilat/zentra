@@ -35,3 +35,22 @@ The supported Darwin arm64 packed-install, native-addon load, and CLI help test 
 - The controlled unsupported-target test preloaded canonical npm 11.8.0 with Linux arm64 runtime identifiers, ran a real strict install of the packed package, observed `EBADPLATFORM` with required OS `darwin` and actual OS `linux`, and confirmed that `node_modules/zentra` was not created.
 
 Final complete-suite, production-build, package verification, package-content, and packed-smoke evidence is recorded after issue 021 in this branch's final verification pass.
+
+## Inherited Review Findings
+
+The scoped `no-mistakes` review reported three findings in files that are unchanged by `49d6378...HEAD`:
+
+- `review-001`, error, `src/cli/main.ts`: caller-selected reviewer executables and arguments can select a shell or another host executable.
+- `review-002`, error, `src/reviews/reviewer-adapter.ts`: reviewer settlement does not confirm that its owned process group disappeared before accepting success.
+- `review-003`, warning, `scripts/verify-package-contents.mjs`: synchronous package verification timeout handling does not confirm termination of `npm pack` lifecycle descendants.
+
+The controller confirmed that all three findings are pre-existing and outside issues 020 and 021.
+They are deferred to dedicated remediation branches before final whole-branch review.
+They were not modified in this metadata branch, waived, or accepted as risks.
+
+## Scoped Gate Outcome
+
+`no-mistakes` run `01KXDNHVN2FNH80Y99V0ZS7FCY` completed with outcome `passed` after the controller authorized approval of this scoped review step only.
+Its test, document, lint, and push steps completed.
+Rebase was skipped to preserve reviewed base `49d6378`, and PR and CI were skipped because no PR was requested and issue 024 owns CI.
+The pipeline push produced remote commit `be6bca0` before this report-only follow-up.

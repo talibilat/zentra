@@ -53,3 +53,22 @@ The native dependency compatibility assertion already passed in that red run.
 - `pnpm package:contents` passed with 71 deterministic package files across clean packs under umasks `022` and `077`.
 - `brew list --versions node node@24 node@25 node@26` reported only Node.js 24.2.0 installations; no Node.js 25 or 26 installation was available.
 - `git diff --check` passed before final commit.
+
+## Inherited Review Findings
+
+The scoped `no-mistakes` review reported three findings in files that are unchanged by `49d6378...HEAD`:
+
+- `review-001`, error, `src/cli/main.ts`: caller-selected reviewer executables and arguments can select a shell or another host executable.
+- `review-002`, error, `src/reviews/reviewer-adapter.ts`: reviewer settlement does not confirm that its owned process group disappeared before accepting success.
+- `review-003`, warning, `scripts/verify-package-contents.mjs`: synchronous package verification timeout handling does not confirm termination of `npm pack` lifecycle descendants.
+
+The controller confirmed that all three findings are pre-existing and outside issues 020 and 021.
+They are deferred to dedicated remediation branches before final whole-branch review.
+They were not modified in this metadata branch, waived, or accepted as risks.
+
+## Scoped Gate Outcome
+
+`no-mistakes` run `01KXDNHVN2FNH80Y99V0ZS7FCY` completed with outcome `passed` after the controller authorized approval of this scoped review step only.
+Its test, document, lint, and push steps completed.
+Rebase was skipped to preserve reviewed base `49d6378`, and PR and CI were skipped because no PR was requested and issue 024 owns CI.
+The pipeline push produced remote commit `be6bca0` before this report-only follow-up.
