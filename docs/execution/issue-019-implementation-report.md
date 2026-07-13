@@ -10,12 +10,15 @@ The package had no `files` allowlist, so npm selected package contents from the 
 The resulting tarball included source, tests, package scripts, agent instructions, and internal planning and execution documents that were not needed to install or run Zentra.
 There was also no package-content gate proving that independent clean builds produced the same archive paths, modes, package metadata, and file contents.
 The initial package-content gate ran both packs under the same ambient umask and therefore could not detect that newly emitted files inherited restrictive modes such as `0600` under umask `077`.
+The first mode-normalization fix checked paths with `existsSync` and then called `chmodSync`, which followed a packaged symlink and changed its external target before package verification rejected the symlink.
+The package-content verifier also resolved bare `npm` and `tar` names through ambient `PATH` and allowed `spawnSync` to inherit the complete parent environment, including behavior-changing npm configuration.
 
 ## Files Changed
 
 - `package.json`
 - `scripts/build-package.mjs`
 - `scripts/verify-package-contents.mjs`
+- `tests/package/package-e2e.test.ts`
 - `docs/execution/issue-019-implementation-report.md`
 
 ## Changes Made
@@ -26,6 +29,13 @@ The production tree includes emitted JavaScript, declarations, source maps, and 
 Source maps are intentional package output because issue 016's production build inherits `sourceMap: true` from `tsconfig.json`.
 The new `package:contents` script creates two independent clean source sandboxes, runs the real `npm pack` lifecycle in each, and verifies the selected and extracted archive contents.
 The package build now explicitly sets every packaged regular file to mode `0644`, then sets each declared executable to `0755`, so npm does not inherit archive entry modes from the caller's umask.
+Before changing any mode, the build uses `lstatSync` to validate the complete packaged path set as regular non-symlink files.
+All required package paths fail closed when absent, while the prospective `LICENSE` remains the only optional path.
+This preflight prevents an invalid later path from causing partial mode changes and preserves the existing actionable missing-binary failure.
+The verifier derives npm from the canonical Node installation, resolves both npm and `/usr/bin/tar` to canonical absolute regular executable files, and invokes canonical npm through canonical Node so no shebang lookup can substitute Node.
+Every verifier subprocess uses an executable plus argument array with `shell: false`, a fixed minimal environment, isolated npm home, cache, user configuration, and global configuration, and a 120-second timeout.
+Subprocess failures now report the full quoted executable and argument vector, exit or signal status, and captured tool output.
+The npm `prepack` lifecycle invokes the two Node scripts directly so deterministic verification does not require ambient pnpm resolution.
 This mode normalization does not change issue 016's output paths, content digests, clean-build behavior, or package verification semantics.
 
 ## Tests Added
@@ -36,20 +46,26 @@ It seeds forbidden canaries for tests, coverage, `.worktrees`, `docs/execution`,
 It proves those canaries are absent after the real clean-build package lifecycle.
 It packs once under umask `022` and once under umask `077`, extracts both tarballs while preserving their header modes, and compares normalized file paths, modes, SHA-256 content digests, and complete package metadata.
 Archive timestamps are deliberately omitted from the normalized comparison, so this check does not promise byte-for-byte gzip identity.
+The package E2E suite replaces the required runtime fixture with a symlink to an external `0600` file and proves that packaging fails without changing the target mode or producing a tarball.
+Focused verifier tests prepend fake npm and tar executables to ambient `PATH` and prove neither is invoked.
+Another focused test sets ambient `npm_config_ignore_scripts=true` and proves the verifier strips it rather than bypassing the clean build and packaging stale output.
 
 ## Commands And Results
 
 - Red package-content run before the allowlist: `pnpm package:contents` failed because npm included source, scripts, internal documents, and every seeded forbidden canary.
 - Red review-fix reproduction: `umask 077 && pnpm package:contents` failed because generated regular files were archived as `0600` instead of `0644`.
 - Red cross-umask test before mode normalization: `pnpm package:contents` failed because the synthetic LICENSE created under umask `077` was archived as `0600`.
+- Red external-symlink reproduction: the package E2E regression observed the external target change from mode `0600` to `0644` before package verification rejected the symlink.
+- Red ambient-PATH reproduction: the verifier selected a fake `npm` prepended to `PATH` and failed with the fake executable's exit status.
+- Red inherited-environment reproduction: ambient `npm_config_ignore_scripts=true` bypassed prepack and caused the verifier to detect `dist/stale-output.js` in the package.
 - Package-content verification: `pnpm package:contents` passed with 71 deterministic files in clean packs under umasks `022` and `077`, including the synthetic prospective LICENSE.
 - Restrictive-caller verification: `umask 077 && pnpm package:contents` passed with the same 71 deterministic files and normalized modes.
 - Clean production build: `pnpm build` passed.
 - Production output verification: `pnpm package:verify` passed.
 - Package dry run: `npm pack --dry-run` passed with 70 entries because issue 018 has not yet supplied LICENSE.
 - Typecheck: `pnpm check` passed.
-- Full suite: `pnpm test` passed 552 of 552 tests across 17 files in 38.44 seconds.
-- Issue 016 tarball installation test: `tests/package/package-e2e.test.ts` passed all 7 tests, including installation into an empty consumer and a SQLite-backed CLI task from the installed tarball.
+- Full suite: `pnpm test` passed 555 of 555 tests across 17 files in 43.52 seconds.
+- Issue 016 tarball installation and package-security tests: `pnpm exec vitest run tests/package/package-e2e.test.ts` passed all 10 tests in 16.86 seconds.
 - Diff validation: `git diff --check` passed.
 
 ## Acceptance Criteria Evidence
@@ -58,17 +74,20 @@ The allowlist contains only issue 016's production output, its required runtime 
 Tests, coverage, worktrees, planning documents, local databases, secrets, source files, package scripts, and stale pre-build output are absent from the package.
 The clean prepack lifecycle removes stale `dist` state before selecting the allowlisted production tree.
 The verifier binds the npm manifest to every generated production file and verifies that `dist/src/cli/main.js` is mode `0755` while all other archive files are mode `0644`.
+The build rejects packaged symlinks before any chmod, so an external target is neither mode-modified nor packaged.
+Canonical npm and tar resolution, explicit argv execution, isolated npm configuration, and a minimal environment make tool selection independent of ambient `PATH` and parent secrets or npm settings.
 Clean builds under umasks `022` and `077` must produce identical normalized archive paths, modes, SHA-256 content digests, and complete package metadata.
 README and the deterministic worker fixture are present in the current tarball, and a synthetic LICENSE proves issue 018's future file will be included without creating that file or adding license metadata in this issue.
 
 ## Remaining Concerns
 
 Issue 018 still owns selecting and adding the repository LICENSE and package license metadata.
-The determinism check requires the system `tar` executable to extract locally generated npm tarballs.
+The determinism check requires canonical `/usr/bin/tar` to resolve to an executable regular file for extracting locally generated npm tarballs.
 The verifier intentionally normalizes timestamps and does not assert byte-for-byte gzip identity.
 
 ## Commit Identity
 
 Branch: `fix/predeploy-c1-files-019`.
 Initial implementation commit: `b534e17`.
-Blocking review-fix commit: this document's containing commit.
+Mode-normalization review-fix commit: `c7d21c2`.
+Security review-fix commit: this document's containing commit.

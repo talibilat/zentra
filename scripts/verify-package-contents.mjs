@@ -19,6 +19,11 @@ import path from "node:path";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const temporaryRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-contents-")));
+const nodeExecutable = canonicalExecutable(process.execPath, "Node.js");
+const npmExecutable = canonicalExecutable(path.join(path.dirname(nodeExecutable), "npm"), "npm");
+const tarExecutable = canonicalExecutable("/usr/bin/tar", "tar");
+const commandEnvironment = minimalEnvironment();
+const commandTimeoutMs = 120_000;
 const forbiddenCanaries = [
   ".env",
   ".worktrees/package-canary.txt",
@@ -65,8 +70,8 @@ function inspectPackage(label) {
   seedCanaries(sourceRoot);
 
   const packed = run(
-    "npm",
-    ["pack", "--silent", "--json", "--pack-destination", artifactRoot],
+    nodeExecutable,
+    [npmExecutable, "pack", "--silent", "--json", "--pack-destination", artifactRoot],
     sourceRoot,
   );
   const jsonStart = packed.stdout.lastIndexOf("\n[");
@@ -79,7 +84,7 @@ function inspectPackage(label) {
   assertPackageManifest(sourceRoot, listedFiles);
 
   const tarball = path.join(artifactRoot, result.filename);
-  run("tar", ["-xzf", tarball, "-C", extractedRoot, "-p"], sourceRoot);
+  run(tarExecutable, ["-xzf", tarball, "-C", extractedRoot, "-p"], sourceRoot);
   const extractedPackage = path.join(extractedRoot, "package");
   const entries = walkFiles(extractedPackage).map((file) => {
     const relative = relativePath(extractedPackage, file);
@@ -181,17 +186,69 @@ function relativePath(root, file) {
 }
 
 function run(executable, args, cwd) {
+  const command = formatCommand(executable, args);
   const result = spawnSync(executable, args, {
     cwd,
     shell: false,
+    env: commandEnvironment,
     encoding: "utf8",
     maxBuffer: 10 * 1_024 * 1_024,
+    timeout: commandTimeoutMs,
   });
-  if (result.error !== undefined) throw result.error;
+  if (result.error !== undefined) {
+    if ("code" in result.error && result.error.code === "ETIMEDOUT") {
+      throw new Error(`${command} timed out after ${commandTimeoutMs}ms`);
+    }
+    throw new Error(`${command} failed to start: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    throw new Error(`${executable} ${args[0]} failed:\n${result.stderr || result.stdout}`);
+    const termination = result.signal === null ? `exit ${result.status}` : `signal ${result.signal}`;
+    throw new Error(`${command} failed with ${termination}:\n${result.stderr || result.stdout}`);
   }
   return result;
+}
+
+function canonicalExecutable(candidate, label) {
+  if (!path.isAbsolute(candidate)) {
+    throw new Error(`${label} executable path must be absolute: ${candidate}`);
+  }
+  let canonical;
+  try {
+    canonical = realpathSync(candidate);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot resolve canonical ${label} executable ${candidate}: ${detail}`);
+  }
+  const stat = lstatSync(canonical);
+  if (!path.isAbsolute(canonical) || stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o111) === 0) {
+    throw new Error(`${label} executable must resolve to an executable regular file: ${canonical}`);
+  }
+  return canonical;
+}
+
+function minimalEnvironment() {
+  const userConfig = path.join(temporaryRoot, "user.npmrc");
+  const globalConfig = path.join(temporaryRoot, "global.npmrc");
+  writeFileSync(userConfig, "", "utf8");
+  writeFileSync(globalConfig, "", "utf8");
+  return {
+    PATH: [path.dirname(nodeExecutable), "/usr/bin", "/bin"].join(path.delimiter),
+    HOME: temporaryRoot,
+    TMPDIR: temporaryRoot,
+    LANG: "C",
+    LC_ALL: "C",
+    npm_config_audit: "false",
+    npm_config_cache: path.join(temporaryRoot, "npm-cache"),
+    npm_config_fund: "false",
+    npm_config_globalconfig: globalConfig,
+    npm_config_ignore_scripts: "false",
+    npm_config_update_notifier: "false",
+    npm_config_userconfig: userConfig,
+  };
+}
+
+function formatCommand(executable, args) {
+  return [executable, ...args].map((argument) => JSON.stringify(argument)).join(" ");
 }
 
 function assertEqual(label, actual, expected) {

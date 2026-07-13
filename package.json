@@ -17,7 +17,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "package:contents": "node scripts/verify-package-contents.mjs",
     "package:verify": "node scripts/verify-package.mjs",
-    "prepack": "pnpm build && pnpm package:verify",
+    "prepack": "node scripts/build-package.mjs && node scripts/verify-package.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "node dist/src/cli/main.js"

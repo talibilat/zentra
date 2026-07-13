@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -9,6 +10,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -48,6 +50,7 @@ function packageSandbox(): string {
   for (const name of [
     "package.json",
     "pnpm-lock.yaml",
+    "README.md",
     "tsconfig.json",
     "tsconfig.build.json",
   ]) {
@@ -189,6 +192,65 @@ describe("publishable CLI package", () => {
     });
     expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
   }, 30_000);
+
+  it("rejects a packaged symlink without modifying or packaging its external target", async () => {
+    const sandbox = packageSandbox();
+    const externalTarget = path.join(sandbox, "external-target.mjs");
+    const fixture = path.join(sandbox, "fixtures", "deterministic-worker.mjs");
+    writeFileSync(externalTarget, "external target\n", "utf8");
+    chmodSync(externalTarget, 0o600);
+    rmSync(fixture);
+    symlinkSync(externalTarget, fixture);
+    const destination = path.join(sandbox, "artifacts");
+    mkdirSync(destination);
+
+    await expect(run(
+      "npm",
+      ["pack", "--silent", "--json", "--pack-destination", destination],
+      sandbox,
+    )).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "fixtures/deterministic-worker.mjs must be a regular non-symlink file",
+      ),
+    });
+    expect(statSync(externalTarget).mode & 0o777).toBe(0o600);
+    expect(existsSync(path.join(destination, "zentra-0.1.0.tgz"))).toBe(false);
+  }, 30_000);
+
+  it("does not resolve package verification tools from ambient PATH", async () => {
+    const fakeBin = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-fake-bin-")));
+    temporaryDirectories.push(fakeBin);
+    const marker = path.join(fakeBin, "invoked");
+    for (const executable of ["npm", "tar"]) {
+      const fakeExecutable = path.join(fakeBin, executable);
+      writeFileSync(fakeExecutable, `#!/bin/sh\ntouch '${marker}'\nexit 97\n`, "utf8");
+      chmodSync(fakeExecutable, 0o755);
+    }
+
+    await execFileAsync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "verify-package-contents.mjs"),
+    ], {
+      cwd: repositoryRoot,
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+      maxBuffer: 10 * 1_024 * 1_024,
+      timeout: 120_000,
+    });
+    expect(existsSync(marker)).toBe(false);
+  }, 130_000);
+
+  it("does not pass ambient npm configuration into package verification", async () => {
+    const result = await execFileAsync(process.execPath, [
+      path.join(repositoryRoot, "scripts", "verify-package-contents.mjs"),
+    ], {
+      cwd: repositoryRoot,
+      env: { ...process.env, npm_config_ignore_scripts: "true" },
+      maxBuffer: 10 * 1_024 * 1_024,
+      timeout: 120_000,
+    });
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("deterministic package files");
+  }, 130_000);
 
   it.each([
     ["missing binary", (sandbox: string) => rmSync(path.join(sandbox, "dist", "src", "cli", "main.js"))],

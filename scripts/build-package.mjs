@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -24,27 +24,21 @@ if (result.error !== undefined) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 const buildOutputs = collectBuildOutputs();
-for (const file of [
+const packagedFiles = [...new Set([
   ...buildOutputs,
+  ...requiredBinaries,
   requiredFixture,
   "package.json",
   "README.md",
   "LICENSE",
-]) {
-  const absolutePath = path.join(packageRoot, file);
-  if (existsSync(absolutePath)) chmodSync(absolutePath, 0o644);
+])];
+const presentPackagedFiles = packagedFiles.filter((file) => assertPackagedFile(file));
+for (const file of presentPackagedFiles) {
+  chmodSync(path.join(packageRoot, file), 0o644);
 }
 
 for (const binary of requiredBinaries) {
-  try {
-    chmodSync(path.join(packageRoot, binary), 0o755);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      console.error(`Package build failed: declared binary ${binary} was not emitted`);
-      process.exit(1);
-    }
-    throw error;
-  }
+  chmodSync(path.join(packageRoot, binary), 0o755);
 }
 const manifest = {
   schemaVersion: 1,
@@ -54,6 +48,31 @@ const manifest = {
 mkdirSync(path.dirname(manifestPath), { recursive: true });
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 chmodSync(manifestPath, 0o644);
+
+function assertPackagedFile(file) {
+  let stat;
+  try {
+    stat = lstatSync(path.join(packageRoot, file));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      if (file === "LICENSE") return false;
+      if (requiredBinaries.includes(file)) {
+        failBuild(`declared binary ${file} was not emitted`);
+      }
+      failBuild(`required packaged path ${file} does not exist`);
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    failBuild(`packaged path ${file} must be a regular non-symlink file`);
+  }
+  return true;
+}
+
+function failBuild(message) {
+  console.error(`Package build failed: ${message}`);
+  process.exit(1);
+}
 
 function minimalEnvironment() {
   const environment = {};
