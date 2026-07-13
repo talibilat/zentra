@@ -3,7 +3,9 @@
 This is the authoritative current-session record, rewritten fresh for handoff to a new agent/session.
 It supersedes any prior version of this same file and the active-process/current-head sections of `docs/execution/pre-deployment-progress.md` (historical, stale) without rewriting that older file.
 Treat `docs/execution/pre-deployment-handoff.md` as the authoritative continuation record for original issue-corpus state and dependency order; this file tracks only live orchestration state.
-The issue corpus files under `docs/issues/` are unchanged and untouched - do not delete or renumber any of them, regardless of how much of their work is done. The corpus README documents "exactly 28 issue files" and other docs count on that.
+Completed issue briefs were removed from `docs/issues/` on 2026-07-13 at the user's direction.
+
+The active issue index is `docs/issues/README.md`, while implementation reports remain the audit record for removed briefs.
 
 ## Repository State At This Handoff
 
@@ -31,7 +33,7 @@ Claude Code acts as orchestrator/integration steward only, per `docs/issues/CLAU
 
 - **Priority scope: Critical and High severity only.** Medium and Low issues are explicitly deferred until the user says otherwise. Sequence Critical before High within that scope.
 - Issue 017 (High) has a hard technical prerequisite on issue 024 (Medium) and cannot execute without it - stays blocked alongside deferred Medium items; this is a dependency fact, not a priority violation.
-- Do not delete any `docs/issues/*.md` issue brief file. Update status in this handoff file instead; the corpus stays exactly 28 files.
+- Keep active and deferred `docs/issues/*.md` briefs until their work is completed or explicitly retired.
 - User wants updates roughly every 5 minutes during active work, or at every milestone (writer done, review blocks, integration lands), whichever is more frequent.
 - Avoid deep unbounded investigation into non-blocking discrepancies (a real instance this session: ~25 minutes spent root-causing why a package file count didn't change with/without a LICENSE file, which turned out to be pre-existing correct behavior, not a bug). Note a discrepancy and move on unless it looks like a real correctness/security risk.
 

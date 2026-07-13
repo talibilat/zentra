@@ -39,7 +39,9 @@ The writer must still prove the route can receive a harmless test report and sat
 The recorded issue 018 license choice is **MIT**, with SPDX identifier `MIT`.
 Before an issue 018 writer starts, Md Talib must explicitly supply the exact copyright year and exact holder string for the canonical `Copyright (c) <year> <holder>` line.
 No exact holder/year pair is currently recorded, and an agent must not infer one.
-See [`docs/issues/018-high-add-license.md`](../issues/018-high-add-license.md).
+Issue 018 was subsequently completed with the confirmed line `Copyright (c) 2026 Md Talib`.
+
+See [`docs/execution/issue-018-implementation-report.md`](issue-018-implementation-report.md) for the recorded evidence.
 
 ## Unresolved Review Findings
 
