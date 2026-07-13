@@ -230,6 +230,11 @@ export function projectArtifacts(
   let artifactMode = hasArtifactEventGap(events);
   let terminal = false;
   let pendingMarker: z.infer<typeof ArtifactProtocolMarkerSchema> | null = null;
+  let pendingConsumer: {
+    readonly kind: ArtifactKind;
+    readonly eventTypes: readonly string[];
+    readonly evidenceField: "validation" | "review" | "receipt" | null;
+  } | null = null;
 
   for (const event of events) {
     if (
@@ -237,6 +242,17 @@ export function projectArtifacts(
       event.type !== `artifact.${pendingMarker.kind}_recorded`
     ) {
       throw missingMarkedArtifact(pendingMarker.kind);
+    }
+    if (pendingConsumer !== null) {
+      const payload = objectPayload(event);
+      if (
+        !pendingConsumer.eventTypes.includes(event.type) ||
+        (pendingConsumer.evidenceField !== null &&
+          !(pendingConsumer.evidenceField in payload))
+      ) {
+        throw missingMarkedArtifactConsumer(pendingConsumer.kind);
+      }
+      pendingConsumer = null;
     }
     if (
       terminal &&
@@ -313,6 +329,14 @@ export function projectArtifacts(
       artifacts.push(artifact);
       evidenceByArtifactId.set(artifact.artifactId, evidence);
       phaseByArtifactId.set(artifact.artifactId, phase);
+      if (pendingMarker !== null) {
+        pendingConsumer = requiredMarkedArtifactConsumer(
+          artifact.kind,
+          evidence,
+          phase,
+          byKind.get("patch")?.artifact.sha256 ?? null,
+        );
+      }
       pendingMarker = null;
       continue;
     }
@@ -332,6 +356,9 @@ export function projectArtifacts(
 
   if (pendingMarker !== null) {
     throw missingMarkedArtifact(pendingMarker.kind);
+  }
+  if (pendingConsumer !== null) {
+    throw missingMarkedArtifactConsumer(pendingConsumer.kind);
   }
 
   return Object.freeze({
@@ -586,6 +613,52 @@ function hasMatchingLaterPreparation(
 
 function missingMarkedArtifact(kind: ArtifactKind): Error {
   return new Error(`artifact protocol marker references missing ${kind} artifact`);
+}
+
+function missingMarkedArtifactConsumer(kind: ArtifactKind): Error {
+  return new Error(`marked ${kind} artifact requires an immediate consuming lifecycle event`);
+}
+
+function requiredMarkedArtifactConsumer(
+  kind: ArtifactKind,
+  evidence: unknown,
+  phase: "prepared" | "final",
+  patchSha256: string | null,
+): {
+  readonly kind: ArtifactKind;
+  readonly eventTypes: readonly string[];
+  readonly evidenceField: "validation" | "review" | "receipt" | null;
+} {
+  if (kind === "patch") {
+    return { kind, eventTypes: ["task.validation_started"], evidenceField: null };
+  }
+  if (kind === "validation_report") {
+    const report = ValidationEvidenceSchema.parse(evidence);
+    const subjectMismatch = report.provenance.subjectSha256 !== patchSha256;
+    return {
+      kind,
+      eventTypes: subjectMismatch
+        ? ["task.failed"]
+        : report.outcome === "completed"
+        ? ["task.review_requested", "task.failed"]
+        : [`task.${report.outcome}`],
+      evidenceField: "validation",
+    };
+  }
+  if (kind === "review_report") {
+    const decision = ReviewEvidenceSchema.parse(evidence);
+    return {
+      kind,
+      eventTypes: [decision.approved ? "task.review_approved" : "task.denied"],
+      evidenceField: "review",
+    };
+  }
+  const receipt = IntegrationReceiptEvidenceSchema.parse(evidence);
+  return {
+    kind,
+    eventTypes: [phase === "prepared" ? "task.integration_prepared" : `task.${receipt.outcome}`],
+    evidenceField: "receipt",
+  };
 }
 
 function requireArtifact(

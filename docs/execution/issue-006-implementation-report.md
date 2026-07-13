@@ -2,13 +2,14 @@
 
 ## Status
 
-Retry 1 implemented and verified.
+Retry 2 implemented and verified.
 
 The tracer now records patch, focused-validation, independent-review, and integration-receipt artifacts as explicit typed journal events.
 Artifact replay is independent of mutable worktree and candidate paths.
 The implementation was recovered after integration commit `55076c2` was reverted by `57d812c`, then corrected for the omitted delete-all-artifact-events review finding.
 The prior report overstated completion because artifact markers and their artifacts were still separate writes, task replay tolerated marker-only tails, success lifecycle events accepted unsuccessful evidence, failed final receipts could replace prepared provenance, and prototype-named artifact IDs were not retained safely.
 Retry 1 resolves those remaining defects without changing the journal adapter, recovery service, or integration queue.
+Retry 2 resolves the remaining marked-boundary defect without changing the tracer, journal adapter, recovery service, or integration queue.
 
 ## Root Cause
 
@@ -25,6 +26,8 @@ The recovered artifact schema now accepts the current bounded timeout fields, re
 
 The remaining atomicity defect came from appending `task.artifact_recording`, the typed artifact, and its consuming lifecycle event independently.
 That design required task replay to tolerate an otherwise invalid pending marker and exposed partial protocol states after process interruption.
+The Retry 2 defect came from clearing pending marker state as soon as the marked artifact was read.
+That allowed prospective validation to accept a two-event marker-and-artifact batch without the mandatory third consuming lifecycle event.
 The replay defects came from checking evidence shape and digest without requiring successful outcomes at success-only lifecycle boundaries, deriving failed final receipt provenance from the final receipt itself, and assigning arbitrary artifact IDs into ordinary objects.
 
 ## Files Changed
@@ -61,6 +64,10 @@ Contiguous legacy streams without artifact events remain readable, while streams
 Every newly recorded artifact is preceded by a `task.artifact_recording` marker that binds protocol version, artifact identity, kind, and digest.
 The marker, exact marked artifact, and consuming lifecycle event are validated prospectively and committed in one `EventJournal.append` transaction.
 Both task and artifact replay fail closed on marker-only tails and markers followed by any nonmatching event.
+Marked artifact replay now retains a second pending protocol state until the immediately following lifecycle event consumes that exact evidence boundary.
+Patch artifacts require `task.validation_started`; completed focused validation permits `task.review_requested` or evidence-bearing `task.failed`, while noncompleted validation requires its exact terminal outcome unless invalid subject provenance requires `task.failed`; review requires `task.review_approved` or `task.denied` according to the decision; prepared receipts require `task.integration_prepared`; and final receipts require the terminal event matching their outcome.
+End of stream, a wrong event type, or a terminal consumer missing its retained validation, review, or receipt evidence fails closed.
+Unmarked contiguous legacy streams retain their intentional compatibility behavior.
 
 Lifecycle replay now requires `task.review_requested.validation`, `task.review_approved.review`, `task.integration_started.review`, and `task.integration_prepared.receipt` rather than validating those properties only when present.
 Focused validation provenance must name the exact patch digest, review evidence must use the requested reviewer, and receipt evidence must match the stream task, created project, integration source, retained review, candidate result, and full-validation subject.
@@ -99,6 +106,9 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - Prepared-to-final provenance substitution rejection and safe retention of `__proto__`, `constructor`, and `prototype` artifact IDs.
 - Replay rejection for successful non-focused validation at the review boundary and terminal lifecycle events that contradict their receipt outcome.
 - Atomic retention of wrong-subject validation evidence on its immediate terminal failure without allowing that evidence to authorize review.
+- Contract and task-projection rejection of incomplete marker-and-artifact streams and wrong immediate consumers at patch, focused-validation, review, prepared-receipt, and final-receipt boundaries.
+- `TaskService` rollback coverage proving each incomplete or wrongly consumed prospective batch leaves the journal unchanged.
+- Outcome-specific acceptance for validation failure, cancellation, timeout, invalid-subject failure, review denial, and final receipt terminal consumers.
 
 ## Commands And Results
 
@@ -121,6 +131,11 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - `pnpm check` after Retry 1: passed with no TypeScript errors.
 - `pnpm build` after Retry 1: passed.
 - `git diff --check` after Retry 1: passed with no output.
+- `pnpm exec vitest run tests/contracts/artifact.test.ts tests/tasks/task-projection.test.ts tests/orchestration/tracer-bullet.test.ts` after Retry 2: passed, 3 test files and 238 tests.
+- `pnpm test` after Retry 2: passed, 18 test files and 675 tests.
+- `pnpm check` after Retry 2: passed with no TypeScript errors.
+- `pnpm build` after Retry 2: passed.
+- `git diff --check` after Retry 2: passed with no output.
 
 ## Acceptance Criteria Evidence
 
@@ -131,6 +146,7 @@ Historical reports that predate timeout fields remain accepted, while reports th
 - Tampered replay fails closed for identity, digest, order, individual missing-reference violations, and deletion of all artifact events with deterministic bounded errors.
 - Changing both recorded patch digest fields cannot defeat replay because the retained exact diff bytes provide an independent digest source.
 - Each marker, artifact, and consuming lifecycle event is one prospective-validated journal transaction, so no marker-only protocol state is emitted by the tracer.
+- Prospective replay rejects marker-and-artifact-only batches and requires the exact immediate lifecycle consumer before `TaskService` can append any part of the batch.
 - Prepared integration evidence remains restart-recoverable, while final failed CAS evidence is exact, typed, terminal, and cannot alter prepared provenance beyond the terminal outcome.
 - Validation, review, and receipt artifacts are bound through the full task, project, identity, digest, commit, result, and validation-provenance chain.
 - Artifact evidence maps retain arbitrary valid IDs without object-prototype key loss.
@@ -148,7 +164,9 @@ Retry 1 reviewed the worktree diff against `AGENTS.md`, the approved orchestrato
 The initial review found one private-helper interface smell where a required consuming event was optional; the helper now requires that boundary event directly.
 The no-mistakes review then found three in-scope misses: the review boundary did not require the `focused` validation name, terminal receipt outcomes were not bound to terminal event types, and wrong-subject validation failure evidence was dropped by a rejected terminal append.
 Commits `4841424` and `e7cf9d8` correct those misses with focused replay tests.
-No standards or specification findings remain after those corrections.
+The follow-up Important finding showed that marker state was cleared before the consuming lifecycle event, allowing incomplete two-event batches.
+Retry 2 retains outcome-aware pending consumer state and adds projection and persistence rollback coverage for every tracer artifact boundary.
+No standards or specification findings remain after that correction.
 The implementation keeps the event journal authoritative, keeps projections rebuildable, introduces no shell or external authority, and changes only the explicitly allowed production, test, and report paths.
 The four schemas, durable metadata, exact digest bindings, journal-only projection, atomic fail-closed replay checks, required malformed and failure-stage tests, and explicit delete-all tamper test are present.
 No remote blob store was added, bounded retained evidence remains bounded, and lifecycle events were not replaced.
@@ -183,3 +201,4 @@ A future artifact store can extend the safe logical path semantics without chang
 - Focused review and terminal receipt correction: `4841424` (`no-mistakes(review): Enforce focused review and terminal receipt outcomes`).
 - Wrong-subject validation failure retention: `e7cf9d8` (`no-mistakes(review): Retain mismatched validation failure evidence atomically`).
 - Final Retry 1 report totals: the commit containing this report.
+- Retry 2 immediate-consumer correction: the commit containing this report.

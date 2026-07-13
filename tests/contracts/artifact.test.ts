@@ -457,6 +457,69 @@ describe("projectArtifacts", () => {
     ])).toThrow("artifact protocol marker references missing patch artifact");
   });
 
+  it.each(markedArtifactBoundaries())(
+    "fails closed when a marked $name artifact has no consuming lifecycle event",
+    ({ prefix, recorded }) => {
+      const marker = artifactMarker(recorded, recorded.streamVersion - 1);
+      expect(() => projectArtifacts([...prefix, marker, recorded])).toThrow(
+        `marked ${artifactKind(recorded)} artifact requires an immediate consuming lifecycle event`,
+      );
+    },
+  );
+
+  it.each(markedArtifactBoundaries())(
+    "fails closed when a marked $name artifact is followed by the wrong consumer",
+    ({ prefix, recorded, wrongConsumer }) => {
+      const marker = artifactMarker(recorded, recorded.streamVersion - 1);
+      expect(() => projectArtifacts([...prefix, marker, recorded, wrongConsumer])).toThrow(
+        `marked ${artifactKind(recorded)} artifact requires an immediate consuming lifecycle event`,
+      );
+    },
+  );
+
+  it.each([
+    ["failed validation", { ...validation, outcome: "failed" as const, exitCode: 1 }, "task.failed"],
+    ["cancelled validation", { ...validation, outcome: "cancelled" as const, exitCode: null }, "task.cancelled"],
+    ["timed-out validation", { ...validation, outcome: "timed_out" as const, exitCode: null }, "task.timed_out"],
+  ] as const)("accepts the exact terminal consumer for a marked %s artifact", (_name, evidence, type) => {
+    const prefix = throughReviewRequest().slice(0, -2);
+    const recorded = artifactEvent("validation_report", 7, evidence);
+    expect(() => projectArtifacts([
+      ...prefix,
+      artifactMarker(recorded, 6),
+      recorded,
+      event(type, 8, { validation: evidence }),
+    ])).not.toThrow();
+  });
+
+  it("accepts task.denied as the exact consumer for a marked denied review", () => {
+    const denied = { ...review, approved: false };
+    const recorded = artifactEvent("review_report", 9, denied);
+    expect(() => projectArtifacts([
+      ...throughReviewRequest(),
+      artifactMarker(recorded, 8),
+      recorded,
+      event("task.denied", 10, { review: denied }),
+    ])).not.toThrow();
+  });
+
+  it("accepts task.failed for a marked validation whose subject is invalid", () => {
+    const mismatched = {
+      ...validation,
+      outcome: "cancelled" as const,
+      exitCode: null,
+      provenance: { ...validation.provenance, subjectSha256: "0".repeat(64) },
+    };
+    const prefix = throughReviewRequest().slice(0, -2);
+    const recorded = artifactEvent("validation_report", 7, mismatched);
+    expect(() => projectArtifacts([
+      ...prefix,
+      artifactMarker(recorded, 6),
+      recorded,
+      event("task.failed", 8, { validation: mismatched }),
+    ])).not.toThrow();
+  });
+
   it("accepts a failed full-validation receipt before preparation", () => {
     const failedValidation = {
       ...fullValidation,
@@ -687,6 +750,62 @@ function completeArtifactChain(): StoredEvent[] {
     event("task.integration_prepared", 12, { receipt }),
     artifactEvent("integration_receipt", 13, receipt, "artifact-integration-final", "final"),
   ];
+}
+
+function markedArtifactBoundaries(): readonly {
+  name: string;
+  prefix: StoredEvent[];
+  recorded: StoredEvent;
+  wrongConsumer: StoredEvent;
+}[] {
+  const reviewPrefix = throughReviewRequest();
+  const integrationPrefix = [
+    ...reviewPrefix,
+    artifactEvent("review_report", 8, review),
+    event("task.review_approved", 9, { review }),
+    event("task.integration_started", 10, { sourceCommit: receipt.sourceCommit, review }),
+  ];
+  const failedReceipt = { ...receipt, outcome: "failed" as const };
+  return [
+    {
+      name: "patch",
+      prefix: [
+        event("task.created", 1, { projectId: "project-1", title: "task" }),
+        event("task.leased", 2),
+        event("task.started", 3),
+      ],
+      recorded: artifactEvent("patch", 5, patch),
+      wrongConsumer: event("task.failed", 6),
+    },
+    {
+      name: "focused validation",
+      prefix: reviewPrefix.slice(0, -2),
+      recorded: artifactEvent("validation_report", 7, validation),
+      wrongConsumer: event("task.denied", 8, { validation }),
+    },
+    {
+      name: "review",
+      prefix: reviewPrefix,
+      recorded: artifactEvent("review_report", 9, review),
+      wrongConsumer: event("task.denied", 10, { review }),
+    },
+    {
+      name: "prepared integration receipt",
+      prefix: integrationPrefix,
+      recorded: artifactEvent("integration_receipt", 12, receipt, undefined, "prepared"),
+      wrongConsumer: event("task.failed", 13, { receipt }),
+    },
+    {
+      name: "final failure integration receipt",
+      prefix: integrationPrefix,
+      recorded: artifactEvent("integration_receipt", 12, failedReceipt, undefined, "final"),
+      wrongConsumer: event("task.cancelled", 13, { receipt: failedReceipt }),
+    },
+  ];
+}
+
+function artifactKind(recorded: StoredEvent): string {
+  return (recorded.payload as { artifact: { kind: string } }).artifact.kind;
 }
 
 function mutateReceipt(events: StoredEvent[], mutation: Record<string, unknown>): void {
