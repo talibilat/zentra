@@ -158,3 +158,5 @@ A future artifact store can extend the safe logical path semantics without chang
 - Recovery: `e237ee0` (`Reapply "merge: integrate issue 006 - typed artifact recording with journal replay"`).
 - Delete-all replay and timeout compatibility fix: `984ae1d` (`fix: reject deleted artifact event streams`).
 - Recovery report update: the commit containing this report.
+- Independent-review hardening: `afa8773` (`fix: harden artifact evidence replay`).
+- Automated gate scope restoration: `dd2e9d5` and `679de5c` revert the gate's generated out-of-scope documentation and reviewer-containment commits without rewriting branch history.
