@@ -19,6 +19,7 @@ const commandMaxBuffer = 10 * 1_024 * 1_024;
 
 validatePackagedFile(requiredFixture);
 validatePackagedFile("README.md");
+validatePackagedFile("SECURITY.md");
 validatePackagedFile("LICENSE");
 const buildInputs = collectBuildInputs();
 validatePackageDirectory("dist", { optional: true });
@@ -42,6 +43,7 @@ const packagedFiles = [...new Set([
   requiredFixture,
   "package.json",
   "README.md",
+  "SECURITY.md",
   "LICENSE",
 ])];
 const presentPackagedFiles = packagedFiles
