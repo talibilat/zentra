@@ -18,8 +18,12 @@ No operation is retried.
 ## Test Evidence
 
 The cancellation and timeout regression tests were added to `tests/workers/process-supervisor.test.ts`.
-Command execution was unavailable in the implementation session, so the required red-green focused run, `pnpm test`, and `pnpm check` could not be executed or claimed as passing.
+Command execution was unavailable in the implementation session; the integration steward ran verification directly in this worktree afterward:
+
+- `pnpm exec vitest run tests/workers/process-supervisor.test.ts` - 32 tests passed, including both new regressions.
+- `pnpm test` (full suite) - 19 files, 701 tests passed.
+- `pnpm check` - clean, no type errors.
 
 ## Commit Identity
 
-The implementation commit could not be created because Git command execution was unavailable in the implementation session.
+Committed by the integration steward as `641ae97` ("fix: surface descendant_survived for any unconfirmed group exit") after the above verification, since Git command execution was unavailable in the implementation session.
