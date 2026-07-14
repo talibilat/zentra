@@ -493,6 +493,68 @@ describe("Zentra CLI", () => {
     expect(readFileSync(tracePath, "utf8")).toBe(traceBefore);
   });
 
+  it("lists and inspects milestone previews without worker startup", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const firstTrace = path.join(testFixture.baseDirectory, "agent-tail", "first.jsonl");
+    const secondTrace = path.join(testFixture.baseDirectory, "agent-tail", "second.jsonl");
+
+    const first = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", firstTrace,
+      "--task", "List the first milestone",
+    ]);
+    const second = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", secondTrace,
+      "--task", "List the second milestone",
+    ]);
+    const firstMilestone = first.json.milestone as { milestoneId: string };
+    const secondMilestone = second.json.milestone as { milestoneId: string };
+
+    const listed = await invoke(["milestone", "list", "--database", testFixture.databasePath]);
+    expect(listed).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "milestone.list",
+        milestones: [
+          { milestoneId: firstMilestone.milestoneId, tracePath: firstTrace, lifecycle: "ready" },
+          { milestoneId: secondMilestone.milestoneId, tracePath: secondTrace, lifecycle: "ready" },
+        ],
+      },
+    });
+
+    const status = await invoke([
+      "milestone", "status",
+      "--database", testFixture.databasePath,
+      "--milestone-id", firstMilestone.milestoneId,
+    ]);
+    expect(status).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "milestone.status",
+        milestone: {
+          milestoneId: firstMilestone.milestoneId,
+          title: "List the first milestone",
+          lifecycle: "ready",
+          traceId: firstMilestone.milestoneId,
+          tracePath: firstTrace,
+        },
+      },
+    });
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
   it("rejects an invalid Agent Tail trace target before journal effects", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
