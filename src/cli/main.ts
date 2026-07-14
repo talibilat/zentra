@@ -17,6 +17,16 @@ import { SqliteEventJournal } from "../journal/sqlite-journal.js";
 import { RecoveryService } from "../orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
 import {
+  loadModelSheet,
+  ModelSheetError,
+  publicModelSheetSummary,
+} from "../policy/model-sheet.js";
+import {
+  loadSecuritySheet,
+  publicSecuritySheetSummary,
+  SecuritySheetError,
+} from "../policy/security-sheet.js";
+import {
   APPROVED_VALIDATION_EXECUTABLE,
   assertApprovedValidationExecutableIdentity,
   ProjectConfigSchema,
@@ -92,6 +102,8 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   INVALID_CONFIG: "Project configuration is invalid.",
   INVALID_CONTENT: "Task content is too large.",
   INVALID_FILE: "File must be one safe root-level filename.",
+  INVALID_MODEL_SHEET: "Model sheet is invalid.",
+  INVALID_SECURITY_SHEET: "Security sheet is invalid.",
   INVALID_TASK_ID: "Task ID must be one safe path and ref component.",
   INVALID_TITLE: "Task title is invalid.",
   OPERATION_FAILED: "Operation failed.",
@@ -131,6 +143,11 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
+
+interface PolicyPreviewOptions {
+  readonly modelSheet: string;
+  readonly securitySheet: string;
+}
 
 interface CommandResult {
   readonly exitCode: number;
@@ -213,6 +230,38 @@ function createProgram(
           command: "project.validate",
           status: "valid",
           projectIds: configs.map((config) => config.projectId),
+        },
+      });
+    });
+
+  const policy = program.command("policy").description("Inspect local policy inputs.");
+  policy
+    .command("preview")
+    .description("Validate model and security sheets without creating operational effects.")
+    .requiredOption("--model-sheet <path>", "Markdown model sheet")
+    .requiredOption("--security-sheet <path>", "Markdown security sheet")
+    .action((options: PolicyPreviewOptions) => {
+      let model;
+      try {
+        model = loadModelSheet(options.modelSheet);
+      } catch (error) {
+        if (error instanceof ModelSheetError) throw new CliFailure("INVALID_MODEL_SHEET");
+        throw error;
+      }
+      let security;
+      try {
+        security = loadSecuritySheet(options.securitySheet);
+      } catch (error) {
+        if (error instanceof SecuritySheetError) throw new CliFailure("INVALID_SECURITY_SHEET");
+        throw error;
+      }
+      setResult({
+        exitCode: 0,
+        value: {
+          command: "policy.preview",
+          model: publicModelSheetSummary(model),
+          security: publicSecuritySheetSummary(security),
+          deniedCapabilities: deniedCapabilities(security),
         },
       });
     });
@@ -400,6 +449,13 @@ function taskRunResult(task: TaskView): CommandResult {
   };
 }
 
+function deniedCapabilities(security: ReturnType<typeof loadSecuritySheet>): readonly string[] {
+  const denied = ["general_shell", "raw_parent_secrets"];
+  if (security.network.default === "denied") denied.push("network_by_default");
+  if (security.releaseBoundary === "local_preparation_only") denied.push("remote_release_effects");
+  return Object.freeze(denied);
+}
+
 function loadProjects(configPath: string): readonly ProjectConfig[] {
   try {
     const configStat = statSync(configPath);
@@ -526,6 +582,7 @@ function publicRecoveryDecision(decision: Awaited<ReturnType<RecoveryService["in
 }
 
 function commandLabel(argv: readonly string[]): string {
+  if (argv[0] === "policy" && argv[1] === "preview") return "policy.preview";
   if (argv[0] === "project" && argv[1] === "validate") return "project.validate";
   if (argv[0] === "task" && argv[1] === "run") return "task.run";
   if (argv[0] === "task" && argv[1] === "status") return "task.status";

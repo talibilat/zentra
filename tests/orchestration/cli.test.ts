@@ -144,6 +144,53 @@ function runArguments(
   ];
 }
 
+function writePolicySheets(testFixture: Fixture): {
+  readonly modelSheetPath: string;
+  readonly securitySheetPath: string;
+} {
+  const modelSheetPath = path.join(testFixture.baseDirectory, "MODEL-SHEET.md");
+  const securitySheetPath = path.join(testFixture.baseDirectory, "SECURITY-SHEET.md");
+  writeFileSync(modelSheetPath, `# Zentra Model Sheet
+
+## Models
+| id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
+| opencode-general | opencode | provider/sk-live-SECRET | planner,researcher,implementer,reviewer | coding,review | low | 128000 | 2 | read_repository,write_worktree,review_diff | denied | none | 3/4 |
+`, "utf8");
+  writeFileSync(securitySheetPath, `# Zentra Security Sheet
+
+## Allowed Repositories
+- ${realpathSync.native(testFixture.repositoryPath)}
+
+## Allowed File Scopes
+- src/**
+- tests/**
+
+## Forbidden Paths
+- .env
+
+## Network
+Default: denied
+
+## Secret Handling
+- API token sk-live-SECRET must never be printed.
+- Do not inherit parent secrets.
+
+## Approval Required Operations
+- external_effect
+- publish_release
+
+## Release Boundary
+local_preparation_only
+
+## Stop And Ask Conditions
+- missing_authority
+- undeclared_network
+- forbidden_file_scope
+`, "utf8");
+  return { modelSheetPath, securitySheetPath };
+}
+
 function fileSha256(filePath: string): string {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
@@ -188,6 +235,85 @@ describe("Zentra CLI", () => {
       stderr: "",
       json: { command: "project.validate", status: "valid", projectIds: ["cli-project"] },
     });
+  });
+
+  it("previews Markdown model and security sheets without creating operational effects", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const schemaBefore = existsSync(testFixture.databasePath)
+      ? databaseSchema(testFixture.databasePath)
+      : null;
+
+    const result = await invoke([
+      "policy", "preview",
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+    ]);
+
+    expect(result).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "policy.preview",
+        model: {
+          modelCount: 1,
+          harnesses: ["opencode"],
+          roles: ["implementer", "planner", "researcher", "reviewer"],
+          costTiers: ["low"],
+          maxConcurrency: 2,
+        },
+        security: {
+          allowedRepositoryCount: 1,
+          allowedFileScopeCount: 2,
+          forbiddenPathCount: 1,
+          network: { default: "denied", allowedDestinationCount: 0 },
+          secretHandlingRules: 2,
+          releaseBoundary: "local_preparation_only",
+        },
+        deniedCapabilities: [
+          "general_shell",
+          "raw_parent_secrets",
+          "network_by_default",
+          "remote_release_effects",
+        ],
+      },
+    });
+    expect(JSON.stringify(result.json)).not.toContain("sk-live-SECRET");
+    expect(JSON.stringify(result.json)).not.toContain("provider/");
+    expect(existsSync(testFixture.databasePath)).toBe(schemaBefore !== null);
+    if (schemaBefore !== null) expect(databaseSchema(testFixture.databasePath)).toEqual(schemaBefore);
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
+  it("returns stable bounded errors for invalid policy sheets", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    writeFileSync(modelSheetPath, "# missing models\n", "utf8");
+
+    const modelResult = await invoke([
+      "policy", "preview",
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+    ]);
+    expect(modelResult).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "policy.preview", error: { code: "INVALID_MODEL_SHEET" } },
+    });
+
+    writePolicySheets(testFixture);
+    writeFileSync(securitySheetPath, "# missing security\n", "utf8");
+    const securityResult = await invoke([
+      "policy", "preview",
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+    ]);
+    expect(securityResult).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "policy.preview", error: { code: "INVALID_SECURITY_SHEET" } },
+    });
+    expect(Buffer.byteLength(securityResult.stderr, "utf8")).toBeLessThan(512);
   });
 
   it("runs the complete tracer bullet in a real repository and replays exact status", async () => {
