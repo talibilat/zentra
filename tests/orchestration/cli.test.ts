@@ -206,6 +206,17 @@ function databaseSchema(databasePath: string): unknown[] {
   }
 }
 
+function eventTypes(databasePath: string, streamId: string): readonly string[] {
+  const database = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    return (database.prepare(
+      "SELECT type FROM events WHERE stream_id = ? ORDER BY stream_version",
+    ).all(streamId) as Array<{ readonly type: string }>).map((event) => event.type);
+  } finally {
+    database.close();
+  }
+}
+
 function copiedSourceFixtureLayout(): {
   readonly anchor: URL;
   readonly worker: string;
@@ -314,6 +325,213 @@ describe("Zentra CLI", () => {
       json: { command: "policy.preview", error: { code: "INVALID_SECURITY_SHEET" } },
     });
     expect(Buffer.byteLength(securityResult.stderr, "utf8")).toBeLessThan(512);
+  });
+
+  it("creates a durable natural-language milestone preview without execution effects", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+
+    const result = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Add an Agent Tail trace for milestone previews",
+    ]);
+
+    expect(result).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "milestone.preview",
+        tracePath,
+        milestone: {
+          projectId: "cli-project",
+          lifecycle: "ready",
+          terminalOutcome: null,
+          plan: {
+            projectId: "cli-project",
+            goal: "Add an Agent Tail trace for milestone previews",
+            tasks: [
+              {
+                title: "Preview milestone plan",
+                acceptanceCriteria: expect.arrayContaining([
+                  "The preview creates durable milestone plan evidence.",
+                ]),
+                dependencies: [],
+                ownedPaths: ["src/**"],
+                roleAssignment: { role: "planner", agentId: "opencode-general", harness: "opencode" },
+                risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+                budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000 },
+              },
+            ],
+          },
+        },
+        stopAndAskBoundaries: ["missing_authority", "undeclared_network", "forbidden_file_scope"],
+      },
+    });
+    const milestone = result.json.milestone as { milestoneId: string; streamVersion: number };
+    expect(milestone.milestoneId).toMatch(/^milestone-[a-f0-9]{12}$/);
+    expect(milestone.streamVersion).toBe(2);
+    const traceLines = readFileSync(tracePath, "utf8").trim().split("\n");
+    expect(traceLines).toHaveLength(2);
+    const traceEvents = traceLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(traceEvents.map((event) => event.kind)).toEqual(["milestone.created", "milestone.plan_created"]);
+    expect(traceEvents.every((event) => event.trace_id === milestone.milestoneId)).toBe(true);
+    expect((traceEvents[1]!.payload as { stopAndAskBoundaries: unknown }).stopAndAskBoundaries)
+      .toEqual(["missing_authority", "undeclared_network", "forbidden_file_scope"]);
+    expect(eventTypes(testFixture.databasePath, milestone.milestoneId)).toEqual([
+      "milestone.created",
+      "milestone.plan_created",
+    ]);
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+    expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(
+      await gitOk(testFixture.repositoryPath, ["rev-parse", "main"]),
+    );
+  });
+
+  it("rejects milestone preview when sheets do not authorize the repository or planner role", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+    writeFileSync(securitySheetPath, readFileSync(securitySheetPath, "utf8").replace(
+      realpathSync.native(testFixture.repositoryPath),
+      realpathSync.native(testFixture.baseDirectory),
+    ), "utf8");
+
+    const unauthorizedRepository = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Plan safely",
+    ]);
+    expect(unauthorizedRepository).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "INVALID_SECURITY_SHEET" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(tracePath)).toBe(false);
+
+    writePolicySheets(testFixture);
+    writeFileSync(modelSheetPath, readFileSync(modelSheetPath, "utf8").replace(
+      "planner,researcher,implementer,reviewer",
+      "implementer,reviewer",
+    ), "utf8");
+    const unauthorizedPlanner = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Plan safely",
+    ]);
+    expect(unauthorizedPlanner).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "INVALID_MODEL_SHEET" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(tracePath)).toBe(false);
+
+    writePolicySheets(testFixture);
+    const longModelId = `m${"a".repeat(300)}`;
+    writeFileSync(modelSheetPath, readFileSync(modelSheetPath, "utf8").replace(
+      "opencode-general",
+      longModelId,
+    ), "utf8");
+    const invalidPlannerIdentity = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Plan safely",
+    ]);
+    expect(invalidPlannerIdentity).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(tracePath)).toBe(false);
+  });
+
+  it("does not erase an existing trace when a duplicate milestone preview append fails", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+    const args = [
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Do the same preview twice",
+    ] as const;
+
+    const first = await invoke(args);
+    expect(first.code).toBe(0);
+    const traceBefore = readFileSync(tracePath, "utf8");
+
+    const second = await invoke(args);
+
+    expect(second).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(readFileSync(tracePath, "utf8")).toBe(traceBefore);
+  });
+
+  it("rejects an invalid Agent Tail trace target before journal effects", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "agent-tail-directory");
+    mkdirSync(tracePath);
+
+    const result = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--task", "Do not create partial preview state",
+    ]);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+
+    const longTracePath = path.join(testFixture.baseDirectory, "agent-tail", `${"x".repeat(300)}.jsonl`);
+    const longNameResult = await invoke([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", longTracePath,
+      "--task", "Do not create partial preview state",
+    ]);
+    expect(longNameResult).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "milestone.preview", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
   });
 
   it("runs the complete tracer bullet in a real repository and replays exact status", async () => {
