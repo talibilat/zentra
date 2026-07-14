@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,12 +9,16 @@ import { Command, CommanderError } from "commander";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
+import type { NewEvent } from "../contracts/event.js";
+import { MilestonePlanSchema } from "../contracts/milestone.js";
 import {
   resolveBundledFixture,
   type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
+import { projectMilestone } from "../milestones/milestone-projection.js";
+import { agentTailEventToJsonLine, storedEventsToAgentTailEvents } from "../observability/agent-tail.js";
 import { RecoveryService } from "../orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
 import {
@@ -149,6 +154,11 @@ interface PolicyPreviewOptions {
   readonly securitySheet: string;
 }
 
+interface MilestonePreviewOptions extends PolicyPreviewOptions, ProjectOptions, Pick<DatabaseTaskOptions, "database"> {
+  readonly agentTailJsonl: string;
+  readonly task: string;
+}
+
 interface CommandResult {
   readonly exitCode: number;
   readonly value: Record<string, unknown>;
@@ -263,6 +273,121 @@ function createProgram(
           security: publicSecuritySheetSummary(security),
           deniedCapabilities: deniedCapabilities(security),
         },
+      });
+    });
+
+  const milestone = program.command("milestone").description("Plan and inspect milestones.");
+  milestone
+    .command("preview")
+    .description("Create a durable milestone plan preview without executing workers.")
+    .requiredOption("--config <path>", "project configuration file")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--model-sheet <path>", "Markdown model sheet")
+    .requiredOption("--security-sheet <path>", "Markdown security sheet")
+    .requiredOption("--agent-tail-jsonl <path>", "Agent Tail JSONL trace path")
+    .requiredOption("--task <sentence>", "natural-language milestone task")
+    .action((options: MilestonePreviewOptions) => {
+      assertSafeTitle(options.task);
+      const configs = loadProjects(options.config);
+      if (configs.length !== 1) throw new CliFailure("INVALID_CONFIG");
+      const model = loadModelSheetForCli(options.modelSheet);
+      const security = loadSecuritySheetForCli(options.securitySheet);
+      const project = configs[0]!;
+      const canonicalRepository = realpathSync.native(project.repositoryPath);
+      if (!security.allowedRepositories.includes(canonicalRepository)) {
+        throw new CliFailure("INVALID_SECURITY_SHEET");
+      }
+      const firstModel = model.models.find((candidate) => candidate.roles.includes("planner"));
+      if (firstModel === undefined) throw new CliFailure("INVALID_MODEL_SHEET");
+      const milestoneId = milestoneIdFor(project.projectId, options.task);
+      const taskId = `${milestoneId}-task-1`;
+      const ownedPath = security.allowedFileScopes[0] ?? "src/**";
+      const plan = {
+        milestoneId,
+        projectId: project.projectId,
+        goal: options.task,
+        tasks: [{
+          taskId,
+          title: "Preview milestone plan",
+          description: `Plan work for: ${options.task}`,
+          dependencies: [],
+          ownedPaths: [ownedPath],
+          forbiddenPaths: [...security.forbiddenPaths],
+          acceptanceCriteria: [
+            "The preview creates durable milestone plan evidence.",
+            "The preview writes Agent Tail JSONL for the milestone plan.",
+            "No worker, validation, commit, worktree, or integration effect runs.",
+          ],
+          roleAssignment: {
+            role: "planner",
+            agentId: firstModel.id,
+            harness: firstModel.harness,
+          },
+          risk: {
+            level: "low",
+            authority: "read_only",
+            requiresReview: false,
+            requiresApproval: false,
+          },
+          budget: {
+            maxSeconds: 300,
+            maxRetries: 0,
+            maxCostUsd: 1,
+            maxInputTokens: 1000,
+            maxOutputTokens: 1000,
+          },
+        }],
+      };
+      MilestonePlanSchema.parse(plan);
+      const events: readonly NewEvent<string, unknown>[] = [{
+        streamId: milestoneId,
+        type: "milestone.created",
+        payload: { projectId: project.projectId, title: options.task },
+        causationId: null,
+        correlationId: milestoneId,
+      }, {
+        streamId: milestoneId,
+        type: "milestone.plan_created",
+        payload: { plan, stopAndAskBoundaries: security.stopAndAskConditions },
+        causationId: null,
+        correlationId: milestoneId,
+      }];
+      const previewValue = {
+        command: "milestone.preview",
+        milestone: {
+          milestoneId,
+          projectId: project.projectId,
+          title: options.task,
+          lifecycle: "ready",
+          terminalOutcome: null,
+          streamVersion: 2,
+          plan,
+          stopAndAsk: null,
+          tasks: Object.fromEntries(plan.tasks.map((task) => [task.taskId, {
+            taskId: task.taskId,
+            status: "planned",
+            terminalOutcome: null,
+            blockedReason: null,
+          }])),
+        },
+        tracePath: options.agentTailJsonl,
+        stopAndAskBoundaries: security.stopAndAskConditions,
+      } satisfies Record<string, unknown>;
+      assertOperationalJsonFits(previewValue);
+      preflightTracePath(options.agentTailJsonl);
+      const journal = new SqliteEventJournal(options.database);
+      let stored;
+      try {
+        stored = journal.append(milestoneId, 0, events);
+      } finally {
+        journal.close();
+      }
+      writeAgentTailTrace(options.agentTailJsonl, stored);
+      const view = projectMilestone(stored);
+      if (view === null) throw new CliFailure("OPERATION_FAILED");
+      setResult({
+        exitCode: 0,
+        value: { ...previewValue, milestone: view },
       });
     });
 
@@ -449,6 +574,56 @@ function taskRunResult(task: TaskView): CommandResult {
   };
 }
 
+function loadModelSheetForCli(sheetPath: string) {
+  try {
+    return loadModelSheet(sheetPath);
+  } catch (error) {
+    if (error instanceof ModelSheetError) throw new CliFailure("INVALID_MODEL_SHEET");
+    throw error;
+  }
+}
+
+function loadSecuritySheetForCli(sheetPath: string) {
+  try {
+    return loadSecuritySheet(sheetPath);
+  } catch (error) {
+    if (error instanceof SecuritySheetError) throw new CliFailure("INVALID_SECURITY_SHEET");
+    throw error;
+  }
+}
+
+function milestoneIdFor(projectId: string, task: string): string {
+  return `milestone-${createHash("sha256").update(`${projectId}\0${task}`, "utf8").digest("hex").slice(0, 12)}`;
+}
+
+function writeAgentTailTrace(tracePath: string, events: readonly import("../contracts/event.js").StoredEvent[]): void {
+  const directory = path.dirname(tracePath);
+  mkdirSync(directory, { recursive: true });
+  const lines = storedEventsToAgentTailEvents(events).map(agentTailEventToJsonLine).join("");
+  writeFileSync(tracePath, lines, "utf8");
+}
+
+function preflightTracePath(tracePath: string): void {
+  const directory = path.dirname(tracePath);
+  mkdirSync(directory, { recursive: true });
+  if (existsSync(tracePath)) {
+    const stat = statSync(tracePath);
+    if (!stat.isFile()) throw new CliFailure("OPERATION_FAILED");
+    const descriptor = openSync(tracePath, "r+");
+    closeSync(descriptor);
+    return;
+  }
+  const descriptor = openSync(tracePath, "wx");
+  closeSync(descriptor);
+  rmSync(tracePath, { force: true });
+}
+
+function assertOperationalJsonFits(value: Record<string, unknown>): void {
+  if (Buffer.byteLength(serializeJson(value), "utf8") > MAX_OPERATIONAL_JSON_BYTES) {
+    throw new CliFailure("OUTPUT_TOO_LARGE");
+  }
+}
+
 function deniedCapabilities(security: ReturnType<typeof loadSecuritySheet>): readonly string[] {
   const denied = ["general_shell", "raw_parent_secrets"];
   if (security.network.default === "denied") denied.push("network_by_default");
@@ -582,6 +757,7 @@ function publicRecoveryDecision(decision: Awaited<ReturnType<RecoveryService["in
 }
 
 function commandLabel(argv: readonly string[]): string {
+  if (argv[0] === "milestone" && argv[1] === "preview") return "milestone.preview";
   if (argv[0] === "policy" && argv[1] === "preview") return "policy.preview";
   if (argv[0] === "project" && argv[1] === "validate") return "project.validate";
   if (argv[0] === "task" && argv[1] === "run") return "task.run";
