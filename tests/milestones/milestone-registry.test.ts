@@ -1,0 +1,145 @@
+import { describe, expect, it } from "vitest";
+
+import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import type { MilestonePlan } from "../../src/contracts/milestone.js";
+import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
+
+const plan = (milestoneId: string, taskId: string): MilestonePlan => ({
+  milestoneId,
+  projectId: "zentra",
+  goal: `Goal for ${milestoneId}`,
+  tasks: [{
+    taskId,
+    title: "Task",
+    description: "Task description.",
+    dependencies: [],
+    ownedPaths: ["src/**"],
+    forbiddenPaths: [".env"],
+    acceptanceCriteria: ["Done."],
+    roleAssignment: { role: "planner", agentId: "opencode-general", harness: "opencode" },
+    risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+    budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000 },
+  }],
+});
+
+describe("MilestoneRegistry", () => {
+  it("registers, lists, inspects, and resumes multiple milestones independently", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      const first = registry.register({
+        milestoneId: "milestone-one",
+        projectId: "zentra",
+        title: "First milestone",
+        correlationId: "run-one",
+        tracePath: "/tmp/run-one.jsonl",
+        plan: plan("milestone-one", "task-one"),
+      });
+      const second = registry.register({
+        milestoneId: "milestone-two",
+        projectId: "zentra",
+        title: "Second milestone",
+        correlationId: "run-two",
+        tracePath: "/tmp/run-two.jsonl",
+        plan: plan("milestone-two", "task-two"),
+      });
+
+      expect(first.milestoneId).toBe("milestone-one");
+      expect(second.milestoneId).toBe("milestone-two");
+      expect(registry.list()).toEqual([
+        expect.objectContaining({
+          milestoneId: "milestone-one",
+          traceId: "run-one",
+          tracePath: "/tmp/run-one.jsonl",
+          lifecycle: "ready",
+        }),
+        expect.objectContaining({
+          milestoneId: "milestone-two",
+          traceId: "run-two",
+          tracePath: "/tmp/run-two.jsonl",
+          lifecycle: "ready",
+        }),
+      ]);
+      expect(registry.inspect("milestone-one")?.title).toBe("First milestone");
+      expect(registry.inspect("milestone-one")).toMatchObject({
+        traceId: "run-one",
+        tracePath: "/tmp/run-one.jsonl",
+      });
+      expect(registry.inspect("milestone-two")?.title).toBe("Second milestone");
+      expect(registry.resume("milestone-one")).toEqual(registry.inspect("milestone-one"));
+      expect(registry.inspect("missing")).toBeNull();
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("lists status without requiring worker streams", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      registry.register({
+        milestoneId: "milestone-plan-only",
+        projectId: "zentra",
+        title: "Plan only",
+        correlationId: "run-plan-only",
+        plan: plan("milestone-plan-only", "task-plan-only"),
+      });
+
+      expect(registry.list()).toEqual([
+        expect.objectContaining({
+          milestoneId: "milestone-plan-only",
+          taskCount: 1,
+          lifecycle: "ready",
+          terminalOutcome: null,
+        }),
+      ]);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("does not mutate another milestone when inspecting one", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      registry.register({
+        milestoneId: "milestone-a",
+        projectId: "zentra",
+        title: "A",
+        correlationId: "run-a",
+      });
+      registry.register({
+        milestoneId: "milestone-b",
+        projectId: "zentra",
+        title: "B",
+        correlationId: "run-b",
+      });
+      const before = journal.readAll();
+
+      expect(registry.inspect("milestone-a")?.title).toBe("A");
+
+      expect(journal.readAll()).toEqual(before);
+      expect(registry.inspect("milestone-b")?.title).toBe("B");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("rejects an invalid plan before mutating the journal", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      expect(() => registry.register({
+        milestoneId: "milestone-invalid",
+        projectId: "zentra",
+        title: "Invalid",
+        correlationId: "run-invalid",
+        plan: { ...plan("other-milestone", "task-invalid") },
+      })).toThrow("milestone plan identity contradicts milestone identity");
+
+      expect(journal.readAll()).toEqual([]);
+    } finally {
+      journal.close();
+    }
+  });
+});

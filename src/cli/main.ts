@@ -17,6 +17,7 @@ import {
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
+import { MilestoneRegistry } from "../milestones/milestone-registry.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
 import { agentTailEventToJsonLine, storedEventsToAgentTailEvents } from "../observability/agent-tail.js";
 import { RecoveryService } from "../orchestration/recovery.js";
@@ -157,6 +158,11 @@ interface PolicyPreviewOptions {
 interface MilestonePreviewOptions extends PolicyPreviewOptions, ProjectOptions, Pick<DatabaseTaskOptions, "database"> {
   readonly agentTailJsonl: string;
   readonly task: string;
+}
+
+interface MilestoneStatusOptions {
+  readonly database: string;
+  readonly milestoneId: string;
 }
 
 interface CommandResult {
@@ -342,7 +348,7 @@ function createProgram(
       const events: readonly NewEvent<string, unknown>[] = [{
         streamId: milestoneId,
         type: "milestone.created",
-        payload: { projectId: project.projectId, title: options.task },
+        payload: { projectId: project.projectId, title: options.task, tracePath: options.agentTailJsonl },
         causationId: null,
         correlationId: milestoneId,
       }, {
@@ -389,6 +395,42 @@ function createProgram(
         exitCode: 0,
         value: { ...previewValue, milestone: view },
       });
+    });
+  milestone
+    .command("list")
+    .description("List milestone statuses from the event journal.")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .action((options: Pick<DatabaseTaskOptions, "database">) => {
+      const journal = openJournal(options.database, "read-only");
+      try {
+        setResult({
+          exitCode: 0,
+          value: {
+            command: "milestone.list",
+            milestones: new MilestoneRegistry(journal).list(),
+          },
+        });
+      } finally {
+        journal.close();
+      }
+    });
+  milestone
+    .command("status")
+    .description("Inspect one milestone from the event journal.")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--milestone-id <id>", "milestone identity")
+    .action((options: MilestoneStatusOptions) => {
+      const journal = openJournal(options.database, "read-only");
+      try {
+        const milestoneView = new MilestoneRegistry(journal).inspect(options.milestoneId);
+        if (milestoneView === null) throw new CliFailure("TASK_NOT_FOUND");
+        setResult({
+          exitCode: 0,
+          value: { command: "milestone.status", milestone: milestoneView },
+        });
+      } finally {
+        journal.close();
+      }
     });
 
   const task = program.command("task").description("Run and inspect deterministic tasks.");
@@ -758,6 +800,8 @@ function publicRecoveryDecision(decision: Awaited<ReturnType<RecoveryService["in
 
 function commandLabel(argv: readonly string[]): string {
   if (argv[0] === "milestone" && argv[1] === "preview") return "milestone.preview";
+  if (argv[0] === "milestone" && argv[1] === "list") return "milestone.list";
+  if (argv[0] === "milestone" && argv[1] === "status") return "milestone.status";
   if (argv[0] === "policy" && argv[1] === "preview") return "policy.preview";
   if (argv[0] === "project" && argv[1] === "validate") return "project.validate";
   if (argv[0] === "task" && argv[1] === "run") return "task.run";
