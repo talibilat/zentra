@@ -51,7 +51,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     schema_version: AGENT_TAIL_SCHEMA_VERSION,
     event_id: event.eventId,
     trace_id: event.correlationId,
-    span_id: taskSpanId(event.streamId),
+    span_id: spanIdFor(event),
     parent_span_id: null,
     emitter_id: AGENT_TAIL_JOURNAL_EMITTER_ID,
     sequence: event.globalPosition,
@@ -109,11 +109,21 @@ function assertTimestamp(timestamp: string): void {
   }
 }
 
+function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
+  return taskSpanId(event.streamId);
+}
+
 function taskSpanId(streamId: string): string {
   return `task:${streamId}`;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("milestone.")) {
+    if (event.type.includes("task_")) return { id: "zentra-scheduler", role: "scheduler" };
+    if (event.type === "milestone.plan_created") return { id: "zentra-planner", role: "planner" };
+    return { id: "zentra-orchestrator", role: "orchestrator" };
+  }
   if (event.type === "task.started") {
     return { id: payloadString(event.payload, "workerId") ?? "zentra-worker", role: "worker" };
   }
@@ -162,6 +172,7 @@ function operationFor(event: StoredEvent): AgentTailOperation {
 }
 
 function operationName(type: string): string {
+  if (type.startsWith("milestone.")) return "milestone";
   if (type.startsWith("artifact.")) return "artifact";
   if (type === "task.denied") return "review";
   if (type.includes("validation")) return "validation";
@@ -173,6 +184,13 @@ function operationName(type: string): string {
 }
 
 function operationStatus(type: string): string {
+  if (type === "milestone.task_running") return "running";
+  if (type === "milestone.task_blocked" || type === "milestone.paused") return "waiting";
+  if (type === "milestone.failed") return "failed";
+  if (type === "milestone.cancelled") return "cancelled";
+  if (type === "milestone.timed_out") return "timed_out";
+  if (type === "milestone.denied") return "denied";
+  if (type.startsWith("milestone.") && type.endsWith("ed")) return "completed";
   if (type.endsWith("_started") || type === "task.started") return "running";
   if (type.endsWith("_requested")) return "waiting";
   if (type.endsWith("_observed") || type.endsWith("_reconciled") || type.endsWith("_approved")) {
