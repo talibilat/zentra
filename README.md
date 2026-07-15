@@ -114,6 +114,44 @@ Add `--agent-tail-stream` and pipe stdout to `agent-tail -` for live stdin visua
 Agent Tail file input is a snapshot and does not follow appended files.
 In live stream mode stdout contains only Agent Tail JSONL, and Zentra writes its final operational result to stderr.
 
+Run the Darwin arm64 Docker capsule conformance path with a strict external JSON policy.
+
+```bash
+pnpm start -- capsule conformance \
+  --capsule-id capsule-check-1 \
+  --policy /absolute/path/to/capsule-policy.json \
+  --project /canonical/absolute/path/to/project \
+  --database /absolute/path/to/capsule.sqlite \
+  --agent-tail-jsonl /absolute/path/to/capsule.jsonl
+```
+
+The policy schema supports configurable `GET` and `HEAD` methods with either exact domains or all public domains.
+Push grants bind repository, target ref, exact source commit, expected old remote OID, non-force behavior, and the typed environment credential reference.
+Pull-request grants bind repository, a separate prerequisite push grant, the deterministic broker-owned head ref and exact commit, base, title/body SHA-256 digests, draft state, and the typed environment credential reference.
+Every GitHub grant also has a unique `grantId`, the literal audience `zentra.github-broker`, and an expiry timestamp.
+The `grantId` is also the deterministic request identity, and the CLI does not accept a separate `--request-id`.
+The broker atomically appends grant consumption and action acceptance to `github-grant:<grantId>` at version zero before dispatching an effect, so concurrent or later reuse is denied without a partially consumed state.
+Consumption events contain request/policy/action identity but no credential reference or value.
+All-public-domain mode still requires HTTPS and denies every non-global DNS result.
+The GitHub host broker resolves a grant's handle outside the worker and can invoke one bounded fixed `git push` or `gh pr create` operation without exposing executable, environment, or argument controls.
+Every dispatched GitHub effect remains `uncertain`, including zero exit, nonzero exit, timeout, and cancellation, until a separate read-only remote-ref or pull-request lookup records a reconciliation receipt.
+An uncertain effect is never retried automatically.
+The conformance command does not invoke that effect broker or perform a remote GitHub effect.
+The only supported credential reference is `{ "type": "environment", "name": "GITHUB_TOKEN" }`; journal and Agent Tail events contain only policy/action digests and never that reference or credential value.
+The `github push` and `github create-pr` CLI commands dispatch exact granted requests and always return an uncertain effect receipt.
+The `github reconcile-push` and `github reconcile-pr` commands perform the separate read-only verification required before completion.
+Reconciliation derives every action field from the durable accepted event, permits at most five uncertain read-only attempts within 24 hours, and rejects caller substitutions.
+An accepted-only crash is treated as an uncertain burned grant and may only use read-only reconciliation; it can never redispatch.
+Push reconciliation treats absent or later-moved refs as uncertain rather than proving failure.
+Pull-request bodies include the bound opaque request marker, and reconciliation uses GitHub's total-count search plus exact PR detail verification so absent or ambiguous results remain uncertain.
+PR admission requires its `pushGrantId` stream to end in completed reconciliation for a separate exact zero-old-OID push that created the deterministic broker-owned head ref at the same repository and source commit.
+PR dispatch never creates or moves the branch.
+GitHub exposes no atomic pull-request creation primitive with an expected head OID, so the supported boundary combines the broker-owned branch, completed exact push evidence, durable cross-process per-repository serialization, and an immediate head-OID recheck before `gh pr create`.
+Repository leases coexist with journal tables in the canonical event-journal SQLite database; path aliases converge through filesystem canonicalization and no separate lease sidecar database is created.
+External repository actors can still move or delete the head after that final check, so reconciliation verifies the created PR's exact head OID and keeps any mismatch uncertain.
+The model broker remains disabled, so the capsule runs only OpenCode version/digest conformance and does not claim a real agent or model invocation.
+Policy files, journals, command results, and Agent Tail JSONL must never contain credentials.
+
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
 ```bash
@@ -174,6 +212,22 @@ This Trusted-Project MVP is intended only for projects that the operator control
 Hostile repositories, hostile or untrusted project configuration, hostile validation code, and multi-user operation are prohibited.
 
 Repository owner Md Talib explicitly accepted this Trusted-Project MVP authority model on 2026-07-12.
+
+The Docker capsule uses an internal worker network and a separate TLS-intercepting mitmproxy sidecar attached to both internal and egress networks.
+`HTTP_PROXY` and `HTTPS_PROXY` are convenience routing settings, not the containment boundary; the internal Docker network removes the worker's direct egress route.
+The worker runs non-root with a read-only root, dropped capabilities, no-new-privileges, a read-only project bind, and a `noexec,nosuid` 16 MiB scratch tmpfs.
+The conformance command records approved Node and mitmproxy index/arm64 manifest digests separately from measured local image IDs, Docker executable/context/version/platform values, the built worker image ID, and the OpenCode executable digest/version.
+The proxy accepts only bodyless HTTPS `GET` and `HEAD` requests to exact configured domains after resolving every flow to global addresses and pinning the upstream connection to the checked address.
+It denies plaintext HTTP, private CONNECT targets, protocol upgrades and WebSockets, read requests with bodies, writes, failed DNS, and any private, loopback, link-local, multicast, metadata, unspecified, documentation, or reserved IPv4/IPv6 result.
+mitmproxy raw TCP fallback is disabled, and both raw TCP lifecycle hooks kill any flow that nevertheless reaches them.
+Redirect targets and every subsequent flow are checked again.
+HTTPS method enforcement depends on the mounted mitmproxy CA and decrypted HTTP requests; proxy environment variables and CONNECT destination allowlisting are not treated as containment or method enforcement.
+Allowed internet reads remain an exfiltration channel and are not claimed to be side-effect-free.
+The worker receives no GitHub or model credential.
+GitHub broker credentials exist only in the host effect runner environment for one exact granted operation, and model calls remain disabled until a separately authorised transport broker is configured.
+Pushes run from a broker-owned bare repository with isolated HOME/XDG and fixed Git configuration, disabled hooks/helpers/external programs, no caller local config, exact source-object verification, fast-forward proof, and an expected-old-OID lease.
+The production broker pins `/usr/bin/git` to SHA-256 `97be7fb98d7272d97ca3034740883a93c12c5a438b313fd618a80aca102a3dda` and GitHub CLI `2.76.2` at `/opt/homebrew/Cellar/gh/2.76.2/bin/gh` to SHA-256 `2ee6cbdeee81adabbdd0d379610054d9e55d047067ff70401ad2fa5b5b3f9e0d` before credential resolution.
+Cleanup failure is journaled as uncertain and turns an otherwise completed conformance result into failure.
 
 ## Events And Recovery
 
