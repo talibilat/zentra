@@ -148,6 +148,9 @@ function actorFor(event: StoredEvent): AgentTailActor {
     const evidence = payloadRecord(event.payload, "evidence");
     return { id: payloadString(evidence, "reviewerId") ?? "zentra-reviewer", role: "reviewer" };
   }
+  if (event.type === "task.cleanup_reconciled") {
+    return { id: "zentra-recovery-controller", role: "recovery" };
+  }
   if (
     event.type.startsWith("task.integration_") ||
     event.type.startsWith("artifact.integration_") ||

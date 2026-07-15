@@ -70,12 +70,13 @@ describe("Agent Tail event envelope export", () => {
     expect(exported.map((event) => event.sequence)).toEqual([100, 250]);
   });
 
-  it("maps worker, validator, reviewer, integration, and terminal display actors", () => {
+  it("maps worker, validator, reviewer, integration, recovery, and terminal display actors", () => {
     const exported = storedEventsToAgentTailEvents([
       storedEvent({ type: "task.started", payload: { workerId: "opencode-worker-1" } }),
       storedEvent({ type: "task.validation_started" }),
       storedEvent({ type: "task.review_requested", payload: { reviewerId: "opencode-reviewer-1" } }),
       storedEvent({ type: "task.integration_started" }),
+      storedEvent({ type: "task.cleanup_reconciled" }),
       storedEvent({ type: "task.failed", payload: { reason: "validation failed" } }),
     ]);
 
@@ -84,6 +85,7 @@ describe("Agent Tail event envelope export", () => {
       { id: "zentra-validator", role: "validator" },
       { id: "opencode-reviewer-1", role: "reviewer" },
       { id: "zentra-integration-controller", role: "integrator" },
+      { id: "zentra-recovery-controller", role: "recovery" },
       { id: "zentra-orchestrator", role: "orchestrator" },
     ]);
     expect(exported.map((event) => event.operation.status)).toEqual([
@@ -91,6 +93,7 @@ describe("Agent Tail event envelope export", () => {
       "running",
       "waiting",
       "running",
+      "completed",
       "failed",
     ]);
   });

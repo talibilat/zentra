@@ -814,10 +814,34 @@ describe("Zentra CLI", () => {
       event_id: string;
       kind: string;
       sequence: number;
+      actor: { id: string; role: string };
     });
     expect(traceEvents.map((event) => event.event_id)).toEqual(stored.map((event) => event.eventId));
     expect(traceEvents.map((event) => event.kind)).toEqual(stored.map((event) => event.type));
     expect(traceEvents.map((event) => event.sequence)).toEqual(stored.map((event) => event.globalPosition));
+    expect(traceEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "task.started",
+        actor: { id: "zentra-deterministic-worker", role: "worker" },
+      }),
+      expect.objectContaining({
+        kind: "task.validation_started",
+        actor: { id: "zentra-validator", role: "validator" },
+      }),
+      expect.objectContaining({
+        kind: "task.review_requested",
+        actor: { id: "zentra-deterministic-reviewer", role: "reviewer" },
+      }),
+      expect.objectContaining({
+        kind: "task.integration_started",
+        actor: { id: "zentra-integration-controller", role: "integrator" },
+      }),
+      expect.objectContaining({
+        kind: "task.completed",
+        actor: { id: "zentra-orchestrator", role: "orchestrator" },
+      }),
+    ]));
+    expect(traceEvents.some((event) => event.kind === "artifact.ready")).toBe(false);
     expect(traceEvents.at(-1)?.kind).toBe("task.completed");
 
     const status = await invoke([
