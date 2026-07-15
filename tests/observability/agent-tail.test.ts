@@ -118,6 +118,49 @@ describe("Agent Tail event envelope export", () => {
     expect(exported.operation).toEqual({ name: "review", status: "denied" });
   });
 
+  it("maps capsule proxy, worker, cleanup, and terminal events without changing v1", () => {
+    const exported = storedEventsToAgentTailEvents([
+      storedEvent({ type: "capsule.proxy_interaction_observed", payload: { scheme: "https", method: "GET", host: "example.com", allowed: true, reason: "configured_read" } }),
+      storedEvent({ type: "capsule.worker_attested", payload: { readOnlyRoot: true, user: "10001:10001", projectMount: "read_only", scratchBytes: 1, capabilities: "dropped", noNewPrivileges: true, directEgress: "internal_network_only", inheritedSecrets: false, dockerSocket: false } }),
+      storedEvent({ type: "capsule.cleanup_observed", payload: { outcome: "completed", containersAbsent: true, networksAbsent: true, imagesAbsent: true, observationsCollected: true } }),
+      storedEvent({ type: "capsule.failed", payload: { outcome: "failed", cleanup: "completed" } }),
+    ]);
+
+    expect(exported.map((event) => event.actor)).toEqual([
+      { id: "zentra-policy-proxy", role: "policy_proxy" },
+      { id: "zentra-capsule-controller", role: "worker_controller" },
+      { id: "zentra-capsule-controller", role: "worker_controller" },
+      { id: "zentra-capsule-controller", role: "worker_controller" },
+    ]);
+    expect(exported.map((event) => event.operation)).toEqual([
+      { name: "network_policy", status: "completed" },
+      { name: "capsule", status: "completed" },
+      { name: "cleanup", status: "completed" },
+      { name: "capsule", status: "failed" },
+    ]);
+  });
+
+  it("derives capsule statuses from redacted payload outcomes", () => {
+    const exported = storedEventsToAgentTailEvents([
+      storedEvent({ type: "capsule.started", payload: { projectAccess: "read_only", scratchBytes: 1, policy: { schemaVersion: 1, readMode: "exact_domains", readDomains: 1, readMethods: ["GET"], githubWriteGrants: 0, githubBroker: "disabled", modelBroker: "disabled", tlsInspectionRequired: true, globalWrites: "denied" }, githubEffects: "disabled", modelEffects: "disabled_without_broker", resourceNamespace: "a".repeat(32) } }),
+      storedEvent({ type: "capsule.proxy_interaction_observed", payload: { scheme: "https", method: "POST", host: "example.com", allowed: false, reason: "method_denied" } }),
+      storedEvent({ type: "capsule.check_observed", payload: { name: "projectReadOnly", passed: false } }),
+      storedEvent({ type: "capsule.cleanup_observed", payload: { outcome: "uncertain", containersAbsent: false, networksAbsent: false, imagesAbsent: false, observationsCollected: false } }),
+      storedEvent({ type: "capsule.failure_observed", payload: { outcome: "timed_out", reason: "total_deadline" } }),
+    ]);
+
+    expect(exported.map((event) => event.operation.status)).toEqual([
+      "running", "denied", "failed", "failed", "timed_out",
+    ]);
+  });
+
+  it("fails closed before projecting an unvalidated capsule payload", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "capsule.proxy_interaction_observed",
+      payload: { authorization: "secret" },
+    }))).toThrow();
+  });
+
   it("serializes one valid JSONL line without mutating native event payload", () => {
     const payload = { terminalOutcome: "completed" };
     const event = storedEvent({ type: "task.completed", payload });

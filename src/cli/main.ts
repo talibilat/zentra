@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 import { Command, CommanderError } from "commander";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
+import { DockerCapsuleConformance } from "../capsule/docker-capsule.js";
+import { loadCapsulePolicy } from "../capsule/egress-policy.js";
+import {
+  EnvironmentGitHubCredentialProvider,
+  GitHubEffectBroker,
+} from "../capsule/github-broker.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
 import type { NewEvent } from "../contracts/event.js";
 import {
@@ -23,6 +29,7 @@ import {
   type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
+import { IntegrationLeaseStore } from "../integration/integration-lease.js";
 import type { EventJournal } from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
@@ -187,6 +194,23 @@ interface MilestoneStatusOptions {
   readonly database: string;
   readonly milestoneId: string;
 }
+
+interface CapsuleConformanceOptions {
+  readonly capsuleId: string;
+  readonly policy: string;
+  readonly project: string;
+  readonly database: string;
+  readonly agentTailJsonl: string;
+}
+
+interface GitHubBaseOptions {
+  readonly policy: string;
+  readonly database: string;
+  readonly agentTailJsonl: string;
+  readonly grantId: string;
+}
+interface GitHubPushOptions extends GitHubBaseOptions { readonly repository: string; readonly targetRef: string; readonly sourceCommit: string; readonly expectedOldOid: string; readonly sourceRepository: string }
+interface GitHubPrOptions extends GitHubBaseOptions { readonly pushGrantId: string; readonly repository: string; readonly base: string; readonly headRef: string; readonly headCommit: string; readonly title?: string; readonly body?: string; readonly draft?: boolean }
 
 interface CommandResult {
   readonly exitCode: number;
@@ -494,6 +518,77 @@ function createProgram(
       }
     });
 
+  const capsule = program.command("capsule").description("Run secure Docker capsule conformance.");
+  capsule
+    .command("conformance")
+    .description("Verify the Darwin arm64 worker and TLS policy-proxy boundary with real Docker.")
+    .requiredOption("--capsule-id <id>", "safe capsule identity")
+    .requiredOption("--policy <path>", "external capsule egress policy JSON")
+    .requiredOption("--project <path>", "canonical project directory mounted read-only")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--agent-tail-jsonl <path>", "new Agent Tail v1 JSONL trace path")
+    .action(async (options: CapsuleConformanceOptions) => {
+      assertSafeTaskId(options.capsuleId);
+      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+      const sqliteJournal = new SqliteEventJournal(options.database);
+      let sink: AgentTailJsonlFileSink | undefined;
+      let journal: ProjectingEventJournal | undefined;
+      try {
+        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+        journal = new ProjectingEventJournal(sqliteJournal, sink);
+        const report = await new DockerCapsuleConformance(journal).run({
+          capsuleId: options.capsuleId,
+          policyPath: options.policy,
+          projectPath: options.project,
+          signal,
+        });
+        trace.projectionFailed = journal.projectionFailed || sink.streamFailed;
+        setResult({
+          exitCode: report.outcome === "completed" && !trace.projectionFailed ? 0 : 1,
+          value: {
+            command: "capsule.conformance",
+            report,
+            tracePath: options.agentTailJsonl,
+            traceOutcome: trace.projectionFailed ? "failed" : "completed",
+          },
+        });
+      } finally {
+        try {
+          sink?.close();
+        } finally {
+          sqliteJournal.close();
+        }
+      }
+    });
+
+  const github = program.command("github").description("Execute exact host-brokered GitHub capabilities.");
+  const addGitHubBase = (command: Command): Command => command
+    .requiredOption("--policy <path>", "canonical capsule policy JSON")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--agent-tail-jsonl <path>", "new Agent Tail v1 JSONL trace path")
+    .requiredOption("--grant-id <id>", "single-use policy grant and request identity");
+  addGitHubBase(github.command("push").description("Dispatch one exact push; completion requires later reconciliation."))
+    .requiredOption("--repository <owner/name>", "exact GitHub repository")
+    .requiredOption("--target-ref <ref>", "exact granted remote ref")
+    .requiredOption("--source-commit <oid>", "exact source commit")
+    .requiredOption("--expected-old-oid <oid>", "exact expected old remote commit")
+    .requiredOption("--source-repository <path>", "canonical source repository path")
+    .action(async (options: GitHubPushOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.push({ ...options, sourceRepositoryPath: options.sourceRepository, force: false, signal })));
+  addGitHubBase(github.command("create-pr").description("Dispatch one exact pull request; completion requires later reconciliation."))
+    .requiredOption("--push-grant-id <id>", "completed prerequisite push grant identity")
+    .requiredOption("--repository <owner/name>", "exact GitHub repository")
+    .requiredOption("--base <branch>", "exact granted base branch")
+    .requiredOption("--head-ref <branch>", "exact head branch")
+    .requiredOption("--head-commit <oid>", "exact head commit")
+    .requiredOption("--title <title>", "pull request title")
+    .requiredOption("--body <body>", "pull request body")
+    .option("--draft", "create an exact draft pull request", false)
+    .action(async (options: GitHubPrOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.createPullRequest({ ...options, title: options.title!, body: options.body!, draft: options.draft === true, signal })));
+  addGitHubBase(github.command("reconcile-push").description("Read the exact remote ref for an uncertain push."))
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
+  addGitHubBase(github.command("reconcile-pr").description("Read exact pull-request state for an uncertain creation."))
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
+
   const task = program.command("task").description("Run and inspect deterministic tasks.");
   task
     .command("run")
@@ -620,6 +715,58 @@ function createProgram(
     });
 
   return program;
+}
+
+async function runGitHubBrokerCli(
+  options: GitHubBaseOptions,
+  signal: AbortSignal,
+  setResult: (result: CommandResult) => void,
+  operation: (broker: GitHubEffectBroker) => Promise<{
+    readonly outcome: string;
+    readonly requestId: string;
+    readonly operation: string;
+    readonly repository: string;
+  }>,
+): Promise<void> {
+  assertSafeTaskId(options.grantId);
+  const policy = loadCapsulePolicy(options.policy);
+  const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+  const sqlite = new SqliteEventJournal(options.database);
+  let sink: AgentTailJsonlFileSink | undefined;
+  let journal: ProjectingEventJournal | undefined;
+  let repositoryLeases: IntegrationLeaseStore | undefined;
+  try {
+    repositoryLeases = new IntegrationLeaseStore(realpathSync.native(options.database));
+    sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+    journal = new ProjectingEventJournal(sqlite, sink);
+    const broker = new GitHubEffectBroker(
+      policy,
+      journal,
+      new EnvironmentGitHubCredentialProvider(),
+      repositoryLeases,
+    );
+    const receipt = await operation(broker);
+    trace.projectionFailed = journal.projectionFailed || sink.streamFailed;
+    setResult({
+      exitCode: receipt.outcome === "completed" && !trace.projectionFailed ? 0 : 1,
+      value: {
+        command: `github.${receipt.operation}`,
+        receipt,
+        tracePath: options.agentTailJsonl,
+        traceOutcome: trace.projectionFailed ? "failed" : "completed",
+      },
+    });
+  } finally {
+    try {
+      sink?.close();
+    } finally {
+      try {
+        sqlite.close();
+      } finally {
+        repositoryLeases?.close();
+      }
+    }
+  }
 }
 
 async function withSystem<T>(
@@ -1052,6 +1199,8 @@ function commandLabel(argv: readonly string[]): string {
   if (argv[0] === "milestone" && argv[1] === "list") return "milestone.list";
   if (argv[0] === "milestone" && argv[1] === "status") return "milestone.status";
   if (argv[0] === "policy" && argv[1] === "preview") return "policy.preview";
+  if (argv[0] === "capsule" && argv[1] === "conformance") return "capsule.conformance";
+  if (argv[0] === "github") return `github.${argv[1] ?? "unknown"}`;
   if (argv[0] === "project" && argv[1] === "validate") return "project.validate";
   if (argv[0] === "task" && argv[1] === "run") return "task.run";
   if (argv[0] === "task" && argv[1] === "status") return "task.status";

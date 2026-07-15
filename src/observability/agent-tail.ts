@@ -1,4 +1,5 @@
 import type { StoredEvent } from "../contracts/event.js";
+import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -47,6 +48,9 @@ export function storedEventsToAgentTailEvents(
 
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
   assertAgentTailCompatibleEvent(event);
+  const payload = event.type.startsWith("capsule.")
+    ? parseCapsuleEventPayload(event.type, event.payload)
+    : event.payload;
   return Object.freeze({
     schema_version: AGENT_TAIL_SCHEMA_VERSION,
     event_id: event.eventId,
@@ -70,7 +74,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
         native_type: event.type,
       }),
     }),
-    payload: cloneJson(event.payload),
+    payload: cloneJson(payload),
   });
 }
 
@@ -111,6 +115,7 @@ function assertTimestamp(timestamp: string): void {
 
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
+  if (event.type.startsWith("capsule.")) return `capsule:${event.streamId}`;
   return taskSpanId(event.streamId);
 }
 
@@ -119,6 +124,15 @@ function taskSpanId(streamId: string): string {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type === "capsule.proxy_interaction_observed") {
+    return { id: "zentra-policy-proxy", role: "policy_proxy" };
+  }
+  if (event.type.startsWith("capsule.github_broker_") || event.type === "capsule.github_grant_consumed") {
+    return { id: "zentra-github-broker", role: "effect_broker" };
+  }
+  if (event.type.startsWith("capsule.")) {
+    return { id: "zentra-capsule-controller", role: "worker_controller" };
+  }
   if (event.type.startsWith("milestone.")) {
     if (event.type.includes("task_")) return { id: "zentra-scheduler", role: "scheduler" };
     if (event.type === "milestone.plan_created") return { id: "zentra-planner", role: "planner" };
@@ -170,11 +184,15 @@ function actorFor(event: StoredEvent): AgentTailActor {
 function operationFor(event: StoredEvent): AgentTailOperation {
   return {
     name: operationName(event.type),
-    status: operationStatus(event.type),
+    status: operationStatus(event),
   };
 }
 
 function operationName(type: string): string {
+  if (type === "capsule.proxy_interaction_observed") return "network_policy";
+  if (type.startsWith("capsule.github_broker_") || type === "capsule.github_grant_consumed") return "github_effect";
+  if (type === "capsule.cleanup_observed") return "cleanup";
+  if (type.startsWith("capsule.")) return "capsule";
   if (type.startsWith("milestone.")) return "milestone";
   if (type.startsWith("artifact.")) return "artifact";
   if (type === "task.denied") return "review";
@@ -186,7 +204,20 @@ function operationName(type: string): string {
   return "task";
 }
 
-function operationStatus(type: string): string {
+function operationStatus(event: StoredEvent): string {
+  const type = event.type;
+  if (type === "capsule.started") return "running";
+  if (type === "capsule.proxy_interaction_observed" && payloadBoolean(event.payload, "allowed") === false) return "denied";
+  if (type === "capsule.check_observed" && payloadBoolean(event.payload, "passed") === false) return "failed";
+  if (type === "capsule.cleanup_observed" && payloadString(event.payload, "outcome") === "uncertain") return "failed";
+  if (type === "capsule.failure_observed") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "capsule.github_broker_accepted") return "running";
+  if (type === "capsule.github_broker_denied") return "denied";
+  if (type === "capsule.github_broker_observed") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "capsule.github_broker_reconciled") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "capsule.failed") return "failed";
+  if (type === "capsule.cancelled") return "cancelled";
+  if (type === "capsule.timed_out") return "timed_out";
   if (type === "milestone.task_running") return "running";
   if (type === "milestone.task_blocked" || type === "milestone.paused") return "waiting";
   if (type === "milestone.failed") return "failed";
@@ -208,6 +239,12 @@ function operationStatus(type: string): string {
   if (type === "task.denied") return "denied";
   if (type === "task.failed") return "failed";
   return "completed";
+}
+
+function payloadBoolean(payload: unknown, key: string): boolean | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const value = (payload as Readonly<Record<string, unknown>>)[key];
+  return typeof value === "boolean" ? value : null;
 }
 
 function payloadString(payload: unknown, key: string): string | null {

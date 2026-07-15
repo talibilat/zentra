@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "reads": {
+    "mode": "exact_domains",
+    "domains": ["example.com", "private-alias.test"],
+    "methods": ["GET", "HEAD"]
+  },
+  "githubWrites": [
+    {
+      "grantId": "issue-050-push",
+      "audience": "zentra.github-broker",
+      "expiresAt": "2099-01-01T00:00:00.000Z",
+      "action": {
+        "operation": "push",
+        "repository": "talibilat/zentra",
+        "targetRef": "refs/heads/zentra/grant-7eb42d399e280bdc33c7e21a",
+        "sourceCommit": "1111111111111111111111111111111111111111",
+        "expectedOldOid": "0000000000000000000000000000000000000000",
+        "force": false
+      },
+      "credential": { "type": "environment", "name": "GITHUB_TOKEN" }
+    },
+    {
+      "grantId": "issue-050-pr",
+      "audience": "zentra.github-broker",
+      "expiresAt": "2099-01-01T00:00:00.000Z",
+      "action": {
+        "operation": "create_pull_request",
+        "repository": "talibilat/zentra",
+        "pushGrantId": "issue-050-push",
+        "headRef": "zentra/grant-7eb42d399e280bdc33c7e21a",
+        "headCommit": "1111111111111111111111111111111111111111",
+        "base": "main",
+        "titleSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bodySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "draft": false
+      },
+      "credential": { "type": "environment", "name": "GITHUB_TOKEN" }
+    }
+  ],
+  "brokers": {
+    "github": "host",
+    "model": "disabled"
+  }
+}
