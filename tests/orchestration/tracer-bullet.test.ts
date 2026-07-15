@@ -20,6 +20,7 @@ import {
   type ValidationReport,
 } from "../../src/capabilities/validation-runner.js";
 import { projectArtifacts } from "../../src/contracts/artifact.js";
+import type { PlannedTask } from "../../src/contracts/milestone.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -219,6 +220,30 @@ function decision(input: ReviewInput, approved: boolean): ReviewDecision {
   };
 }
 
+const reviewPolicyTask: PlannedTask = {
+  taskId: "task-greeting",
+  title: "Update greeting",
+  description: "Update greeting",
+  dependencies: [],
+  ownedPaths: ["greeting.txt"],
+  forbiddenPaths: [],
+  acceptanceCriteria: ["Focused validation completed and independent review approved the diff."],
+  roleAssignment: { role: "implementer", agentId: "worker-1", harness: "deterministic" },
+  risk: {
+    level: "low",
+    authority: "workspace_write",
+    requiresReview: true,
+    requiresApproval: false,
+  },
+  budget: {
+    maxSeconds: 10_000,
+    maxRetries: 0,
+    maxCostUsd: 0,
+    maxInputTokens: 1,
+    maxOutputTokens: 1,
+  },
+};
+
 const runInput = {
   taskId: "task-greeting",
   projectId: "greeting-project",
@@ -236,6 +261,17 @@ const runInput = {
     ],
     timeoutMs: 10_000,
   },
+  reviewPolicySecurity: {
+    allowedRepositories: [],
+    allowedFileScopes: ["greeting.txt", "auth.ts"],
+    forbiddenPaths: [],
+    network: { default: "denied", allowedDestinations: [] },
+    secretHandling: ["Test workers receive minimal environments."],
+    approvalRequiredOperations: [],
+    releaseBoundary: "local_preparation_only",
+    stopAndAskConditions: ["missing_authority", "forbidden_file_scope"],
+  },
+  reviewPolicyTask,
 } as const;
 
 function runSignal(): AbortSignal {

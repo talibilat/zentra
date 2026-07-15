@@ -40,6 +40,7 @@ interface Fixture {
   readonly repositoryPath: string;
   readonly configPath: string;
   readonly databasePath: string;
+  readonly securitySheetPath: string;
 }
 
 interface Invocation {
@@ -70,6 +71,7 @@ async function fixture(): Promise<Fixture> {
   const worktreeRoot = path.join(baseDirectory, "worktrees");
   const configPath = path.join(baseDirectory, "project.json");
   const databasePath = path.join(baseDirectory, "journal.sqlite");
+  const securitySheetPath = path.join(baseDirectory, "task-security.md");
 
   await gitOk(baseDirectory, ["init", "-b", "main", repositoryPath]);
   await gitOk(repositoryPath, ["config", "user.name", "Zentra CLI Fixture"]);
@@ -102,7 +104,35 @@ async function fixture(): Promise<Fixture> {
   );
   await gitOk(repositoryPath, ["add", "--", "."]);
   await gitOk(repositoryPath, ["commit", "-m", "initial fixture"]);
-  return { baseDirectory, repositoryPath, configPath, databasePath };
+  writeFileSync(securitySheetPath, `# Zentra Security Sheet
+
+## Allowed Repositories
+- ${realpathSync.native(repositoryPath)}
+
+## Allowed File Scopes
+- greeting.txt
+- auth.ts
+
+## Forbidden Paths
+- .env
+
+## Network
+Default: denied
+
+## Secret Handling
+- Do not inherit parent secrets.
+
+## Approval Required Operations
+- external_effect
+
+## Release Boundary
+local_preparation_only
+
+## Stop And Ask Conditions
+- missing_authority
+- forbidden_file_scope
+`, "utf8");
+  return { baseDirectory, repositoryPath, configPath, databasePath, securitySheetPath };
 }
 
 async function invoke(
@@ -141,6 +171,7 @@ function runArguments(
     "--title", "Update greeting",
     "--file", "greeting.txt",
     "--content", "hello from CLI\n",
+    "--security-sheet", testFixture.securitySheetPath,
   ];
 }
 
@@ -676,6 +707,108 @@ describe("Zentra CLI", () => {
     expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(initialHead);
     expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:auth.ts"]))
       .toBe("export const requireAuthentication = true;");
+  });
+
+  it("pauses before integration when review policy security scope does not allow the touched file", async () => {
+    const testFixture = await fixture();
+    const securitySheetPath = path.join(testFixture.baseDirectory, "SECURITY-SHEET.md");
+    writeFileSync(securitySheetPath, `# Zentra Security Sheet
+
+## Allowed Repositories
+- ${realpathSync.native(testFixture.repositoryPath)}
+
+## Allowed File Scopes
+- src/**
+
+## Forbidden Paths
+- .env
+
+## Network
+Default: denied
+
+## Secret Handling
+- Do not inherit parent secrets.
+
+## Approval Required Operations
+- external_effect
+
+## Release Boundary
+local_preparation_only
+
+## Stop And Ask Conditions
+- missing_authority
+- forbidden_file_scope
+`, "utf8");
+
+    const result = await invoke([
+      ...runArguments(testFixture, "task-review-policy-blocked"),
+      "--security-sheet", securitySheetPath,
+    ]);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: {
+        command: "task.run",
+        outcome: null,
+        task: { lifecycle: "integration_ready", terminalOutcome: null },
+      },
+    });
+    expect(eventTypes(testFixture.databasePath, "task-review-policy-blocked")).toContain(
+      "task.review_policy_blocked",
+    );
+    const recovery = await invoke([
+      "recover",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-review-policy-blocked",
+    ]);
+    expect(recovery).toMatchObject({
+      code: 0,
+      json: { command: "recover", decision: { action: "await_reconciliation" } },
+    });
+    expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:greeting.txt"]))
+      .toBe("hello");
+
+    const wrongRepositorySheet = path.join(testFixture.baseDirectory, "WRONG-SECURITY-SHEET.md");
+    writeFileSync(wrongRepositorySheet, readFileSync(securitySheetPath, "utf8").replace(
+      realpathSync.native(testFixture.repositoryPath),
+      realpathSync.native(testFixture.baseDirectory),
+    ), "utf8");
+    const wrongRepository = await invoke([
+      ...runArguments(testFixture, "task-review-policy-wrong-repo"),
+      "--security-sheet", wrongRepositorySheet,
+    ]);
+    expect(wrongRepository).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "task.run", error: { code: "INVALID_SECURITY_SHEET" } },
+    });
+    expect(eventTypes(testFixture.databasePath, "task-review-policy-wrong-repo")).toEqual([]);
+  });
+
+  it("pauses before integration when task risk requires stronger review evidence", async () => {
+    const testFixture = await fixture();
+
+    const result = await invoke([
+      ...runArguments(testFixture, "task-review-policy-high-risk"),
+      "--risk-level", "high",
+    ]);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: {
+        command: "task.run",
+        outcome: null,
+        task: { lifecycle: "integration_ready", terminalOutcome: null },
+      },
+    });
+    expect(eventTypes(testFixture.databasePath, "task-review-policy-high-risk")).toContain(
+      "task.review_policy_blocked",
+    );
+    expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:greeting.txt"]))
+      .toBe("hello");
   });
 
   it("returns a successful no-op recovery decision for a completed task", async () => {

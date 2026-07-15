@@ -63,6 +63,7 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
     "task.timed_out",
   ],
   integration_ready: [
+    "task.review_policy_blocked",
     "task.commit_observed",
     "task.integration_started",
     "task.denied",
@@ -93,6 +94,7 @@ const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> =
   "task.validation_started": "validating",
   "task.review_requested": "awaiting_review",
   "task.review_approved": "integration_ready",
+  "task.review_policy_blocked": "integration_ready",
   "task.commit_observed": "integration_ready",
   "task.integration_started": "integrating",
   "task.integration_prepared": "integrating",
@@ -142,6 +144,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
   let cleanupCompleted = false;
   let cleanupObserved = false;
   let cleanupReconciled = false;
+  let reviewPolicyBlocked = false;
   let preparedReceiptSnapshot: string | null = null;
   let observedReceiptSnapshot: string | null = null;
   let cleanupStartedSnapshot: string | null = null;
@@ -166,6 +169,9 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     if (nextState === undefined) {
       throw new Error(`unknown event type: ${event.type}`);
     }
+    if (reviewPolicyBlocked && event.type !== "task.cancelled" && event.type !== "task.failed") {
+      throw new Error("task review policy is blocked");
+    }
 
     if (event.type === "task.created") {
       throw new Error("duplicate task.created event");
@@ -178,6 +184,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       event.type === "task.cleanup_completed" ||
       event.type === "task.cleanup_observed" ||
       event.type === "task.cleanup_reconciled" ||
+      event.type === "task.review_policy_blocked" ||
       event.type === "task.completed"
     ) {
       if (singleOccurrenceEvents.has(event.type)) {
@@ -235,6 +242,8 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
         throw new Error("cleanup reconciliation facts contradict cleanup target facts");
       }
       cleanupReconciled = true;
+    } else if (event.type === "task.review_policy_blocked") {
+      reviewPolicyBlocked = true;
     } else if (event.type === "task.completed") {
       if (!cleanupCompleted && !cleanupReconciled) {
         throw new Error("task completion requires durable cleanup completion or reconciliation");

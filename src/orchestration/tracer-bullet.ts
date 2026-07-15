@@ -15,6 +15,10 @@ import {
   type ArtifactKind,
   type PatchArtifactEvidence,
 } from "../contracts/artifact.js";
+import {
+  PlannedTaskSchema,
+  type PlannedTask,
+} from "../contracts/milestone.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import {
   IntegrationExecutionError,
@@ -28,6 +32,8 @@ import {
   isVerifiedReviewDecision,
   type ReviewGate,
 } from "../reviews/review-gate.js";
+import { assessReviewPolicy } from "../reviews/review-policy.js";
+import type { SecuritySheet } from "../policy/security-sheet.js";
 import {
   canonicalValidationDigest,
   ReviewerExecutionError,
@@ -105,6 +111,8 @@ export class TracerBulletOrchestrator {
     workerId: string;
     reviewerId: string;
     workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
+    reviewPolicySecurity: SecuritySheet;
+    reviewPolicyTask: PlannedTask;
     signal: AbortSignal;
   }): Promise<TaskView> {
     const workerTimeoutMs = assertValidWorkerTimeout(input.workerRequest.timeoutMs);
@@ -215,6 +223,8 @@ export class TracerBulletOrchestrator {
     workerId: string;
     reviewerId: string;
     workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
+    reviewPolicySecurity: SecuritySheet;
+    reviewPolicyTask: PlannedTask;
     signal: AbortSignal;
   }): Promise<TaskView> {
     const workerTimeoutMs = assertValidWorkerTimeout(input.workerRequest.timeoutMs);
@@ -308,6 +318,8 @@ export class TracerBulletOrchestrator {
       workerId: string;
       reviewerId: string;
       workerRequest: Omit<WorkerRequest, "taskId" | "cwd">;
+      reviewPolicySecurity: SecuritySheet;
+      reviewPolicyTask: PlannedTask;
       signal: AbortSignal;
     },
     project: ReturnType<ProjectRegistry["get"]>,
@@ -453,6 +465,26 @@ export class TracerBulletOrchestrator {
         type: "task.review_approved",
         payload: { review: verifiedReview },
       });
+      const reviewPolicyTask = PlannedTaskSchema.parse({
+        ...input.reviewPolicyTask,
+        taskId: input.taskId,
+        title: input.title,
+        ownedPaths: [patch.path],
+      });
+      const reviewPolicy = assessReviewPolicy({
+        task: reviewPolicyTask,
+        security: input.reviewPolicySecurity,
+        workerId: input.workerId,
+        reviewerIds: [verifiedReview.reviewerId],
+      });
+      if (reviewPolicy.status !== "ready_for_review") {
+        this.tasks.append(input.taskId, "task.review_policy_blocked", {
+          stage,
+          reason: reviewPolicy.reason,
+          reviewPolicy,
+        }, null);
+        return this.current(input.taskId);
+      }
 
       stage = "commit";
       const sourceCommit = await this.worktrees.commit(

@@ -10,7 +10,14 @@ import { Command, CommanderError } from "commander";
 import { ValidationRunner } from "../capabilities/validation-runner.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
 import type { NewEvent } from "../contracts/event.js";
-import { MilestonePlanSchema } from "../contracts/milestone.js";
+import {
+  AuthorityLevelSchema,
+  MilestonePlanSchema,
+  PlannedTaskSchema,
+  RiskClassificationSchema,
+  RiskLevelSchema,
+  type PlannedTask,
+} from "../contracts/milestone.js";
 import {
   resolveBundledFixture,
   type BundledFixture,
@@ -146,6 +153,10 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
   readonly title: string;
   readonly file: string;
   readonly content: string;
+  readonly securitySheet: string;
+  readonly riskLevel: string;
+  readonly authority: string;
+  readonly requiresApproval?: boolean;
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
@@ -443,11 +454,16 @@ function createProgram(
     .requiredOption("--title <title>", "task title")
     .requiredOption("--file <relative-path>", "one root-level file")
     .requiredOption("--content <text>", "replacement file content")
+    .requiredOption("--security-sheet <path>", "Markdown security sheet for review policy")
+    .option("--risk-level <level>", "review policy risk level", "low")
+    .option("--authority <authority>", "review policy authority level", "workspace_write")
+    .option("--requires-approval", "mark the task as requiring approval before integration", false)
     .action(async (options: RunOptions) => {
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
       assertSafeRootFile(options.file);
       assertSafeContent(options.content);
+      const reviewPolicyTask = reviewPolicyTaskFromOptions(options);
       const configs = loadProjects(options.config);
       if (configs.length !== 1) {
         throw new CliFailure("INVALID_CONFIG");
@@ -459,6 +475,13 @@ function createProgram(
         title: options.title,
       });
       const reviewer = await configuredReviewer();
+      const reviewPolicySecurity = loadSecuritySheetForCli(options.securitySheet);
+      if (
+        reviewPolicySecurity !== undefined &&
+        !reviewPolicySecurity.allowedRepositories.includes(realpathSync.native(projectConfig.repositoryPath))
+      ) {
+        throw new CliFailure("INVALID_SECURITY_SHEET");
+      }
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
@@ -479,6 +502,8 @@ function createProgram(
               ],
               timeoutMs: WORKER_TIMEOUT_MS,
             },
+            reviewPolicySecurity,
+            reviewPolicyTask,
             signal,
           });
           return taskView;
@@ -744,6 +769,42 @@ function assertSafeContent(content: string): void {
   if (Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES) {
     throw new CliFailure("INVALID_CONTENT");
   }
+}
+
+function reviewPolicyTaskFromOptions(options: RunOptions): PlannedTask {
+  const riskLevel = RiskLevelSchema.safeParse(options.riskLevel);
+  const authority = AuthorityLevelSchema.safeParse(options.authority);
+  if (!riskLevel.success || !authority.success) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+  const risk = RiskClassificationSchema.safeParse({
+    level: riskLevel.data,
+    authority: authority.data,
+    requiresReview: true,
+    requiresApproval: options.requiresApproval === true,
+  });
+  if (!risk.success) throw new CliFailure("INVALID_COMMAND");
+
+  const task = PlannedTaskSchema.safeParse({
+    taskId: options.taskId,
+    title: options.title,
+    description: options.title,
+    dependencies: [],
+    ownedPaths: [options.file],
+    forbiddenPaths: [],
+    acceptanceCriteria: ["Focused validation completed and independent review approved the diff."],
+    roleAssignment: { role: "implementer", agentId: WORKER_ID, harness: "deterministic" },
+    risk: risk.data,
+    budget: {
+      maxSeconds: WORKER_TIMEOUT_MS,
+      maxRetries: 0,
+      maxCostUsd: 0,
+      maxInputTokens: 1,
+      maxOutputTokens: 1,
+    },
+  });
+  if (!task.success) throw new CliFailure("INVALID_COMMAND");
+  return task.data;
 }
 
 function assertSafeTaskId(taskId: string): void {
