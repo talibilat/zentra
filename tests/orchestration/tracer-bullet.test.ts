@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -29,6 +30,8 @@ import {
   type IntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
+import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { RecoveryService } from "../../src/orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../../src/orchestration/tracer-bullet.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
@@ -1269,6 +1272,9 @@ describe("TracerBulletOrchestrator", () => {
       }
       const validations = new OutcomeValidation(new ProcessSupervisor());
       const batches: string[][] = [];
+      const traceRoot = realpathSync.native(fixture.baseDirectory);
+      const tracePath = path.join(traceRoot, `validation-${outcome}.jsonl`);
+      const sink = AgentTailJsonlFileSink.open(traceRoot, tracePath);
       class RecordingTaskService extends TaskService {
         override appendBatch(
           ...args: Parameters<TaskService["appendBatch"]>
@@ -1279,14 +1285,19 @@ describe("TracerBulletOrchestrator", () => {
       }
       const { journal, orchestrator } = system(fixture.configPath, {
         validations,
-        taskService: (stream) => new RecordingTaskService(stream),
+        taskService: (stream) => new RecordingTaskService(new ProjectingEventJournal(stream, sink)),
       });
 
-      const result = await orchestrator.run({
-        ...runInput,
-        taskId: `task-validation-${outcome}`,
-        signal: new AbortController().signal,
-      });
+      let result;
+      try {
+        result = await orchestrator.run({
+          ...runInput,
+          taskId: `task-validation-${outcome}`,
+          signal: new AbortController().signal,
+        });
+      } finally {
+        sink.close();
+      }
 
       expect(result.terminalOutcome).toBe(outcome);
       expect(projectArtifacts(journal.readStream(result.taskId)).artifacts.map((artifact) =>
@@ -1308,6 +1319,8 @@ describe("TracerBulletOrchestrator", () => {
         "artifact.validation_report_recorded",
         `task.${outcome}`,
       ]);
+      expect(JSON.parse(readFileSync(tracePath, "utf8").trimEnd().split("\n").at(-1)!) as unknown)
+        .toMatchObject({ kind: `task.${outcome}`, operation: { status: outcome } });
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
     },
   );

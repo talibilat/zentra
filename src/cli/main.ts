@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,10 +23,15 @@ import {
   type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
+import type { EventJournal } from "../journal/journal.js";
+import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../milestones/milestone-registry.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
-import { agentTailEventToJsonLine, storedEventsToAgentTailEvents } from "../observability/agent-tail.js";
+import {
+  AgentTailJsonlFileSink,
+  assertSafeAgentTailJsonlPath,
+} from "../observability/agent-tail-file-sink.js";
 import { RecoveryService } from "../orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
 import {
@@ -157,6 +162,7 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
   readonly riskLevel: string;
   readonly authority: string;
   readonly requiresApproval?: boolean;
+  readonly agentTailJsonl?: string;
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
@@ -391,20 +397,32 @@ function createProgram(
         stopAndAskBoundaries: security.stopAndAskConditions,
       } satisfies Record<string, unknown>;
       assertOperationalJsonFits(previewValue);
-      preflightTracePath(options.agentTailJsonl);
-      const journal = new SqliteEventJournal(options.database);
+      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+      const sqliteJournal = new SqliteEventJournal(options.database);
+      let sink: AgentTailJsonlFileSink | undefined;
+      let journal: ProjectingEventJournal | undefined;
       let stored;
       try {
+        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+        journal = new ProjectingEventJournal(sqliteJournal, sink);
         stored = journal.append(milestoneId, 0, events);
       } finally {
-        journal.close();
+        trace.projectionFailed = journal?.projectionFailed ?? false;
+        try {
+          sink?.close();
+        } finally {
+          sqliteJournal.close();
+        }
       }
-      writeAgentTailTrace(options.agentTailJsonl, stored);
       const view = projectMilestone(stored);
       if (view === null) throw new CliFailure("OPERATION_FAILED");
       setResult({
-        exitCode: 0,
-        value: { ...previewValue, milestone: view },
+        exitCode: trace.projectionFailed ? 1 : 0,
+        value: {
+          ...previewValue,
+          milestone: view,
+          traceOutcome: trace.projectionFailed ? "failed" : "completed",
+        },
       });
     });
   milestone
@@ -458,6 +476,7 @@ function createProgram(
     .option("--risk-level <level>", "review policy risk level", "low")
     .option("--authority <authority>", "review policy authority level", "workspace_write")
     .option("--requires-approval", "mark the task as requiring approval before integration", false)
+    .option("--agent-tail-jsonl <path>", "append Agent Tail JSONL to a retained trace file")
     .action(async (options: RunOptions) => {
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
@@ -482,6 +501,9 @@ function createProgram(
       ) {
         throw new CliFailure("INVALID_SECURITY_SHEET");
       }
+      const trace = options.agentTailJsonl === undefined
+        ? undefined
+        : prepareAgentTailTrace(options.database, options.agentTailJsonl);
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
@@ -507,8 +529,8 @@ function createProgram(
             signal,
           });
           return taskView;
-        });
-        setResult(taskRunResult(result));
+        }, trace);
+        setResult(taskRunResult(result, options.agentTailJsonl, trace?.projectionFailed ?? false));
       } finally {
         workerFixture.cleanup();
       }
@@ -558,12 +580,27 @@ async function withSystem<T>(
   configs: readonly ProjectConfig[],
   mode: "read-only" | "read-write",
   operation: (system: ReturnType<typeof composeSystem>) => Promise<T>,
+  trace?: AgentTailTraceDestination,
 ): Promise<T> {
-  const journal = openJournal(databasePath, mode);
+  const sqliteJournal = openJournal(databasePath, mode);
+  let sink: AgentTailJsonlFileSink | undefined;
+  let projectingJournal: ProjectingEventJournal | undefined;
   try {
+    let journal: EventJournal = sqliteJournal;
+    if (trace !== undefined) {
+      if (mode !== "read-write") throw new Error("Agent Tail traces require a writable journal");
+      sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+      projectingJournal = new ProjectingEventJournal(sqliteJournal, sink);
+      journal = projectingJournal;
+    }
     return await operation(composeSystem(journal, configs));
   } finally {
-    journal.close();
+    if (trace !== undefined) trace.projectionFailed = projectingJournal?.projectionFailed ?? false;
+    try {
+      sink?.close();
+    } finally {
+      sqliteJournal.close();
+    }
   }
 }
 
@@ -582,7 +619,7 @@ function openJournal(
 }
 
 function composeSystem(
-  journal: SqliteEventJournal,
+  journal: EventJournal,
   configs: readonly ProjectConfig[],
 ) {
   const tasks = new TaskService(journal);
@@ -630,13 +667,17 @@ function composeSystem(
   };
 }
 
-function taskRunResult(task: TaskView): CommandResult {
+function taskRunResult(task: TaskView, tracePath?: string, traceProjectionFailed = false): CommandResult {
   return {
-    exitCode: task.terminalOutcome === "completed" ? 0 : 1,
+    exitCode: task.terminalOutcome === "completed" && !traceProjectionFailed ? 0 : 1,
     value: {
       command: "task.run",
       outcome: task.terminalOutcome,
       task,
+      ...(tracePath === undefined ? {} : {
+        tracePath,
+        traceOutcome: traceProjectionFailed ? "failed" : "completed",
+      }),
     },
   };
 }
@@ -663,26 +704,42 @@ function milestoneIdFor(projectId: string, task: string): string {
   return `milestone-${createHash("sha256").update(`${projectId}\0${task}`, "utf8").digest("hex").slice(0, 12)}`;
 }
 
-function writeAgentTailTrace(tracePath: string, events: readonly import("../contracts/event.js").StoredEvent[]): void {
-  const directory = path.dirname(tracePath);
-  mkdirSync(directory, { recursive: true });
-  const lines = storedEventsToAgentTailEvents(events).map(agentTailEventToJsonLine).join("");
-  writeFileSync(tracePath, lines, "utf8");
+interface AgentTailTraceDestination {
+  readonly trustedRoot: string;
+  readonly canonicalPath: string;
+  projectionFailed: boolean;
 }
 
-function preflightTracePath(tracePath: string): void {
-  const directory = path.dirname(tracePath);
-  mkdirSync(directory, { recursive: true });
-  if (existsSync(tracePath)) {
-    const stat = statSync(tracePath);
-    if (!stat.isFile()) throw new CliFailure("OPERATION_FAILED");
-    const descriptor = openSync(tracePath, "r+");
-    closeSync(descriptor);
-    return;
+function prepareAgentTailTrace(databasePath: string, requestedPath: string): AgentTailTraceDestination {
+  if (!path.isAbsolute(requestedPath)) throw new Error("Agent Tail trace path must be absolute");
+  if (path.normalize(requestedPath) !== requestedPath) {
+    throw new Error("Agent Tail trace path must be normalized");
   }
-  const descriptor = openSync(tracePath, "wx");
-  closeSync(descriptor);
-  rmSync(tracePath, { force: true });
+  const databaseDirectory = path.resolve(path.dirname(databasePath));
+  if (path.dirname(requestedPath) !== databaseDirectory) {
+    throw new Error("Agent Tail trace path must be a direct child of the event journal directory");
+  }
+  const relative = path.relative(databaseDirectory, requestedPath);
+  if (
+    relative.length === 0 ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    throw new Error("Agent Tail trace path must remain inside the event journal directory");
+  }
+  const trustedRoot = realpathSync.native(databaseDirectory);
+  const canonicalPath = path.join(trustedRoot, relative);
+  const canonicalDatabasePath = path.join(trustedRoot, path.basename(databasePath));
+  if (
+    canonicalPath === canonicalDatabasePath ||
+    canonicalPath === `${canonicalDatabasePath}-wal` ||
+    canonicalPath === `${canonicalDatabasePath}-shm`
+  ) {
+    throw new Error("Agent Tail trace path must not alias event journal files");
+  }
+  assertSafeAgentTailJsonlPath(trustedRoot, canonicalPath);
+  return { trustedRoot, canonicalPath, projectionFailed: false };
 }
 
 function assertOperationalJsonFits(value: Record<string, unknown>): void {
