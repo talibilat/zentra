@@ -113,6 +113,7 @@ async function initializeProject(baseDirectory: string): Promise<{
   readonly config: string;
   readonly database: string;
   readonly repository: string;
+  readonly securitySheet: string;
 }> {
   const repository = path.join(baseDirectory, "project");
   await run(gitExecutable, ["init", "-b", "main", repository], baseDirectory);
@@ -130,6 +131,7 @@ async function initializeProject(baseDirectory: string): Promise<{
 
   const config = path.join(baseDirectory, "zentra.project.json");
   const database = path.join(baseDirectory, "journal.sqlite");
+  const securitySheet = path.join(baseDirectory, "SECURITY-SHEET.md");
   writeFileSync(config, `${JSON.stringify({
     projectId: "package-project",
     repositoryPath: repository,
@@ -140,7 +142,34 @@ async function initializeProject(baseDirectory: string): Promise<{
       full: [nodeExecutable, "--test"],
     },
   }, null, 2)}\n`, "utf8");
-  return { config, database, repository };
+  writeFileSync(securitySheet, `# Zentra Security Sheet
+
+## Allowed Repositories
+- ${realpathSync.native(repository)}
+
+## Allowed File Scopes
+- greeting.txt
+
+## Forbidden Paths
+- .env
+
+## Network
+Default: denied
+
+## Secret Handling
+- Do not inherit parent secrets.
+
+## Approval Required Operations
+- external_effect
+
+## Release Boundary
+local_preparation_only
+
+## Stop And Ask Conditions
+- missing_authority
+- forbidden_file_scope
+`, "utf8");
+  return { config, database, repository, securitySheet };
 }
 
 describe("publishable CLI package", () => {
@@ -186,6 +215,7 @@ describe("publishable CLI package", () => {
       "--title", "Run installed package",
       "--file", "greeting.txt",
       "--content", "hello from package\n",
+      "--security-sheet", project.securitySheet,
     ], consumer, { ...subprocessEnvironment, TMPDIR: fixtureTemp });
     expect(operational.stderr).toBe("");
     expect(JSON.parse(operational.stdout)).toMatchObject({

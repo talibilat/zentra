@@ -535,6 +535,10 @@ export class RecoveryService {
         return decision(taskId, "await_reconciliation", "worktree no longer matches the approved uncommitted diff; commit effect is uncertain");
       }
 
+      if (last.type === "task.review_policy_blocked") {
+        return decision(taskId, "await_reconciliation", "review policy requires operator reconciliation before integration");
+      }
+
       if (last.type === "task.commit_observed") {
         return decision(taskId, "await_reconciliation", "Task 8 recorded an uncertain commit result that must not be retried");
       }
