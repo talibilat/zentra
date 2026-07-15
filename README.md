@@ -110,6 +110,9 @@ Zentra measures the complete generated diff, including replaced content and fram
 `--agent-tail-jsonl` is optional and writes each accepted journal event as one append-only UTF-8 JSONL line while the run progresses.
 The destination must be a new absolute normalized direct child of the directory containing the event journal, and symbolic-link targets or existing paths are rejected.
 The JSONL file is a retained projection for Agent Tail inspection; the SQLite event journal remains the source of truth.
+Add `--agent-tail-stream` and pipe stdout to `agent-tail -` for live stdin visualization while retaining the same JSONL lines in the file.
+Agent Tail file input is a snapshot and does not follow appended files.
+In live stream mode stdout contains only Agent Tail JSONL, and Zentra writes its final operational result to stderr.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
@@ -133,6 +136,7 @@ Recovery exits with code `0` for `resume_preparation`, `await_reconciliation`, o
 Recovery exits nonzero for `record_failure`, and unknown tasks also produce `record_failure` without appending an event.
 
 Every operational invocation writes exactly one JSON object, with successful results on standard output and errors or unsuccessful outcomes on standard error.
+Live Agent Tail streaming is the exception because it reserves standard output for JSONL and writes the operational result to standard error.
 
 Commander help remains human-readable text rather than an operational JSON result.
 
