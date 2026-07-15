@@ -79,6 +79,48 @@ describe("AgentTailJsonlFileSink", () => {
       ]);
   });
 
+  it("streams the exact retained lines in accepted event order", () => {
+    const { root } = fixture();
+    const tracePath = path.join(root, "streamed.jsonl");
+    let streamed = "";
+    const sink = AgentTailJsonlFileSink.open(root, tracePath, (line) => {
+      streamed += line;
+    });
+
+    sink.append([event(), event({
+      type: "task.completed",
+      eventId: "event-2",
+      streamVersion: 2,
+      globalPosition: 4,
+    })]);
+    sink.close();
+
+    expect(streamed).toBe(readFileSync(tracePath, "utf8"));
+  });
+
+  it("continues retaining events after the live stream fails", () => {
+    const { root } = fixture();
+    const tracePath = path.join(root, "failed-stream.jsonl");
+    let attempts = 0;
+    const sink = AgentTailJsonlFileSink.open(root, tracePath, () => {
+      attempts += 1;
+      throw new Error("closed stream");
+    });
+
+    expect(() => sink.append([event()])).not.toThrow();
+    expect(sink.streamFailed).toBe(true);
+    expect(() => sink.append([event({
+      type: "task.completed",
+      eventId: "event-2",
+      streamVersion: 2,
+      globalPosition: 2,
+    })])).not.toThrow();
+    sink.close();
+
+    expect(attempts).toBe(1);
+    expect(readFileSync(tracePath, "utf8").trimEnd().split("\n")).toHaveLength(2);
+  });
+
   it("rejects existing destinations without modifying their bytes", () => {
     const { root } = fixture();
     const tracePath = path.join(root, "existing.jsonl");

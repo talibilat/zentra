@@ -20,8 +20,13 @@ export class AgentTailJsonlFileSink {
   private readonly eventIds = new Set<string>();
   private lastGlobalPosition = -1;
   private closed = false;
+  private liveStreamFailed = false;
 
-  static open(trustedRoot: string, tracePath: string): AgentTailJsonlFileSink {
+  static open(
+    trustedRoot: string,
+    tracePath: string,
+    liveWriter?: (line: string) => void,
+  ): AgentTailJsonlFileSink {
     assertSafeAgentTailJsonlPath(trustedRoot, tracePath);
     let descriptor: number;
     try {
@@ -44,14 +49,21 @@ export class AgentTailJsonlFileSink {
       if (!fstatSync(descriptor).isFile()) {
         throw new Error("Agent Tail trace destination must be a regular file");
       }
-      return new AgentTailJsonlFileSink(descriptor);
+      return new AgentTailJsonlFileSink(descriptor, liveWriter);
     } catch (error) {
       closeSync(descriptor);
       throw error;
     }
   }
 
-  private constructor(private readonly descriptor: number) {}
+  private constructor(
+    private readonly descriptor: number,
+    private readonly liveWriter?: (line: string) => void,
+  ) {}
+
+  get streamFailed(): boolean {
+    return this.liveStreamFailed;
+  }
 
   append(events: readonly StoredEvent[]): void {
     if (this.closed) throw new Error("Agent Tail trace sink is closed");
@@ -74,6 +86,14 @@ export class AgentTailJsonlFileSink {
     this.eventIds.clear();
     for (const eventId of pendingIds) this.eventIds.add(eventId);
     this.lastGlobalPosition = pendingPosition;
+
+    if (this.liveWriter !== undefined && !this.liveStreamFailed) {
+      try {
+        for (const line of lines) this.liveWriter(line.toString("utf8"));
+      } catch {
+        this.liveStreamFailed = true;
+      }
+    }
   }
 
   close(): void {

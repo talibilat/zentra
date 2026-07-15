@@ -66,6 +66,10 @@ const WORKER_ID = "zentra-deterministic-worker";
 const REVIEWER_ID = "zentra-deterministic-reviewer";
 const WORKER_TIMEOUT_MS = 120_000;
 const MAX_OPERATIONAL_JSON_BYTES = 16_384;
+const MAX_PENDING_LIVE_OUTPUT_BYTES = 8 * 1_048_576;
+const LIVE_OUTPUT_FLUSH_TIMEOUT_MS = 5_000;
+const LIVE_OUTPUT_DESTROY_TIMEOUT_MS = 1_000;
+let forceDirectExit = false;
 const MAX_TASK_ID_LENGTH = 128;
 const MAX_PROJECT_ID_BYTES = 128;
 const MAX_TITLE_BYTES = 512;
@@ -163,6 +167,7 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
   readonly authority: string;
   readonly requiresApproval?: boolean;
   readonly agentTailJsonl?: string;
+  readonly agentTailStream?: boolean;
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
@@ -174,6 +179,7 @@ interface PolicyPreviewOptions {
 
 interface MilestonePreviewOptions extends PolicyPreviewOptions, ProjectOptions, Pick<DatabaseTaskOptions, "database"> {
   readonly agentTailJsonl: string;
+  readonly agentTailStream?: boolean;
   readonly task: string;
 }
 
@@ -185,6 +191,7 @@ interface MilestoneStatusOptions {
 interface CommandResult {
   readonly exitCode: number;
   readonly value: Record<string, unknown>;
+  readonly streamOutput?: boolean;
 }
 
 class CliFailure extends Error {
@@ -199,6 +206,8 @@ export async function runCli(
 ): Promise<number> {
   const userArgv = argv[0] === "--" ? argv.slice(1) : argv;
   const stdout = runtime.stdout ?? ((value: string) => process.stdout.write(value));
+  const liveOutput = runtime.stdout === undefined ? new LiveStdoutOutput() : undefined;
+  const liveStdout = runtime.stdout ?? liveOutput!.write;
   const stderr = runtime.stderr ?? ((value: string) => process.stderr.write(value));
   const signalSource = runtime.signalSource ?? process;
   const controller = new AbortController();
@@ -207,22 +216,33 @@ export async function runCli(
   signalSource.on("SIGTERM", abort);
 
   const commandResults: CommandResult[] = [];
-  const program = createProgram(stdout, (result) => {
+  const program = createProgram(stdout, liveStdout, (result) => {
     commandResults.push(result);
   }, controller.signal, runtime.fixtureAnchor);
 
   try {
     await program.parseAsync([...userArgv], { from: "user" });
-    const commandResult = commandResults[0];
+    let commandResult = commandResults[0];
     if (commandResult === undefined) {
       throw new CliFailure("COMMAND_REQUIRED");
+    }
+    if (
+      commandResult.streamOutput === true &&
+      liveOutput !== undefined &&
+      !await liveOutput.flush()
+    ) {
+      commandResult = {
+        ...commandResult,
+        exitCode: 1,
+        value: { ...commandResult.value, traceOutcome: "failed" },
+      };
     }
     const serialized = serializeJson(commandResult.value);
     if (Buffer.byteLength(serialized) > MAX_OPERATIONAL_JSON_BYTES) {
       writeFixedError(stderr, commandLabel(userArgv), "OUTPUT_TOO_LARGE");
       return 1;
     }
-    writeSerialized(commandResult.exitCode === 0 ? stdout : stderr, serialized);
+    writeSerialized(commandResult.exitCode === 0 && commandResult.streamOutput !== true ? stdout : stderr, serialized);
     return commandResult.exitCode;
   } catch (error) {
     if (error instanceof CommanderError && error.code === "commander.helpDisplayed") {
@@ -232,6 +252,7 @@ export async function runCli(
     writeFixedError(stderr, commandLabel(userArgv), failure.code);
     return 1;
   } finally {
+    liveOutput?.dispose();
     signalSource.off("SIGINT", abort);
     signalSource.off("SIGTERM", abort);
   }
@@ -239,6 +260,7 @@ export async function runCli(
 
 function createProgram(
   stdout: WriteOutput,
+  liveStdout: WriteOutput,
   setResult: (result: CommandResult) => void,
   signal: AbortSignal,
   fixtureAnchor: string | URL | undefined,
@@ -308,6 +330,11 @@ function createProgram(
     .requiredOption("--model-sheet <path>", "Markdown model sheet")
     .requiredOption("--security-sheet <path>", "Markdown security sheet")
     .requiredOption("--agent-tail-jsonl <path>", "Agent Tail JSONL trace path")
+    .option(
+      "--agent-tail-stream",
+      "stream JSONL to agent-tail - over stdin; Agent Tail does not follow appended files",
+      false,
+    )
     .requiredOption("--task <sentence>", "natural-language milestone task")
     .action((options: MilestonePreviewOptions) => {
       assertSafeTitle(options.task);
@@ -397,17 +424,21 @@ function createProgram(
         stopAndAskBoundaries: security.stopAndAskConditions,
       } satisfies Record<string, unknown>;
       assertOperationalJsonFits(previewValue);
-      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+      const trace = prepareAgentTailTrace(
+        options.database,
+        options.agentTailJsonl,
+        options.agentTailStream === true ? liveStdout : undefined,
+      );
       const sqliteJournal = new SqliteEventJournal(options.database);
       let sink: AgentTailJsonlFileSink | undefined;
       let journal: ProjectingEventJournal | undefined;
       let stored;
       try {
-        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
         journal = new ProjectingEventJournal(sqliteJournal, sink);
         stored = journal.append(milestoneId, 0, events);
       } finally {
-        trace.projectionFailed = journal?.projectionFailed ?? false;
+        trace.projectionFailed = (journal?.projectionFailed ?? false) || (sink?.streamFailed ?? false);
         try {
           sink?.close();
         } finally {
@@ -418,6 +449,7 @@ function createProgram(
       if (view === null) throw new CliFailure("OPERATION_FAILED");
       setResult({
         exitCode: trace.projectionFailed ? 1 : 0,
+        streamOutput: options.agentTailStream === true,
         value: {
           ...previewValue,
           milestone: view,
@@ -477,6 +509,11 @@ function createProgram(
     .option("--authority <authority>", "review policy authority level", "workspace_write")
     .option("--requires-approval", "mark the task as requiring approval before integration", false)
     .option("--agent-tail-jsonl <path>", "append Agent Tail JSONL to a retained trace file")
+    .option(
+      "--agent-tail-stream",
+      "stream retained JSONL to agent-tail - over stdin; Agent Tail does not follow appended files",
+      false,
+    )
     .action(async (options: RunOptions) => {
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
@@ -501,9 +538,16 @@ function createProgram(
       ) {
         throw new CliFailure("INVALID_SECURITY_SHEET");
       }
+      if (options.agentTailStream === true && options.agentTailJsonl === undefined) {
+        throw new CliFailure("INVALID_COMMAND");
+      }
       const trace = options.agentTailJsonl === undefined
         ? undefined
-        : prepareAgentTailTrace(options.database, options.agentTailJsonl);
+        : prepareAgentTailTrace(
+          options.database,
+          options.agentTailJsonl,
+          options.agentTailStream === true ? liveStdout : undefined,
+        );
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
@@ -530,7 +574,10 @@ function createProgram(
           });
           return taskView;
         }, trace);
-        setResult(taskRunResult(result, options.agentTailJsonl, trace?.projectionFailed ?? false));
+        setResult({
+          ...taskRunResult(result, options.agentTailJsonl, trace?.projectionFailed ?? false),
+          streamOutput: options.agentTailStream === true,
+        });
       } finally {
         workerFixture.cleanup();
       }
@@ -589,13 +636,15 @@ async function withSystem<T>(
     let journal: EventJournal = sqliteJournal;
     if (trace !== undefined) {
       if (mode !== "read-write") throw new Error("Agent Tail traces require a writable journal");
-      sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+      sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
       projectingJournal = new ProjectingEventJournal(sqliteJournal, sink);
       journal = projectingJournal;
     }
     return await operation(composeSystem(journal, configs));
   } finally {
-    if (trace !== undefined) trace.projectionFailed = projectingJournal?.projectionFailed ?? false;
+    if (trace !== undefined) {
+      trace.projectionFailed = (projectingJournal?.projectionFailed ?? false) || (sink?.streamFailed ?? false);
+    }
     try {
       sink?.close();
     } finally {
@@ -707,10 +756,15 @@ function milestoneIdFor(projectId: string, task: string): string {
 interface AgentTailTraceDestination {
   readonly trustedRoot: string;
   readonly canonicalPath: string;
+  readonly liveWriter?: WriteOutput;
   projectionFailed: boolean;
 }
 
-function prepareAgentTailTrace(databasePath: string, requestedPath: string): AgentTailTraceDestination {
+function prepareAgentTailTrace(
+  databasePath: string,
+  requestedPath: string,
+  liveWriter?: WriteOutput,
+): AgentTailTraceDestination {
   if (!path.isAbsolute(requestedPath)) throw new Error("Agent Tail trace path must be absolute");
   if (path.normalize(requestedPath) !== requestedPath) {
     throw new Error("Agent Tail trace path must be normalized");
@@ -739,7 +793,84 @@ function prepareAgentTailTrace(databasePath: string, requestedPath: string): Age
     throw new Error("Agent Tail trace path must not alias event journal files");
   }
   assertSafeAgentTailJsonlPath(trustedRoot, canonicalPath);
-  return { trustedRoot, canonicalPath, projectionFailed: false };
+  return {
+    trustedRoot,
+    canonicalPath,
+    ...(liveWriter === undefined ? {} : { liveWriter }),
+    projectionFailed: false,
+  };
+}
+
+class LiveStdoutOutput {
+  private readonly pending = new Set<Promise<void>>();
+  private pendingBytes = 0;
+  private failed = false;
+  private readonly onError = (): void => {
+    this.failed = true;
+  };
+
+  constructor() {
+    process.stdout.on("error", this.onError);
+  }
+
+  readonly write = (value: string): void => {
+    if (this.failed) throw new Error("Agent Tail live stream is unavailable");
+    const bytes = Buffer.byteLength(value, "utf8");
+    if (bytes > MAX_PENDING_LIVE_OUTPUT_BYTES - this.pendingBytes) {
+      this.failed = true;
+      throw new Error("Agent Tail live stream output exceeded its pending byte limit");
+    }
+    this.pendingBytes += bytes;
+    let completion: Promise<void>;
+    completion = new Promise((resolve) => {
+      process.stdout.write(value, (error) => {
+        if (error !== null && error !== undefined) this.failed = true;
+        this.pendingBytes -= bytes;
+        this.pending.delete(completion);
+        resolve();
+      });
+    });
+    this.pending.add(completion);
+  };
+
+  async flush(): Promise<boolean> {
+    if (this.pending.size > 0) {
+      const flushed = await waitForPending(this.pending, LIVE_OUTPUT_FLUSH_TIMEOUT_MS);
+      if (!flushed) {
+        this.failed = true;
+        forceDirectExit = true;
+        process.stdout.destroy();
+        await waitForPending(this.pending, LIVE_OUTPUT_DESTROY_TIMEOUT_MS);
+      }
+    }
+    return !this.failed;
+  }
+
+  dispose(): void {
+    if (this.pending.size === 0) {
+      process.stdout.off("error", this.onError);
+      return;
+    }
+    void Promise.all([...this.pending]).finally(() => {
+      process.stdout.off("error", this.onError);
+    });
+  }
+}
+
+async function waitForPending(
+  pending: ReadonlySet<Promise<void>>,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (pending.size === 0) return true;
+  let timer: NodeJS.Timeout | undefined;
+  const completed = await Promise.race([
+    Promise.all([...pending]).then(() => true),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return completed;
 }
 
 function assertOperationalJsonFits(value: Record<string, unknown>): void {
@@ -962,6 +1093,14 @@ function isDirectExecution(entryPoint: string | undefined): boolean {
 
 if (isDirectExecution(process.argv[1])) {
   void runCli(process.argv.slice(2)).then((exitCode) => {
-    process.exitCode = exitCode;
+    if (!forceDirectExit) {
+      process.exitCode = exitCode;
+      return;
+    }
+    const fallback = setTimeout(() => process.exit(exitCode), LIVE_OUTPUT_DESTROY_TIMEOUT_MS);
+    process.stderr.write("", () => {
+      clearTimeout(fallback);
+      process.exit(exitCode);
+    });
   });
 }

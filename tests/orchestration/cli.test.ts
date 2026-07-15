@@ -424,6 +424,106 @@ describe("Zentra CLI", () => {
     );
   });
 
+  it("streams the retained milestone trace to stdout for live Agent Tail input", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "live-milestone.jsonl");
+    let stdout = "";
+    let stderr = "";
+
+    const code = await runCli([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--agent-tail-stream",
+      "--task", "Stream an Agent Tail milestone preview",
+    ], {
+      stdout: (value) => { stdout += value; },
+      stderr: (value) => { stderr += value; },
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toBe(readFileSync(tracePath, "utf8"));
+    expect(stdout.trimEnd().split("\n")).toHaveLength(2);
+    expect(JSON.parse(stderr) as unknown).toMatchObject({
+      command: "milestone.preview",
+      tracePath,
+      traceOutcome: "completed",
+    });
+  });
+
+  it("preserves accepted milestone state when the live stream fails", async () => {
+    const testFixture = await fixture();
+    const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
+    const tracePath = path.join(testFixture.baseDirectory, "failed-live-milestone.jsonl");
+    let writes = 0;
+    let stderr = "";
+
+    const code = await runCli([
+      "milestone", "preview",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--model-sheet", modelSheetPath,
+      "--security-sheet", securitySheetPath,
+      "--agent-tail-jsonl", tracePath,
+      "--agent-tail-stream",
+      "--task", "Keep accepted state after stream failure",
+    ], {
+      stdout: () => {
+        writes += 1;
+        throw new Error("closed stream");
+      },
+      stderr: (value) => { stderr += value; },
+    });
+
+    const result = JSON.parse(stderr) as {
+      milestone: { milestoneId: string; lifecycle: string };
+      traceOutcome: string;
+    };
+    expect(code).toBe(1);
+    expect(writes).toBe(1);
+    expect(result).toMatchObject({ milestone: { lifecycle: "ready" }, traceOutcome: "failed" });
+    expect(eventTypes(testFixture.databasePath, result.milestone.milestoneId)).toEqual([
+      "milestone.created",
+      "milestone.plan_created",
+    ]);
+    expect(readFileSync(tracePath, "utf8").trimEnd().split("\n")).toHaveLength(2);
+  });
+
+  it("documents that live Agent Tail uses stdin instead of following files", async () => {
+    let output = "";
+
+    const code = await runCli(["task", "run", "--help"], {
+      stdout: (value) => { output += value; },
+      stderr: () => {},
+    });
+
+    expect(code).toBe(0);
+    expect(output).toContain("--agent-tail-stream");
+    expect(output).toContain("agent-tail -");
+    expect(output).toContain("stdin");
+    expect(output).toContain("does not follow appended files");
+  });
+
+  it("requires a retained trace path before enabling live Agent Tail output", async () => {
+    const testFixture = await fixture();
+
+    const result = await invoke([
+      ...runArguments(testFixture, "task-live-without-file"),
+      "--agent-tail-stream",
+    ]);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "task.run", error: { code: "INVALID_COMMAND" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+  });
+
   it("rejects milestone preview when sheets do not authorize the repository or planner role", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
@@ -664,14 +764,25 @@ describe("Zentra CLI", () => {
   it("runs the complete tracer bullet in a real repository and replays exact status", async () => {
     const testFixture = await fixture();
     const tracePath = path.join(testFixture.baseDirectory, "task-cli.jsonl");
+    let stdout = "";
+    let stderr = "";
 
-    const run = await invoke([
+    const code = await runCli([
       ...runArguments(testFixture),
       "--agent-tail-jsonl", tracePath,
-    ]);
+      "--agent-tail-stream",
+    ], {
+      stdout: (value) => { stdout += value; },
+      stderr: (value) => { stderr += value; },
+    });
+    const run = {
+      code,
+      stdout,
+      stderr,
+      json: JSON.parse(stderr) as Record<string, unknown>,
+    };
     expect(run).toMatchObject({
       code: 0,
-      stderr: "",
       json: {
         command: "task.run",
         outcome: "completed",
@@ -684,6 +795,7 @@ describe("Zentra CLI", () => {
         },
       },
     });
+    expect(stdout).toBe(readFileSync(tracePath, "utf8"));
     expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:greeting.txt"]))
       .toBe("hello from CLI");
     expect(existsSync(path.join(testFixture.baseDirectory, "worktrees", "task-cli"))).toBe(false);
