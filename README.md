@@ -100,11 +100,16 @@ pnpm start -- task run \
   --task-id task-greeting \
   --title "Update greeting" \
   --file greeting.txt \
-  --content $'hello from Zentra\n'
+  --content $'hello from Zentra\n' \
+  --security-sheet /absolute/path/to/SECURITY-SHEET.md \
+  --agent-tail-jsonl /absolute/path/to/task-greeting.jsonl
 ```
 
 `--content` accepts at most 522,240 UTF-8 bytes, reserving 4 KiB for fixed Git headers and another content-sized allowance for the worst case in which Git adds a prefix to every one-byte line.
 Zentra measures the complete generated diff, including replaced content and framing, against the 1 MiB byte boundary and fails closed without recording a partial patch when that complete diff is too large.
+`--agent-tail-jsonl` is optional and writes each accepted journal event as one append-only UTF-8 JSONL line while the run progresses.
+The destination must be a new absolute normalized direct child of the directory containing the event journal, and symbolic-link targets or existing paths are rejected.
+The JSONL file is a retained projection for Agent Tail inspection; the SQLite event journal remains the source of truth.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 

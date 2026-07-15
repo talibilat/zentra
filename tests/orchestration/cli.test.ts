@@ -361,7 +361,7 @@ describe("Zentra CLI", () => {
   it("creates a durable natural-language milestone preview without execution effects", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
-    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+    const tracePath = path.join(testFixture.baseDirectory, "milestone.jsonl");
 
     const result = await invoke([
       "milestone", "preview",
@@ -427,7 +427,7 @@ describe("Zentra CLI", () => {
   it("rejects milestone preview when sheets do not authorize the repository or planner role", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
-    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+    const tracePath = path.join(testFixture.baseDirectory, "milestone.jsonl");
     writeFileSync(securitySheetPath, readFileSync(securitySheetPath, "utf8").replace(
       realpathSync.native(testFixture.repositoryPath),
       realpathSync.native(testFixture.baseDirectory),
@@ -499,7 +499,7 @@ describe("Zentra CLI", () => {
   it("does not erase an existing trace when a duplicate milestone preview append fails", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
-    const tracePath = path.join(testFixture.baseDirectory, "agent-tail", "milestone.jsonl");
+    const tracePath = path.join(testFixture.baseDirectory, "milestone.jsonl");
     const args = [
       "milestone", "preview",
       "--config", testFixture.configPath,
@@ -527,8 +527,8 @@ describe("Zentra CLI", () => {
   it("lists and inspects milestone previews without worker startup", async () => {
     const testFixture = await fixture();
     const { modelSheetPath, securitySheetPath } = writePolicySheets(testFixture);
-    const firstTrace = path.join(testFixture.baseDirectory, "agent-tail", "first.jsonl");
-    const secondTrace = path.join(testFixture.baseDirectory, "agent-tail", "second.jsonl");
+    const firstTrace = path.join(testFixture.baseDirectory, "first.jsonl");
+    const secondTrace = path.join(testFixture.baseDirectory, "second.jsonl");
 
     const first = await invoke([
       "milestone", "preview",
@@ -609,7 +609,7 @@ describe("Zentra CLI", () => {
     });
     expect(existsSync(testFixture.databasePath)).toBe(false);
 
-    const longTracePath = path.join(testFixture.baseDirectory, "agent-tail", `${"x".repeat(300)}.jsonl`);
+    const longTracePath = path.join(testFixture.baseDirectory, `${"x".repeat(300)}.jsonl`);
     const longNameResult = await invoke([
       "milestone", "preview",
       "--config", testFixture.configPath,
@@ -627,16 +627,55 @@ describe("Zentra CLI", () => {
     expect(existsSync(testFixture.databasePath)).toBe(false);
   });
 
+  it("rejects task trace destinations outside the journal directory or through a symlink", async () => {
+    const testFixture = await fixture();
+    const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-cli-trace-outside-")));
+    temporaryDirectories.push(outside);
+    const outsideTrace = path.join(outside, "outside.jsonl");
+
+    const outsideResult = await invoke([
+      ...runArguments(testFixture, "task-outside-trace"),
+      "--agent-tail-jsonl", outsideTrace,
+    ]);
+    expect(outsideResult).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "task.run", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(outsideTrace)).toBe(false);
+
+    const linkedDirectory = path.join(testFixture.baseDirectory, "linked-traces");
+    symlinkSync(outside, linkedDirectory);
+    const linkedTrace = path.join(linkedDirectory, "linked.jsonl");
+    const linkedResult = await invoke([
+      ...runArguments(testFixture, "task-linked-trace"),
+      "--agent-tail-jsonl", linkedTrace,
+    ]);
+    expect(linkedResult).toMatchObject({
+      code: 1,
+      stdout: "",
+      json: { command: "task.run", error: { code: "OPERATION_FAILED" } },
+    });
+    expect(existsSync(testFixture.databasePath)).toBe(false);
+    expect(existsSync(path.join(outside, "linked.jsonl"))).toBe(false);
+  });
+
   it("runs the complete tracer bullet in a real repository and replays exact status", async () => {
     const testFixture = await fixture();
+    const tracePath = path.join(testFixture.baseDirectory, "task-cli.jsonl");
 
-    const run = await invoke(runArguments(testFixture));
+    const run = await invoke([
+      ...runArguments(testFixture),
+      "--agent-tail-jsonl", tracePath,
+    ]);
     expect(run).toMatchObject({
       code: 0,
       stderr: "",
       json: {
         command: "task.run",
         outcome: "completed",
+        tracePath,
         task: {
           taskId: "task-cli",
           projectId: "cli-project",
@@ -654,6 +693,20 @@ describe("Zentra CLI", () => {
       "refs/heads/ticket/task-cli",
     ]);
     expect(ticketRef.exitCode).not.toBe(0);
+
+    const journal = new SqliteEventJournal(testFixture.databasePath);
+    const stored = journal.readStream("task-cli");
+    journal.close();
+    const traceLines = readFileSync(tracePath, "utf8").trimEnd().split("\n");
+    const traceEvents = traceLines.map((line) => JSON.parse(line) as {
+      event_id: string;
+      kind: string;
+      sequence: number;
+    });
+    expect(traceEvents.map((event) => event.event_id)).toEqual(stored.map((event) => event.eventId));
+    expect(traceEvents.map((event) => event.kind)).toEqual(stored.map((event) => event.type));
+    expect(traceEvents.map((event) => event.sequence)).toEqual(stored.map((event) => event.globalPosition));
+    expect(traceEvents.at(-1)?.kind).toBe("task.completed");
 
     const status = await invoke([
       "task", "status",
@@ -687,10 +740,12 @@ describe("Zentra CLI", () => {
   it("denies an adversarial diff that passes focused validation without committing it", async () => {
     const testFixture = await fixture();
     const initialHead = await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"]);
+    const tracePath = path.join(testFixture.baseDirectory, "denied.jsonl");
     const args = [
       ...runArguments(testFixture, "task-dangerous-review"),
       "--file", "auth.ts",
       "--content", "export const requireAuthentication = false;\n",
+      "--agent-tail-jsonl", tracePath,
     ];
 
     const result = await invoke(args);
@@ -707,6 +762,9 @@ describe("Zentra CLI", () => {
     expect(await gitOk(testFixture.repositoryPath, ["rev-parse", "HEAD"])).toBe(initialHead);
     expect(await gitOk(testFixture.repositoryPath, ["show", "zentra/integration:auth.ts"]))
       .toBe("export const requireAuthentication = true;");
+    const traceEvents = readFileSync(tracePath, "utf8").trimEnd().split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; operation: { status: string } });
+    expect(traceEvents.at(-1)).toMatchObject({ kind: "task.denied", operation: { status: "denied" } });
   });
 
   it("pauses before integration when review policy security scope does not allow the touched file", async () => {
@@ -834,7 +892,12 @@ local_preparation_only
 
   it("returns nonzero with the canonical failed outcome when validation rejects the change", async () => {
     const testFixture = await fixture();
-    const args = [...runArguments(testFixture), "--content", "wrong greeting\n"];
+    const tracePath = path.join(testFixture.baseDirectory, "failed.jsonl");
+    const args = [
+      ...runArguments(testFixture),
+      "--content", "wrong greeting\n",
+      "--agent-tail-jsonl", tracePath,
+    ];
 
     const result = await invoke(args);
 
@@ -846,6 +909,11 @@ local_preparation_only
         outcome: "failed",
         task: { lifecycle: "terminal", terminalOutcome: "failed" },
       },
+    });
+    const lastTraceEvent = readFileSync(tracePath, "utf8").trimEnd().split("\n").at(-1);
+    expect(JSON.parse(lastTraceEvent!) as unknown).toMatchObject({
+      kind: "task.failed",
+      operation: { status: "failed" },
     });
   });
 
@@ -1454,7 +1522,11 @@ local_preparation_only
   it("leaves an interrupted worktree creation nonterminal on SIGINT", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
-    const pending = invoke(runArguments(testFixture, "task-signal"), signals);
+    const tracePath = path.join(testFixture.baseDirectory, "uncertain.jsonl");
+    const pending = invoke([
+      ...runArguments(testFixture, "task-signal"),
+      "--agent-tail-jsonl", tracePath,
+    ], signals);
     setTimeout(() => signals.emit("SIGINT"), 10);
 
     const result = await pending;
@@ -1466,6 +1538,10 @@ local_preparation_only
       outcome: null,
       task: { taskId: "task-signal", terminalOutcome: null },
     });
+    const traceKinds = readFileSync(tracePath, "utf8").trimEnd().split("\n")
+      .map((line) => (JSON.parse(line) as { kind: string }).kind);
+    expect(traceKinds[0]).toBe("task.created");
+    expect(traceKinds).not.toContain("task.cancelled");
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
