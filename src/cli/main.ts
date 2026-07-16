@@ -320,20 +320,8 @@ function createProgram(
     .requiredOption("--model-sheet <path>", "Markdown model sheet")
     .requiredOption("--security-sheet <path>", "Markdown security sheet")
     .action((options: PolicyPreviewOptions) => {
-      let model;
-      try {
-        model = loadModelSheet(options.modelSheet);
-      } catch (error) {
-        if (error instanceof ModelSheetError) throw new CliFailure("INVALID_MODEL_SHEET");
-        throw error;
-      }
-      let security;
-      try {
-        security = loadSecuritySheet(options.securitySheet);
-      } catch (error) {
-        if (error instanceof SecuritySheetError) throw new CliFailure("INVALID_SECURITY_SHEET");
-        throw error;
-      }
+      const model = loadModelSheetForCli(options.modelSheet);
+      const security = loadSecuritySheetForCli(options.securitySheet);
       setResult({
         exitCode: 0,
         value: {
