@@ -361,7 +361,7 @@ function createProgram(
       }
       const firstModel = model.models.find((candidate) => candidate.roles.includes("planner"));
       if (firstModel === undefined) throw new CliFailure("INVALID_MODEL_SHEET");
-      const milestoneId = milestoneIdFor(project.projectId, options.task);
+      const milestoneId = `milestone-${createHash("sha256").update(`${project.projectId}\0${options.task}`, "utf8").digest("hex").slice(0, 12)}`;
       const taskId = `${milestoneId}-task-1`;
       const ownedPath = security.allowedFileScopes[0]!;
       const plan = {
@@ -878,10 +878,6 @@ function loadSecuritySheetForCli(sheetPath: string) {
     if (error instanceof SecuritySheetError) throw new CliFailure("INVALID_SECURITY_SHEET");
     throw error;
   }
-}
-
-function milestoneIdFor(projectId: string, task: string): string {
-  return `milestone-${createHash("sha256").update(`${projectId}\0${task}`, "utf8").digest("hex").slice(0, 12)}`;
 }
 
 interface AgentTailTraceDestination {
