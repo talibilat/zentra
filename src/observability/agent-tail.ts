@@ -62,7 +62,10 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     timestamp: event.recordedAt,
     kind: event.type,
     actor: Object.freeze(actorFor(event)),
-    operation: Object.freeze(operationFor(event)),
+    operation: Object.freeze({
+      name: operationName(event.type),
+      status: operationStatus(event),
+    }),
     attributes: Object.freeze({
       zentra: Object.freeze({
         event_id: event.eventId,
@@ -171,13 +174,6 @@ function actorFor(event: StoredEvent): AgentTailActor {
     return { id: "zentra-artifact-store", role: "artifact_store" };
   }
   return { id: "zentra-orchestrator", role: "orchestrator" };
-}
-
-function operationFor(event: StoredEvent): AgentTailOperation {
-  return {
-    name: operationName(event.type),
-    status: operationStatus(event),
-  };
 }
 
 function operationName(type: string): string {
