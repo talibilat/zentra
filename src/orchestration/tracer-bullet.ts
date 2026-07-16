@@ -566,7 +566,7 @@ export class TracerBulletOrchestrator {
         return this.current(input.taskId);
       }
       try {
-        await validateIntegrationReceipt({
+        await verifyCompletedIntegrationReceipt({
           project,
           taskId: input.taskId,
           sourceCommit,
@@ -965,7 +965,7 @@ function validateRelativePath(candidate: string): void {
   }
 }
 
-async function validateIntegrationReceipt(input: {
+export async function verifyCompletedIntegrationReceipt(input: {
   readonly project: {
     readonly projectId: string;
     readonly repositoryPath: string;

@@ -9,6 +9,7 @@ export const MIN_VALIDATION_TIMEOUT_MS = 100;
 export const MAX_VALIDATION_TIMEOUT_MS = 30 * 60 * 1_000;
 export const DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_FULL_VALIDATION_TIMEOUT_MS = 5 * 60 * 1_000;
+export const DEFAULT_INTEGRATION_BRANCH = "zentra/integration";
 
 export const ValidationTimeoutSchema = z
   .number()
@@ -204,7 +205,7 @@ const CommandSchema = z
 export const ProjectConfigSchema = z.object({
   projectId: z.string().min(1),
   repositoryPath: z.string().refine(path.isAbsolute),
-  integrationBranch: z.string().refine(isSafeBranchName, {
+  integrationBranch: z.string().default(DEFAULT_INTEGRATION_BRANCH).refine(isSafeBranchName, {
     message: "Integration branch must be a safe Git branch name",
   }),
   worktreeRoot: z.string().refine(path.isAbsolute),

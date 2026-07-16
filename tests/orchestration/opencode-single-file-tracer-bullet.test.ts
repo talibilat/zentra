@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -16,14 +17,28 @@ import { ValidationRunner } from "../../src/capabilities/validation-runner.js";
 import type { PlannedTask } from "../../src/contracts/milestone.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
 import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
+import { IntegrationQueue } from "../../src/integration/integration-queue.js";
 import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
-import { OpenCodeSingleFileTracerBullet } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
+import {
+  OpenCodeIntegratedSingleFileTracer,
+  OpenCodeSingleFileTracerBullet,
+} from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
 import { WriterWorktreeCapsule } from "../../src/orchestration/writer-worktree-capsule.js";
 import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
-import type { ProjectConfig } from "../../src/projects/project-config.js";
+import {
+  ProjectConfigSchema,
+  type ProjectConfig,
+} from "../../src/projects/project-config.js";
+import { ReviewGate } from "../../src/reviews/review-gate.js";
+import {
+  canonicalValidationDigest,
+  type ReviewDecision,
+  type ReviewInput,
+  type ReviewerAdapter,
+} from "../../src/reviews/reviewer-adapter.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
@@ -104,9 +119,74 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     ]);
     expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
   });
+
+  it("commits the reviewed file and integrates through the validated default branch candidate", async () => {
+    const fixture = await fixtureProject("hello from OpenCode");
+    const result = await runTracer(fixture, "hello from OpenCode", true);
+
+    expect(result.view).toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed" });
+    expect(existsSync(result.worktree)).toBe(false);
+    expect(await gitOutput(fixture.repository, [
+      "show",
+      "zentra/integration:src/greeting.mjs",
+    ])).toContain("hello from OpenCode");
+    expect(await gitOutput(fixture.repository, ["show", "main:src/greeting.mjs"]))
+      .toContain("'hello'");
+    expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
+    expect(result.events.map((event) => event.type)).toEqual(expect.arrayContaining([
+      "task.review_requested",
+      "artifact.review_report_recorded",
+      "task.review_approved",
+      "task.integration_started",
+      "artifact.integration_receipt_recorded",
+      "task.integration_prepared",
+      "task.integration_observed",
+      "task.cleanup_started",
+      "task.cleanup_completed",
+      "task.completed",
+    ]));
+    const receiptEvent = result.events.find((event) => event.type === "task.integration_prepared");
+    expect(receiptEvent?.payload).toMatchObject({
+      receipt: {
+        outcome: "completed",
+        taskId: "writer-tracer",
+        projectId: "fixture",
+        validation: { name: "full", outcome: "completed", exitCode: 0 },
+      },
+    });
+    const integrationStarted = result.events.find((event) => event.type === "task.integration_started");
+    const sourceCommit = (integrationStarted?.payload as { sourceCommit?: string }).sourceCommit;
+    expect(sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect((await gitOutput(fixture.repository, [
+      "diff-tree",
+      "--no-commit-id",
+      "--name-only",
+      "-r",
+      sourceCommit!,
+    ])).trim()).toBe("src/greeting.mjs");
+  });
+
+  it("preserves the committed ticket worktree when full candidate validation fails", async () => {
+    const fixture = await fixtureProject("hello from OpenCode", true);
+    const originalIntegration = await gitOutput(fixture.repository, ["rev-parse", "HEAD"]);
+    const result = await runTracer(fixture, "hello from OpenCode", true);
+
+    expect(result.view).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
+    expect(existsSync(result.worktree)).toBe(true);
+    expect(await gitOutput(fixture.repository, ["rev-parse", "zentra/integration"]))
+      .toBe(originalIntegration);
+    expect(await gitOutput(fixture.repository, ["rev-parse", "ticket/writer-tracer"]))
+      .toMatch(/^[0-9a-f]{40}\n$/);
+    expect(result.events.map((event) => event.type)).toEqual(expect.arrayContaining([
+      "task.integration_started",
+      "artifact.integration_receipt_recorded",
+      "task.failed",
+    ]));
+    expect(result.events.map((event) => event.type)).not.toContain("task.cleanup_started");
+  });
 });
 
-async function runTracer(fixture: Fixture, replacement: string): Promise<{
+async function runTracer(fixture: Fixture, replacement: string, integrate = false): Promise<{
   view: Awaited<ReturnType<OpenCodeSingleFileTracerBullet["run"]>>;
   events: readonly { readonly type: string; readonly payload: unknown }[];
   trace: readonly TraceEvent[];
@@ -132,24 +212,38 @@ async function runTracer(fixture: Fixture, replacement: string): Promise<{
     security: securitySheet,
   }, AbortSignal.timeout(10_000));
   if (probe.outcome !== "completed") throw new Error("fixture OpenCode probe failed");
-  const tracer = new OpenCodeSingleFileTracerBullet(
-    tasks,
-    new WriterWorktreeCapsule(
-      worktrees,
-      new OpenCodeWriter(supervisor),
-      new WorkspaceOwnershipGate(),
-    ),
-    new ValidationRunner(supervisor),
+  const capsule = new WriterWorktreeCapsule(
     worktrees,
+    new OpenCodeWriter(supervisor),
+    new WorkspaceOwnershipGate(),
   );
-  const view = await tracer.run({
+  const commonRequest = {
     project: fixture.project,
     task: plannedTask(),
     model,
     security: securitySheet,
     probe,
     signal: AbortSignal.timeout(15_000),
-  });
+  };
+  const view = integrate
+    ? await new OpenCodeIntegratedSingleFileTracer(
+      tasks,
+      capsule,
+      new ValidationRunner(supervisor),
+      worktrees,
+      {
+        reviewer: new ApprovingReviewer(),
+        reviews: new ReviewGate(),
+        integrations: new IntegrationQueue(git, new ValidationRunner(supervisor)),
+        git,
+      },
+    ).run({ ...commonRequest, reviewerId: "reviewer-1" })
+    : await new OpenCodeSingleFileTracerBullet(
+      tasks,
+      capsule,
+      new ValidationRunner(supervisor),
+      worktrees,
+    ).run(commonRequest);
   if (journal.projectionFailed) throw new Error("Agent Tail projection failed");
   sink.close();
   sqlite.close();
@@ -170,6 +264,19 @@ async function runTracer(fixture: Fixture, replacement: string): Promise<{
   };
 }
 
+class ApprovingReviewer implements ReviewerAdapter {
+  review(input: ReviewInput): Promise<ReviewDecision> {
+    return Promise.resolve({
+      reviewerId: input.reviewerId,
+      approved: true,
+      diffSha256: createHash("sha256").update(input.diff, "utf8").digest("hex"),
+      validationSha256: canonicalValidationDigest(input.validation),
+      decidedAt: new Date().toISOString(),
+      reason: "approved by independent fixture reviewer",
+    });
+  }
+}
+
 interface Fixture {
   readonly root: string;
   readonly repository: string;
@@ -182,7 +289,7 @@ interface TraceEvent {
   readonly operation: unknown;
 }
 
-async function fixtureProject(expected: string): Promise<Fixture> {
+async function fixtureProject(expected: string, fullFails = false): Promise<Fixture> {
   const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-tracer-")));
   directories.push(root);
   const repository = path.join(root, "repository");
@@ -196,23 +303,32 @@ async function fixtureProject(expected: string): Promise<Fixture> {
     path.join(repository, "test/greeting.test.mjs"),
     `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { greeting } from "../src/greeting.mjs";\ntest("greeting", () => assert.equal(greeting, ${JSON.stringify(expected)}));\n`,
   );
-  await gitOk(repository, ["add", "--", "src/greeting.mjs", "test/greeting.test.mjs"]);
+  writeFileSync(
+    path.join(repository, "test/full.test.mjs"),
+    `import assert from "node:assert/strict";\nimport test from "node:test";\ntest("full", () => assert.equal(${fullFails ? "false" : "true"}, true));\n`,
+  );
+  await gitOk(repository, [
+    "add",
+    "--",
+    "src/greeting.mjs",
+    "test/greeting.test.mjs",
+    "test/full.test.mjs",
+  ]);
   await gitOk(repository, ["commit", "-m", "initial"]);
   return {
     root,
     repository,
-    project: {
+    project: ProjectConfigSchema.parse({
       projectId: "fixture",
       repositoryPath: repository,
-      integrationBranch: "zentra/integration",
       worktreeRoot: path.join(root, "worktrees"),
       validations: {
         focused: [process.execPath, "--test", "test/greeting.test.mjs"],
-        full: [process.execPath, "--test"],
+        full: [process.execPath, "--test", "test/full.test.mjs", "test/greeting.test.mjs"],
         focusedTimeoutMs: 5_000,
         fullTimeoutMs: 5_000,
       },
-    },
+    }),
   };
 }
 
