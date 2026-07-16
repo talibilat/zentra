@@ -212,7 +212,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       integrationVerified = verified;
       if (verified) observedReceiptSnapshot = receiptSnapshot;
     } else if (event.type === "task.cleanup_started") {
-      if (!integrationObserved || !integrationVerified) {
+      if (!integrationVerified) {
         throw new Error("cleanup start requires one verified integration observation");
       }
       cleanupStarted = true;
