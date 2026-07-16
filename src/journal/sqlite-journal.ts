@@ -184,15 +184,13 @@ export class SqliteEventJournal implements EventJournal {
     const serialized = events.map((event) => {
       const payload = JSON.stringify(event.payload);
       if (payload === undefined) throw new Error("event payload must be JSON-serializable");
-      const bytes = eventBytes({
-        eventId: "00000000-0000-4000-8000-000000000000",
-        streamId,
-        type: event.type,
-        payload,
-        causationId: event.causationId,
-        correlationId: event.correlationId,
-        recordedAt: "0000-00-00T00:00:00.000Z",
-      });
+      const bytes = Buffer.byteLength("00000000-0000-4000-8000-000000000000") +
+        Buffer.byteLength(streamId) +
+        Buffer.byteLength(event.type) +
+        Buffer.byteLength(payload) +
+        Buffer.byteLength(event.causationId ?? "") +
+        Buffer.byteLength(event.correlationId) +
+        Buffer.byteLength("0000-00-00T00:00:00.000Z");
       if (bytes > MAX_JOURNAL_EVENT_BYTES) {
         throw new Error("event journal append limit exceeded");
       }
@@ -449,24 +447,6 @@ function assertFileWithinLimit(path: string, limit: number): void {
     }
     throw error;
   }
-}
-
-function eventBytes(event: {
-  readonly eventId: string;
-  readonly streamId: string;
-  readonly type: string;
-  readonly payload: string;
-  readonly causationId: string | null;
-  readonly correlationId: string;
-  readonly recordedAt: string;
-}): number {
-  return Buffer.byteLength(event.eventId) +
-    Buffer.byteLength(event.streamId) +
-    Buffer.byteLength(event.type) +
-    Buffer.byteLength(event.payload) +
-    Buffer.byteLength(event.causationId ?? "") +
-    Buffer.byteLength(event.correlationId) +
-    Buffer.byteLength(event.recordedAt);
 }
 
 function toStoredEvent(row: EventRow): StoredEvent {
