@@ -1071,7 +1071,6 @@ async function validateIntegrationReceipt(input: {
 
 function assertValidWorkerTimeout(workerTimeoutMs: number): number {
   if (
-    !Number.isFinite(workerTimeoutMs) ||
     !Number.isInteger(workerTimeoutMs) ||
     workerTimeoutMs <= 0 ||
     workerTimeoutMs > MAX_WORKER_TIMEOUT_MS
