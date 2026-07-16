@@ -53,4 +53,17 @@ describe("UncertainEffectPayloadSchema", () => {
       decisionId: "decision-1",
     })).toMatchObject({ boundary: "cleanup", resolution: "effect_absent" });
   });
+
+  it("upcasts persisted v1 uncertainty without an evidence field", () => {
+    const current = uncertainEffectPayload({
+      boundary: "worker",
+      operation: "worker invocation",
+      reason: "worker acknowledgement was lost",
+      requestedBy: "zentra-worker-controller",
+      workspace: null,
+    });
+    const { evidence: _omitted, ...legacy } = current;
+
+    expect(UncertainEffectPayloadSchema.parse(legacy).evidence).toEqual({});
+  });
 });

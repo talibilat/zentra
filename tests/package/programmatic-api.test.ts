@@ -4,6 +4,7 @@ import {
   MilestonePlanSchema,
   MilestoneRegistry,
   OpenCodeReadOnlyProgram,
+  OpenCodeReviewerAdapter,
   SqliteEventJournal,
 } from "../../src/index.js";
 
@@ -13,6 +14,7 @@ describe("package-root programmatic API", () => {
     expect(MilestoneRegistry.prototype.ready).toBeTypeOf("function");
     expect(MilestonePlanSchema.parse).toBeTypeOf("function");
     expect(OpenCodeReadOnlyProgram).toBeTypeOf("function");
+    expect(OpenCodeReviewerAdapter).toBeTypeOf("function");
     expect(SqliteEventJournal).toBeTypeOf("function");
   });
 });

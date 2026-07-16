@@ -6,6 +6,7 @@ export const UncertainEffectBoundarySchema = z.enum([
   "worktree_creation",
   "worker",
   "validation",
+  "review",
   "commit",
   "integration",
   "cleanup",
@@ -24,6 +25,9 @@ export const UncertainEffectPayloadSchema = z.strictObject({
     branch: z.string().min(1).max(1_024).nullable(),
     preservation: z.literal("required"),
   }).nullable(),
+  evidence: z.record(z.string().min(1).max(128), z.string().max(4_096))
+    .refine((value) => Object.keys(value).length <= 32)
+    .default({}),
 });
 
 export type UncertainEffectBoundary = z.infer<typeof UncertainEffectBoundarySchema>;
@@ -46,6 +50,7 @@ export function uncertainEffectPayload(input: {
   readonly reason: string;
   readonly requestedBy: string;
   readonly workspace: { readonly path: string; readonly branch: string | null } | null;
+  readonly evidence?: Readonly<Record<string, string>>;
 }): UncertainEffectPayload {
   return UncertainEffectPayloadSchema.parse({
     schemaVersion: 1,
@@ -64,5 +69,6 @@ export function uncertainEffectPayload(input: {
     workspace: input.workspace === null
       ? null
       : { ...input.workspace, preservation: "required" },
+    evidence: input.evidence ?? {},
   });
 }

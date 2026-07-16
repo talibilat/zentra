@@ -156,7 +156,10 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
       const result = parseResult(run.stdout);
       outcome = run.exitCode === 0 && result.exitCode === 0 && brokerState.receipt?.outcome === "completed" ? "completed" : "failed";
       if (outcome === "completed") {
-        evidence = [{ kind: request.role === "planner" ? "plan" : "research", summary: parseOpenCodeFinalAssistantText(result.stdout) }];
+        evidence = [{
+          kind: request.role === "planner" ? "plan" : request.role === "reviewer" ? "review" : "research",
+          summary: parseOpenCodeFinalAssistantText(result.stdout),
+        }];
       }
     } catch (error) {
       if (error instanceof DockerBrokerTransportUncertainError) brokerTransport = "uncertain";

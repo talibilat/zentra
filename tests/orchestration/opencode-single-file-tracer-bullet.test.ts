@@ -33,6 +33,11 @@ import {
   type ProjectConfig,
 } from "../../src/projects/project-config.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
+import type { OpenCodeReadOnlyProgramResult } from "../../src/agents/opencode-read-only-program.js";
+import {
+  OpenCodeReviewerAdapter,
+  type OpenCodeReviewerProgram,
+} from "../../src/reviews/opencode-reviewer-adapter.js";
 import {
   canonicalValidationDigest,
   type ReviewDecision,
@@ -184,9 +189,75 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     ]));
     expect(result.events.map((event) => event.type)).not.toContain("task.cleanup_started");
   });
+
+  it("records an OpenCode reviewer denial and never commits or integrates", async () => {
+    const fixture = await fixtureProject("hello from OpenCode");
+    const reviewer = new OpenCodeReviewerAdapter(
+      new DenyingOpenCodeReviewerProgram(),
+      {
+        milestoneId: "review-milestone",
+        taskId: "review-task",
+        repositoryPath: fixture.repository,
+        reviewerId: "reviewer-1",
+        budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500 },
+        timeoutMs: 20_000,
+      },
+    );
+    const result = await runTracer(fixture, "hello from OpenCode", true, reviewer);
+
+    expect(result.view).toMatchObject({ lifecycle: "terminal", terminalOutcome: "denied" });
+    expect(existsSync(result.worktree)).toBe(true);
+    expect(result.events.map((event) => event.type)).toContain("artifact.review_report_recorded");
+    expect(result.events.map((event) => event.type)).not.toContain("task.integration_started");
+    expect(result.trace.find((event) => event.kind === "task.denied")).toMatchObject({
+      actor: { id: "reviewer-1", role: "reviewer" },
+      operation: { name: "review", status: "denied" },
+    });
+  });
+
+  it("pauses without retry when OpenCode review transport is uncertain", async () => {
+    const fixture = await fixtureProject("hello from OpenCode");
+    const program = new UncertainOpenCodeReviewerProgram();
+    const reviewer = new OpenCodeReviewerAdapter(program, {
+      milestoneId: "review-milestone",
+      taskId: "review-task",
+      repositoryPath: fixture.repository,
+      reviewerId: "reviewer-1",
+      budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500 },
+      timeoutMs: 20_000,
+    });
+    const result = await runTracer(fixture, "hello from OpenCode", true, reviewer);
+
+    expect(result.view).toMatchObject({
+      lifecycle: "awaiting_review",
+      terminalOutcome: null,
+      paused: true,
+      uncertainEffect: {
+        boundary: "review",
+        evidence: {
+          reviewerId: "reviewer-1",
+          milestoneId: "review-milestone",
+          taskId: "review-task",
+          brokerTransport: "uncertain",
+        },
+      },
+    });
+    expect(program.calls).toBe(1);
+    expect(existsSync(result.worktree)).toBe(true);
+    expect(result.events.map((event) => event.type)).not.toContain("task.integration_started");
+    expect(result.trace.find((event) => event.kind === "task.effect_uncertain")).toMatchObject({
+      actor: { id: "zentra-recovery-controller", role: "recovery" },
+      operation: { name: "review", status: "waiting" },
+    });
+  });
 });
 
-async function runTracer(fixture: Fixture, replacement: string, integrate = false): Promise<{
+async function runTracer(
+  fixture: Fixture,
+  replacement: string,
+  integrate = false,
+  reviewer: ReviewerAdapter = new ApprovingReviewer(),
+): Promise<{
   view: Awaited<ReturnType<OpenCodeSingleFileTracerBullet["run"]>>;
   events: readonly { readonly type: string; readonly payload: unknown }[];
   trace: readonly TraceEvent[];
@@ -232,7 +303,7 @@ async function runTracer(fixture: Fixture, replacement: string, integrate = fals
       new ValidationRunner(supervisor),
       worktrees,
       {
-        reviewer: new ApprovingReviewer(),
+        reviewer,
         reviews: new ReviewGate(),
         integrations: new IntegrationQueue(git, new ValidationRunner(supervisor)),
         git,
@@ -262,6 +333,69 @@ async function runTracer(fixture: Fixture, replacement: string, integrate = fals
     trace,
     worktree: path.join(fixture.project.worktreeRoot, "writer-tracer"),
   };
+}
+
+class DenyingOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
+  run(request: Parameters<OpenCodeReviewerProgram["run"]>[0]): Promise<OpenCodeReadOnlyProgramResult> {
+    const prompt = JSON.parse(request.rolePrompt) as { request: Record<string, unknown> };
+    const challenged = prompt.request;
+    const response = {
+      schemaVersion: 1,
+      reviewerId: challenged.reviewerId,
+      decision: "deny",
+      requestSha256: createHash("sha256")
+        .update(JSON.stringify(challenged), "utf8")
+        .digest("hex"),
+      diffSha256: challenged.diffSha256,
+      validationSha256: challenged.validationSha256,
+      decidedAt: "2026-07-16T12:00:00.000Z",
+      reason: "The OpenCode reviewer found an unsafe change.",
+    };
+    return Promise.resolve({
+      outcome: "completed",
+      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
+      evidence: [{ kind: "review", summary: JSON.stringify(response) }],
+      cleanup: "completed",
+      brokerTransport: "completed",
+      trace: { outcome: "emitted" },
+      operationOutcome: "completed",
+      execution: {
+        milestoneId: request.milestoneId,
+        taskId: request.taskId,
+        capsuleId: "capsule-review-1",
+        actorId: "reviewer-1",
+        capabilityId: "reviewer-1",
+        transportModelId: "fixture/model",
+      },
+    });
+  }
+}
+
+class UncertainOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
+  calls = 0;
+
+  run(request: Parameters<OpenCodeReviewerProgram["run"]>[0]): Promise<OpenCodeReadOnlyProgramResult> {
+    this.calls += 1;
+    return Promise.resolve({
+      outcome: "failed",
+      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
+      evidence: [],
+      cleanup: "completed",
+      brokerTransport: "uncertain",
+      trace: { outcome: "emitted" },
+      operationOutcome: "failed",
+      execution: {
+        milestoneId: request.milestoneId,
+        taskId: request.taskId,
+        capsuleId: "capsule-review-uncertain",
+        actorId: "reviewer-1",
+        capabilityId: "reviewer-1",
+        transportModelId: "fixture/model",
+      },
+    });
+  }
 }
 
 class ApprovingReviewer implements ReviewerAdapter {

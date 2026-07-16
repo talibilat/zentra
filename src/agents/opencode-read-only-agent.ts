@@ -21,7 +21,7 @@ import { openCodeResourceIdentity } from "./opencode-resource-identity.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
-  kind: z.enum(["plan", "research", "finding"]),
+  kind: z.enum(["plan", "research", "finding", "review"]),
   summary: z.string().min(1).max(256 * 1024),
 });
 const ModelMetadataSchema = z.strictObject({
@@ -33,7 +33,7 @@ const ModelMetadataSchema = z.strictObject({
 export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
   capsuleId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   repositoryPath: z.string().min(1).max(4_096),
-  role: z.enum(["planner", "researcher"]),
+  role: z.enum(["planner", "researcher", "reviewer"]),
   actorId: z.string().min(1).max(256),
   rolePrompt: z.string().min(1).max(64 * 1024),
   capabilityId: z.string().min(1).max(256),
@@ -85,6 +85,14 @@ export type OpenCodeReadOnlyCapsuleResult = z.infer<typeof OpenCodeReadOnlyCapsu
 
 export interface OpenCodeReadOnlyAgentResult extends OpenCodeReadOnlyCapsuleResult {
   readonly trace: { readonly outcome: "emitted" | "failed" | "not_configured" };
+  readonly execution: {
+    readonly milestoneId: string;
+    readonly taskId: string;
+    readonly capsuleId: string;
+    readonly actorId: string;
+    readonly capabilityId: string;
+    readonly transportModelId: string;
+  };
 }
 
 export interface OpenCodeReadOnlyCapsule {
@@ -104,7 +112,7 @@ export interface OpenCodeReadOnlyAgentRequest {
   readonly milestoneId: string;
   readonly taskId: string;
   readonly repositoryPath: string;
-  readonly role: "planner" | "researcher";
+  readonly role: "planner" | "researcher" | "reviewer";
   readonly rolePrompt: string;
   readonly budget: Omit<MilestoneBudget, "maxRetries">;
   readonly timeoutMs: number;
@@ -314,6 +322,14 @@ export class OpenCodeReadOnlyAgent {
       ...result,
       outcome,
       trace: Object.freeze({ outcome: trace }),
+      execution: Object.freeze({
+        milestoneId: request.milestoneId,
+        taskId: request.taskId,
+        capsuleId: packet.capsuleId,
+        actorId: packet.actorId,
+        capabilityId: packet.capabilityId,
+        transportModelId: packet.transportModelId,
+      }),
     });
   }
 }
@@ -327,17 +343,26 @@ function objectString(payload: unknown, key: string): string | null {
 function approvedModel(
   sheet: ModelSheet,
   assignedId: string,
-  role: "planner" | "researcher",
+  role: "planner" | "researcher" | "reviewer",
   budget: OpenCodeReadOnlyAgentRequest["budget"],
 ): ModelCapability {
   const model = sheet.models.find((candidate) => candidate.id === assignedId);
   if (
     model === undefined || model.harness !== "opencode" || !model.roles.includes(role) ||
-    !model.toolPermissions.includes("read_repository") ||
-    model.toolPermissions.some((permission) => permission !== "read_repository") ||
+    !approvedTools(model, role) ||
     model.network !== "denied" || model.contextTokens < budget.maxInputTokens + budget.maxOutputTokens
   ) throw new Error("OpenCode model assignment is not approved for the read-only role");
   return model;
+}
+
+function approvedTools(model: ModelCapability, role: OpenCodeReadOnlyAgentRequest["role"]): boolean {
+  if (role === "reviewer") {
+    return model.toolPermissions.includes("review_diff") &&
+      model.toolPermissions.includes("read_repository") &&
+      model.toolPermissions.every((permission) =>
+        permission === "review_diff" || permission === "read_repository");
+  }
+  return model.toolPermissions.length === 1 && model.toolPermissions[0] === "read_repository";
 }
 
 function traceOutcome(journal: EventJournal): "emitted" | "failed" | "not_configured" {
@@ -356,7 +381,7 @@ function assertAssignment(
     assignedRole !== request.role ||
     harness !== "opencode" ||
     actorId.length === 0 ||
-    authority !== "read_only"
+    authority !== (request.role === "reviewer" ? "review" : "read_only")
   ) throw new Error("OpenCode role assignment is outside read-only authority");
 }
 

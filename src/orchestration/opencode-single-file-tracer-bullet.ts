@@ -34,6 +34,7 @@ import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { ReviewGate } from "../reviews/review-gate.js";
 import { assessReviewPolicy } from "../reviews/review-policy.js";
+import { OpenCodeReviewerUncertainError } from "../reviews/opencode-reviewer-adapter.js";
 import {
   ReviewerExecutionError,
   type ReviewInput,
@@ -601,6 +602,16 @@ export class OpenCodeSingleFileTracerBullet {
       this.tasks.append(request.task.taskId, "task.cleanup_completed", cleanup, null);
       return this.tasks.append(request.task.taskId, "task.completed", { receipt }, null);
     } catch (error) {
+      if (error instanceof OpenCodeReviewerUncertainError) {
+        return this.tasks.pauseForUncertainEffect(request.task.taskId, uncertainEffectPayload({
+          boundary: "review",
+          operation: "OpenCode independent review",
+          reason: error.message,
+          requestedBy: "zentra-recovery-controller",
+          workspace: { path: lease.path, branch: lease.branch },
+          evidence: error.evidence,
+        }));
+      }
       if (error instanceof WorkspaceCommitUncertainError) {
         return this.tasks.appendBatch(request.task.taskId, [
           {
