@@ -6,6 +6,12 @@ import { z } from "zod";
 
 import { ValidationReportSchema } from "../capabilities/validation-runner.js";
 import type { StoredEvent } from "../contracts/event.js";
+import {
+  EffectReconciliationPayloadSchema,
+  UncertainEffectPayloadSchema,
+  uncertainEffectPayload,
+  type UncertainEffectBoundary,
+} from "../contracts/uncertain-effect.js";
 import type { EventJournal } from "../journal/journal.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { ProjectRegistry } from "../projects/project-registry.js";
@@ -52,10 +58,8 @@ const SafePatchPathSchema = z.string().min(1).refine((candidate) =>
   !candidate.includes("\0") &&
   !candidate.includes("\n") &&
   !candidate.includes("\r") &&
-  !candidate.includes("/") &&
   !candidate.includes("\\") &&
-  candidate !== "." &&
-  candidate !== ".."
+  candidate.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
 );
 const ArtifactReadySchema = z.strictObject({
   type: z.literal("artifact.ready"),
@@ -150,9 +154,20 @@ const CleanupReconciledPayloadSchema = z.strictObject({
   cleanup: CleanupStartedPayloadSchema,
   observation: CleanupObservedPayloadSchema,
 });
-const CompletedPayloadSchema = z.strictObject({
+const IntegratedCompletedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
 });
+const FocusedCompletedPayloadSchema = z.strictObject({
+  stage: z.literal("validation"),
+  validation: ValidationReportSchema,
+  diffSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  changedPath: SafePatchPathSchema,
+  workspace: z.string().min(1),
+});
+const CompletedPayloadSchema = z.union([
+  IntegratedCompletedPayloadSchema,
+  FocusedCompletedPayloadSchema,
+]);
 const CreatedPayloadSchema = z.strictObject({
   projectId: z.string().min(1),
   title: z.string().min(1),
@@ -224,6 +239,7 @@ export class RecoveryService {
 
     const hasUncertainEffect = events.some((event) =>
       event.type === "task.worktree_creation_started" ||
+      event.type === "task.effect_uncertain" ||
       event.type === "task.started" ||
       event.type === "task.commit_observed" ||
       event.type === "task.integration_started" ||
@@ -276,7 +292,49 @@ export class RecoveryService {
         );
       }
 
-      const last = events.at(-1)!;
+      const recordedLast = events.at(-1)!;
+      if (recordedLast.type === "task.effect_uncertain") {
+        const uncertain = UncertainEffectPayloadSchema.parse(recordedLast.payload);
+        return decision(
+          taskId,
+          "await_reconciliation",
+          `${uncertain.boundary} uncertainty is retained: ${uncertain.reason}`,
+        );
+      }
+      const reconciliation = recordedLast.type === "task.effect_reconciled"
+        ? EffectReconciliationPayloadSchema.parse(recordedLast.payload)
+        : null;
+      if (reconciliation?.resolution === "abandoned") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          `${reconciliation.boundary} effect was explicitly abandoned: ${reconciliation.reason}`,
+        );
+      }
+      if (reconciliation?.boundary === "worktree_creation") {
+        const anyWorkspaceState = workspace.registered || workspace.branchExists || workspace.pathExists;
+        if (reconciliation.resolution === "effect_absent" && anyWorkspaceState) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "effect_absent reconciliation contradicts remaining worktree or branch state",
+          );
+        }
+        if (
+          reconciliation.resolution === "effect_applied" &&
+          (!workspace.registered || !workspace.branchExists || !workspace.pathExists)
+        ) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "effect_applied reconciliation contradicts incomplete worktree or branch state",
+          );
+        }
+      }
+      const last = reconciliation !== null
+        ? events.findLast((event) =>
+          event.type !== "task.effect_uncertain" && event.type !== "task.effect_reconciled")!
+        : recordedLast;
       if (last.type === "task.created") {
         if (workspace.registered || workspace.branchExists) {
           return decision(
@@ -486,12 +544,32 @@ export class RecoveryService {
         );
       }
 
+      if (last.type === "task.writer_completed") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "writer result is durable but workspace ownership and patch evidence require reconciliation",
+        );
+      }
+
+      if (last.type === "task.validation_completed") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "focused validation is durable but terminal recording requires reconciliation",
+        );
+      }
+
       if (last.type === "task.validation_started") {
         const started = chain.validationStarted!;
         if (workspace.diff === null || sha256(workspace.diff) !== started.diffSha256) {
           return decision(taskId, "record_failure", "validation-start evidence does not match the exact worktree diff");
         }
-        return decision(taskId, "resume_preparation", "validation is non-effectful and may be run again from the recorded diff");
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "validation started without a durable result and must not be retried automatically",
+        );
       }
 
       if (last.type === "task.review_requested") {
@@ -604,6 +682,30 @@ export class RecoveryService {
         `recovery inspection failed closed: ${errorMessage(error)}`,
       );
     }
+  }
+
+  async retainClassification(taskId: string): Promise<RecoveryDecision> {
+    const classification = await this.inspect(taskId);
+    if (classification.action !== "await_reconciliation") return classification;
+    const events = this.journal.readStream(taskId);
+    if (events.at(-1)?.type === "task.effect_uncertain") return classification;
+    const task = this.tasks.get(taskId);
+    if (task === null || task.lifecycle === "terminal") return classification;
+    const last = events.at(-1)!;
+    const boundary = recoveryBoundary(last.type);
+    if (boundary === null) return classification;
+    const lease = events.findLast((event) => event.type === "task.leased");
+    const workspace = payloadString(lease?.payload, "workspace");
+    this.tasks.pauseForUncertainEffect(taskId, uncertainEffectPayload({
+      boundary,
+      operation: `recovery inspection after ${last.type}`,
+      reason: classification.reason,
+      requestedBy: "zentra-recovery-controller",
+      workspace: workspace === null
+        ? null
+        : { path: workspace, branch: `ticket/${taskId}` },
+    }));
+    return classification;
   }
 
   /**
@@ -1450,14 +1552,14 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     }
   }
   if (
-    completedPayload !== null &&
+    completedPayload !== null && "receipt" in completedPayload &&
     cleanupCompleted === null &&
     cleanupReconciled === null
   ) {
     throw new Error("completed task has no cleanup completion or reconciliation");
   }
   if (
-    completedPayload !== null &&
+    completedPayload !== null && "receipt" in completedPayload &&
     (!successfulObservation?.success ||
       canonicalJson(completedPayload.receipt) !==
         canonicalJson(successfulObservation.data.receipt))
@@ -1583,6 +1685,26 @@ function decision(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function recoveryBoundary(type: string): UncertainEffectBoundary | null {
+  if (type.includes("cleanup")) return "cleanup";
+  if (["task.integration_started", "task.integration_prepared", "task.integration_observed"].includes(type)) {
+    return "integration";
+  }
+  if (type === "task.commit_observed") return "commit";
+  if (type === "task.validation_started") return "validation";
+  if (type === "task.worktree_creation_started") {
+    return "worktree_creation";
+  }
+  if (type === "task.started" || type === "task.writer_completed") return "worker";
+  return null;
+}
+
+function payloadString(payload: unknown, field: string): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const value = (payload as Readonly<Record<string, unknown>>)[field];
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

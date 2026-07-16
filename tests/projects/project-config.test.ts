@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_INTEGRATION_BRANCH,
   DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS,
   DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
   MAX_VALIDATION_TIMEOUT_MS,
@@ -37,6 +38,20 @@ function withCaseVariant(executable: string): string {
 }
 
 describe("ProjectConfigSchema", () => {
+  it("defaults the integration branch when omitted", () => {
+    const { integrationBranch: _omitted, ...withoutIntegrationBranch } = validConfig;
+
+    expect(ProjectConfigSchema.parse(withoutIntegrationBranch).integrationBranch)
+      .toBe(DEFAULT_INTEGRATION_BRANCH);
+  });
+
+  it("retains an explicitly configured integration branch", () => {
+    expect(ProjectConfigSchema.parse({
+      ...validConfig,
+      integrationBranch: "zentra/staging",
+    }).integrationBranch).toBe("zentra/staging");
+  });
+
   it("accepts the supported configuration", () => {
     const parsed = ProjectConfigSchema.parse(validConfig);
     expect(parsed.projectId).toBe("fixture-project");

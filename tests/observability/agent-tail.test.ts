@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { StoredEvent } from "../../src/contracts/event.js";
+import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import {
   agentTailEventToJsonLine,
   storedEventToAgentTailEvent,
@@ -108,6 +109,34 @@ describe("Agent Tail event envelope export", () => {
     expect(exported.operation).toEqual({ name: "review", status: "completed" });
   });
 
+  it("maps OpenCode writer and validation completion outcomes", () => {
+    const exported = storedEventsToAgentTailEvents([
+      storedEvent({
+        type: "task.started",
+        payload: { workerId: "opencode-writer", harness: "opencode" },
+      }),
+      storedEvent({
+        type: "task.writer_completed",
+        payload: { workerId: "opencode-writer", outcome: "failed" },
+      }),
+      storedEvent({
+        type: "task.validation_completed",
+        payload: { outcome: "timed_out" },
+      }),
+    ]);
+
+    expect(exported.map((event) => event.actor)).toEqual([
+      { id: "opencode-writer", role: "worker" },
+      { id: "opencode-writer", role: "worker" },
+      { id: "zentra-validator", role: "validator" },
+    ]);
+    expect(exported.map((event) => event.operation)).toEqual([
+      { name: "writer", status: "running" },
+      { name: "writer", status: "failed" },
+      { name: "validation", status: "timed_out" },
+    ]);
+  });
+
   it("maps review denial terminal events to the reviewer actor", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "task.denied",
@@ -116,6 +145,49 @@ describe("Agent Tail event envelope export", () => {
 
     expect(exported.actor).toEqual({ id: "opencode-reviewer-3", role: "reviewer" });
     expect(exported.operation).toEqual({ name: "review", status: "denied" });
+  });
+
+  it("maps ownership denial to the ownership operation", () => {
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      type: "task.denied",
+      payload: { stage: "ownership" },
+    }));
+
+    expect(exported.operation).toEqual({ name: "ownership", status: "denied" });
+  });
+
+  it("renders uncertain effects and legacy observations as waiting diagnostics", () => {
+    const uncertain = uncertainEffectPayload({
+      boundary: "integration",
+      operation: "integration CAS",
+      reason: "integration ref is unreadable",
+      requestedBy: "zentra-integration-controller",
+      workspace: { path: "/work/task-1", branch: "ticket/task-1" },
+    });
+    const exported = storedEventsToAgentTailEvents([
+      storedEvent({ type: "task.effect_uncertain", payload: uncertain }),
+      storedEvent({ type: "task.commit_observed" }),
+      storedEvent({ type: "task.integration_observed", payload: { reason: "CAS unreadable" } }),
+      storedEvent({ type: "task.cleanup_observed", payload: { uncertain: true } }),
+      storedEvent({ type: "task.cleanup_observed", payload: { uncertain: false } }),
+      storedEvent({
+        type: "task.integration_observed",
+        payload: { verification: "verified" },
+      }),
+    ]);
+
+    expect(exported.map((event) => event.operation.status)).toEqual([
+      "waiting",
+      "waiting",
+      "waiting",
+      "waiting",
+      "failed",
+      "completed",
+    ]);
+    expect(exported[0]).toMatchObject({
+      actor: { id: "zentra-recovery-controller", role: "recovery" },
+      operation: { name: "integration", status: "waiting" },
+    });
   });
 
   it("maps capsule proxy, worker, cleanup, and terminal events without changing v1", () => {

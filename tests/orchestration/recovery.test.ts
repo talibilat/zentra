@@ -815,12 +815,43 @@ describe("RecoveryService", () => {
     expect(workerResult.outcome).toBe("completed");
     closeJournal(first.journal);
 
-    const decision = await openSystem(testFixture).recovery.inspect("task-9");
+    const restarted = openSystem(testFixture);
+    const decision = await restarted.recovery.retainClassification("task-9");
     expect(decision.action).toBe("await_reconciliation");
     expect(decision.reason).toMatch(/worker|dirty|effect/i);
+    expect(restarted.tasks.readStream("task-9").at(-1)).toMatchObject({
+      type: "task.effect_uncertain",
+      payload: {
+        boundary: "worker",
+        retryPolicy: "never_automatic",
+        recoveryClassification: "await_reconciliation",
+      },
+    });
+    expect(restarted.tasks.get("task-9")).toMatchObject({
+      lifecycle: "running",
+      paused: true,
+      terminalOutcome: null,
+    });
+    await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "await_reconciliation",
+    });
+    restarted.tasks.recordEffectReconciliation("task-9", {
+      schemaVersion: 1,
+      boundary: "worker",
+      resolution: "abandoned",
+      reason: "operator abandoned the uncertain worker result",
+      decidedBy: "operator-1",
+      decisionId: "decision-1",
+    });
+    await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/explicitly abandoned/i),
+    });
+    expect(existsSync(lease.path)).toBe(true);
+    closeJournal(restarted.journal);
   });
 
-  it("resumes validation safely after validation completion was not recorded", async () => {
+  it("does not retry validation after its result was not recorded", async () => {
     const testFixture = await fixture();
     const first = openSystem(testFixture);
     const { tasks } = first;
@@ -849,7 +880,8 @@ describe("RecoveryService", () => {
     closeJournal(first.journal);
 
     await expect(openSystem(testFixture).recovery.inspect("task-9")).resolves.toMatchObject({
-      action: "resume_preparation",
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/must not be retried/i),
     });
   });
 

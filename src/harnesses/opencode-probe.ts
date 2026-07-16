@@ -1,4 +1,5 @@
-import { realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, realpathSync, statSync } from "node:fs";
 
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
@@ -31,11 +32,35 @@ export interface OpenCodeProbeReport {
   readonly model: string | null;
   readonly provider: string | null;
   readonly executable: string | null;
+  readonly executableSha256: string | null;
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly version: string | null;
   readonly startedAt: string;
   readonly finishedAt: string;
+}
+
+const verifiedProbeReports = new WeakSet<OpenCodeProbeReport>();
+
+export function isVerifiedOpenCodeProbeReport(
+  report: OpenCodeProbeReport,
+  expected: {
+    readonly modelId: string;
+    readonly model: string;
+    readonly provider: string;
+    readonly cwd: string;
+  },
+): boolean {
+  return verifiedProbeReports.has(report) &&
+    report.outcome === "completed" &&
+    report.reason === null &&
+    report.harness === "opencode" &&
+    report.modelId === expected.modelId &&
+    report.model === expected.model &&
+    report.provider === expected.provider &&
+    report.cwd === expected.cwd &&
+    report.executable !== null &&
+    report.executableSha256 !== null;
 }
 
 export class OpenCodeProbe {
@@ -79,19 +104,35 @@ export class OpenCodeProbe {
       timeoutMs: request.timeoutMs,
     }, signal, "validation");
 
-    return reportFromWorkerResult(model, executable, canonicalCwd, result, startedAt);
+    let executableSha256: string | null = null;
+    if (result.outcome === "completed") {
+      try {
+        executableSha256 = await sha256File(executable);
+      } catch {
+        return failure(request, model, canonicalCwd, "probe_failed", startedAt);
+      }
+    }
+    return reportFromWorkerResult(
+      model,
+      executable,
+      executableSha256,
+      canonicalCwd,
+      result,
+      startedAt,
+    );
   }
 }
 
 function reportFromWorkerResult(
   model: ModelCapability,
   executable: string,
+  executableSha256: string | null,
   cwd: string,
   result: WorkerResult,
   startedAt: string,
 ): OpenCodeProbeReport {
   if (result.outcome === "completed") {
-    return Object.freeze({
+    const report: OpenCodeProbeReport = Object.freeze({
       outcome: "completed",
       reason: null,
       modelId: model.id,
@@ -99,12 +140,15 @@ function reportFromWorkerResult(
       model: model.model,
       provider: providerFromModel(model.model),
       executable,
+      executableSha256,
       argv: Object.freeze(["--version"]),
       cwd,
       version: result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? null,
       startedAt,
       finishedAt: new Date().toISOString(),
     });
+    verifiedProbeReports.add(report);
+    return report;
   }
   return Object.freeze({
     outcome: result.outcome,
@@ -114,6 +158,7 @@ function reportFromWorkerResult(
     model: model.model,
     provider: providerFromModel(model.model),
     executable,
+    executableSha256,
     argv: Object.freeze(["--version"]),
     cwd,
     version: null,
@@ -137,6 +182,7 @@ function failure(
     model: model?.model ?? null,
     provider: model === null ? null : providerFromModel(model.model),
     executable: null,
+    executableSha256: null,
     argv: Object.freeze(["--version"]),
     cwd,
     version: null,
@@ -171,4 +217,14 @@ function canonicalExecutable(candidate: string): string {
 
 function providerFromModel(model: string): string {
   return model.replace(/\/.*/, "");
+}
+
+function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
 }

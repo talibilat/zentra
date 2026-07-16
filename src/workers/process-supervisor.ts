@@ -82,6 +82,13 @@ export class ProcessSupervisor implements WorkerAdapter {
           env[key] = value;
         }
       }
+      for (const [key, value] of Object.entries(request.environment ?? {})) {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(key) || value.includes("\0")) {
+          settleInvalidEnvironment(resolve);
+          return;
+        }
+        env[key] = value;
+      }
 
       const child = spawn(request.executable, [...request.args], {
         cwd: request.cwd,
@@ -387,6 +394,7 @@ function validateProtocolOutput(
 ): string | undefined {
   switch (kind) {
     case "validation":
+    case "opencode_writer":
       return undefined;
     case "reviewer":
       return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success
@@ -397,6 +405,17 @@ function validateProtocolOutput(
         ? undefined
         : `worker protocol requires exactly one valid artifact.ready event, received ${events.length}`;
   }
+}
+
+function settleInvalidEnvironment(resolve: (result: WorkerResult) => void): void {
+  resolve({
+    outcome: "failed",
+    exitCode: null,
+    events: [],
+    stdout: "",
+    rawStdout: "",
+    stderr: "process supervisor: invalid explicit environment\n",
+  });
 }
 
 function isArtifactReady(events: readonly unknown[]): boolean {

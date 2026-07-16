@@ -10,6 +10,12 @@ import type {
   TaskLifecycleState,
   TerminalOutcome,
 } from "../contracts/task.js";
+import {
+  EffectReconciliationPayloadSchema,
+  UncertainEffectPayloadSchema,
+  type UncertainEffectPayload,
+} from "../contracts/uncertain-effect.js";
+import type { StopAndAskState } from "../contracts/milestone.js";
 
 export interface TaskView {
   readonly taskId: string;
@@ -19,6 +25,9 @@ export interface TaskView {
   readonly terminalOutcome: TerminalOutcome | null;
   readonly streamVersion: number;
   readonly leaseOwner: string | null;
+  readonly paused: boolean;
+  readonly stopAndAsk: StopAndAskState | null;
+  readonly uncertainEffect: UncertainEffectPayload | null;
 }
 
 type TaskProjectionState = {
@@ -29,6 +38,9 @@ type TaskProjectionState = {
   terminalOutcome: TerminalOutcome | null;
   streamVersion: number;
   leaseOwner: string | null;
+  paused: boolean;
+  stopAndAsk: StopAndAskState | null;
+  uncertainEffect: UncertainEffectPayload | null;
 };
 
 const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
@@ -42,6 +54,7 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
   ],
   leased: ["task.started", "task.cancelled", "task.failed", "task.timed_out", "task.denied"],
   running: [
+    "task.writer_completed",
     "task.validation_started",
     "task.cancelled",
     "task.failed",
@@ -49,6 +62,8 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
     "task.denied",
   ],
   validating: [
+    "task.validation_completed",
+    "task.completed",
     "task.review_requested",
     "task.cancelled",
     "task.failed",
@@ -91,7 +106,9 @@ const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> =
   "task.worktree_creation_started": "queued",
   "task.leased": "leased",
   "task.started": "running",
+  "task.writer_completed": "running",
   "task.validation_started": "validating",
+  "task.validation_completed": "validating",
   "task.review_requested": "awaiting_review",
   "task.review_approved": "integration_ready",
   "task.review_policy_blocked": "integration_ready",
@@ -117,7 +134,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     return null;
   }
 
-  projectArtifacts(events);
+  const artifacts = projectArtifacts(events);
 
   const firstEvent = events[0]!;
   if (firstEvent.type !== "task.created") {
@@ -135,6 +152,9 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     terminalOutcome: null,
     streamVersion: firstEvent.streamVersion,
     leaseOwner: null,
+    paused: false,
+    stopAndAsk: null,
+    uncertainEffect: null,
   };
   const singleOccurrenceEvents = new Set<string>();
   let integrationPrepared = false;
@@ -149,6 +169,8 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
   let observedReceiptSnapshot: string | null = null;
   let cleanupStartedSnapshot: string | null = null;
   let cleanupObservationSnapshot: string | null = null;
+  let validationCompletedOutcome: string | null = null;
+  let writerCompletedOutcome: string | null = null;
 
   for (let i = 1; i < events.length; i++) {
     const event = events[i]!;
@@ -156,11 +178,37 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     if (state.lifecycle === "terminal") {
       throw new Error("task is already terminal");
     }
+    if (
+      state.paused &&
+      event.type !== "task.effect_reconciled"
+    ) {
+      throw new Error("task is paused pending explicit reconciliation");
+    }
 
     if (
       isArtifactRecordedEventType(event.type) ||
       event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE
     ) {
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+
+    if (event.type === "task.effect_uncertain") {
+      const uncertain = UncertainEffectPayloadSchema.parse(event.payload);
+      state.paused = true;
+      state.stopAndAsk = uncertain.stopAndAsk;
+      state.uncertainEffect = uncertain;
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+    if (event.type === "task.effect_reconciled") {
+      const reconciliation = EffectReconciliationPayloadSchema.parse(event.payload);
+      if (state.uncertainEffect === null || reconciliation.boundary !== state.uncertainEffect.boundary) {
+        throw new Error("effect reconciliation boundary contradicts the paused uncertainty");
+      }
+      state.paused = false;
+      state.stopAndAsk = null;
+      state.uncertainEffect = null;
       state.streamVersion = event.streamVersion;
       continue;
     }
@@ -185,6 +233,8 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       event.type === "task.cleanup_observed" ||
       event.type === "task.cleanup_reconciled" ||
       event.type === "task.review_policy_blocked" ||
+      event.type === "task.writer_completed" ||
+      event.type === "task.validation_completed" ||
       event.type === "task.completed"
     ) {
       if (singleOccurrenceEvents.has(event.type)) {
@@ -193,7 +243,11 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       singleOccurrenceEvents.add(event.type);
     }
 
-    if (event.type === "task.integration_prepared") {
+    if (event.type === "task.writer_completed") {
+      writerCompletedOutcome = requirePayloadOutcome(event);
+    } else if (event.type === "task.validation_completed") {
+      validationCompletedOutcome = requirePayloadOutcome(event);
+    } else if (event.type === "task.integration_prepared") {
       if (integrationObserved) {
         throw new Error("task.integration_prepared is out of order");
       }
@@ -245,11 +299,23 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     } else if (event.type === "task.review_policy_blocked") {
       reviewPolicyBlocked = true;
     } else if (event.type === "task.completed") {
-      if (!cleanupCompleted && !cleanupReconciled) {
-        throw new Error("task completion requires durable cleanup completion or reconciliation");
-      }
-      if (canonicalSnapshot(payloadField(event, "receipt")) !== observedReceiptSnapshot) {
-        throw new Error("task completion receipt contradicts verified integration receipt");
+      if (state.lifecycle === "validating") {
+        const artifactKinds = new Set(artifacts.artifacts.map((artifact) => artifact.kind));
+        if (
+          writerCompletedOutcome !== "completed" ||
+          validationCompletedOutcome !== "completed" ||
+          !artifactKinds.has("patch") ||
+          !artifactKinds.has("validation_report")
+        ) {
+          throw new Error("focused task completion requires successful writer, patch, and validation evidence");
+        }
+      } else {
+        if (!cleanupCompleted && !cleanupReconciled) {
+          throw new Error("task completion requires durable cleanup completion or reconciliation");
+        }
+        if (canonicalSnapshot(payloadField(event, "receipt")) !== observedReceiptSnapshot) {
+          throw new Error("task completion receipt contradicts verified integration receipt");
+        }
       }
     }
 
@@ -300,4 +366,12 @@ function requirePayloadString(event: StoredEvent, field: string): string {
     );
   }
   return value;
+}
+
+function requirePayloadOutcome(event: StoredEvent): string {
+  const outcome = requirePayloadString(event, "outcome");
+  if (!TERMINAL_OUTCOMES.has(outcome)) {
+    throw new Error(`${event.type} payload.outcome must be canonical`);
+  }
+  return outcome;
 }
