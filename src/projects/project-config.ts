@@ -68,10 +68,6 @@ function sameExecutableIdentity(
 }
 
 export function assertApprovedValidationExecutable(executable: string): void {
-  if (!path.isAbsolute(executable)) {
-    throw new Error("Validation executable must be an approved canonical absolute path");
-  }
-
   let canonicalExecutable: string;
   try {
     canonicalExecutable = realpathSync(executable);
