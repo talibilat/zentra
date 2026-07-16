@@ -40,7 +40,11 @@ export class AgentTailJsonlFileSink {
         0o600,
       );
     } catch (error) {
-      if (isFileExistsError(error)) {
+      if (
+        error instanceof Error && "code" in error &&
+        ((error as NodeJS.ErrnoException).code === "EEXIST" ||
+          (error as NodeJS.ErrnoException).code === "ELOOP")
+      ) {
         throw new Error("Agent Tail trace path must not already exist");
       }
       throw error;
@@ -163,11 +167,6 @@ function assertSafeDirectory(directory: string, trustedRoot: string): void {
   if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
     throw new Error("Agent Tail trace path must remain inside the trusted root");
   }
-}
-
-function isFileExistsError(error: unknown): boolean {
-  return error instanceof Error && "code" in error &&
-    ((error as NodeJS.ErrnoException).code === "EEXIST" || (error as NodeJS.ErrnoException).code === "ELOOP");
 }
 
 function writeAll(descriptor: number, bytes: Buffer): void {
