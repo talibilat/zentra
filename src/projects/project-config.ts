@@ -148,7 +148,6 @@ function isSafeBranchName(branch: string): boolean {
     branch === "" ||
     branch === "@" ||
     branch.startsWith("-") ||
-    branch.endsWith("/") ||
     branch.startsWith("refs/") ||
     branch.includes("..") ||
     branch.includes("@{") ||
