@@ -167,13 +167,12 @@ function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] 
   if (lines.some((line) => !line.startsWith("|"))) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   }
-  const table = [...lines];
-  if (table.length < 3) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
-  const header = splitRow(table[0]!);
+  if (lines.length < 3) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
+  const header = splitRow(lines[0]!);
   if (JSON.stringify(header) !== JSON.stringify(REQUIRED_COLUMNS)) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   }
-  const separator = splitRow(table[1]!);
+  const separator = splitRow(lines[1]!);
   if (
     separator.length !== REQUIRED_COLUMNS.length ||
     !separator.every((cell) => /^:?-{3,}:?$/.test(cell))
@@ -182,7 +181,7 @@ function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] 
   }
   const models: ModelCapability[] = [];
   const ids = new Set<string>();
-  for (const row of table.slice(2)) {
+  for (const row of lines.slice(2)) {
     const cells = splitRow(row);
     if (cells.length !== REQUIRED_COLUMNS.length) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
     const model = parseModelRow(cells);
