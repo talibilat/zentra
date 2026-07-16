@@ -44,13 +44,13 @@ function assessFileScope(
 ): PlanReadinessDecision | null {
   for (const task of plan.tasks) {
     for (const ownedPath of task.ownedPaths) {
-      if (!isAllowedPath(ownedPath, security.allowedFileScopes)) {
+      if (!security.allowedFileScopes.some((scope) => pathMatchesScope(ownedPath, scope))) {
         return requiresApproval(
           "forbidden_file_scope",
           `Planned task ${task.taskId} owns ${ownedPath}, which is outside allowed file scope.`,
         );
       }
-      if (isForbiddenPath(ownedPath, security.forbiddenPaths)) {
+      if (security.forbiddenPaths.some((scope) => pathMatchesScope(ownedPath, scope))) {
         return requiresApproval(
           "forbidden_file_scope",
           `Planned task ${task.taskId} owns ${ownedPath}, which overlaps forbidden file scope.`,
@@ -117,14 +117,6 @@ function stopAndAsk(reason: StopAndAskReason, message: string): StopAndAskState 
     requestedBy: "zentra-readiness-gate",
     requiredDecision: "Revise the plan or approve the bounded operation before any worker starts.",
   });
-}
-
-function isAllowedPath(path: string, allowedScopes: readonly string[]): boolean {
-  return allowedScopes.some((scope) => pathMatchesScope(path, scope));
-}
-
-function isForbiddenPath(path: string, forbiddenScopes: readonly string[]): boolean {
-  return forbiddenScopes.some((scope) => pathMatchesScope(path, scope));
 }
 
 function pathMatchesScope(candidate: string, scope: string): boolean {
