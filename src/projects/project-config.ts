@@ -168,7 +168,7 @@ function stripEnvPrefix(command: readonly string[]): readonly string[] {
     return command;
   }
   let index = 1;
-  while (index < command.length && ENV_ASSIGNMENT.test(command[index] ?? "")) {
+  while (ENV_ASSIGNMENT.test(command[index] ?? "")) {
     index += 1;
   }
   return command.slice(index);
