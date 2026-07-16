@@ -727,8 +727,7 @@ function isSafeLogicalPath(candidate: string): boolean {
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
-    candidate.includes("\\") ||
-    path.posix.isAbsolute(candidate)
+    candidate.includes("\\")
   ) return false;
   const segments = candidate.split("/");
   return (
