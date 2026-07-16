@@ -93,7 +93,7 @@ export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecisi
     status: "ready_for_review",
     reason: "review_required",
     minimumReviewers,
-    requiredReviewerRoles: Object.freeze(requiredReviewerRoles),
+    requiredReviewerRoles,
     stopAndAsk: null,
   });
 }
