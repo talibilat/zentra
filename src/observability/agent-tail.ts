@@ -100,15 +100,11 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
   if (!Number.isInteger(event.streamVersion) || event.streamVersion < 1) {
     throw new Error("Agent Tail stream version must be a positive integer");
   }
-  assertTimestamp(event.recordedAt);
-}
-
-function assertTimestamp(timestamp: string): void {
-  if (timestamp.length < 11 || timestamp[10] !== "T") {
+  if (event.recordedAt.length < 11 || event.recordedAt[10] !== "T") {
     throw new Error("Agent Tail timestamp must be ISO-like");
   }
-  const parsed = Date.parse(timestamp);
-  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) {
+  const parsed = Date.parse(event.recordedAt);
+  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(event.recordedAt)) {
     throw new Error("Agent Tail timestamp must include a timezone");
   }
 }
