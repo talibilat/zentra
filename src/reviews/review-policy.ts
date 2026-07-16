@@ -5,7 +5,6 @@ import {
 } from "../contracts/milestone.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 
-export type ReviewPolicyStatus = "ready_for_review" | "paused";
 export type ReviewPolicyReason =
   | "review_required"
   | "missing_review_policy"
@@ -21,7 +20,7 @@ export interface ReviewPolicyInput {
 }
 
 export interface ReviewPolicyDecision {
-  readonly status: ReviewPolicyStatus;
+  readonly status: "ready_for_review" | "paused";
   readonly reason: ReviewPolicyReason;
   readonly minimumReviewers: number;
   readonly requiredReviewerRoles: readonly string[];
