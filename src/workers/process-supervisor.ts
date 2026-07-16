@@ -311,7 +311,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: output limit of ${maxOutputBytes} bytes exceeded\n`,
+        stderr: appendSupervisorError(stderr, `output limit of ${maxOutputBytes} bytes exceeded`),
       };
     case "spawn_error":
       return {
@@ -320,7 +320,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: ${decision.message}\n`,
+        stderr: appendSupervisorError(stderr, decision.message),
       };
     case "descendant_survived":
       return {
@@ -329,7 +329,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: process group survived bounded termination\n`,
+        stderr: appendSupervisorError(stderr, "process group survived bounded termination"),
       };
     case "exit": {
       if (decision.code === 0) {
