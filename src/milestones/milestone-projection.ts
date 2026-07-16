@@ -152,8 +152,7 @@ function updateTask(
     if (current.status !== "planned" && current.status !== "blocked") {
       throw new Error(`planned task ${taskId} cannot become ready from ${current.status}`);
     }
-    const task = state.plan.tasks.find((candidate) => candidate.taskId === taskId);
-    if (task === undefined) throw new Error(`unknown planned task: ${taskId}`);
+    const task = state.plan.tasks.find((candidate) => candidate.taskId === taskId)!;
     for (const dependency of task.dependencies) {
       const dependencyView = state.tasks.get(dependency);
       if (dependencyView?.status !== "completed") {
