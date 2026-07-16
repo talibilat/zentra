@@ -354,7 +354,6 @@ function isSafeLogicalGlob(candidate: string): boolean {
   ) return false;
   if (candidate.includes("*")) {
     if (!candidate.endsWith("/**") || candidate.slice(0, -3).includes("*")) return false;
-    if (candidate.slice(0, -3) === "") return false;
   }
   const withoutTrailingGlob = candidate.endsWith("/**") ? candidate.slice(0, -3) : candidate;
   if (/[*?\[\]{}()!+@]/.test(withoutTrailingGlob)) return false;
