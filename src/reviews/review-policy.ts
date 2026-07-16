@@ -136,19 +136,12 @@ function paused(
     reason,
     minimumReviewers,
     requiredReviewerRoles: Object.freeze([...requiredReviewerRoles]),
-    stopAndAsk: stopAndAsk(stopReason, message),
-  });
-}
-
-function stopAndAsk(
-  reason: "missing_authority" | "forbidden_file_scope",
-  message: string,
-): StopAndAskState {
-  return StopAndAskStateSchema.parse({
-    reason,
-    message,
-    requestedBy: "zentra-review-policy",
-    requiredDecision: "Assign an independent reviewer or revise the plan before integration.",
+    stopAndAsk: StopAndAskStateSchema.parse({
+      reason: stopReason,
+      message,
+      requestedBy: "zentra-review-policy",
+      requiredDecision: "Assign an independent reviewer or revise the plan before integration.",
+    }),
   });
 }
 
