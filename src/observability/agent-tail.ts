@@ -3,6 +3,8 @@ import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
 import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
 import { MilestonePausedPayloadSchema } from "../contracts/authority-attention.js";
 import { parseRoutingEventPayload } from "../routing/routing-events.js";
+import { MilestoneAuthorityEnvelopePayloadSchema, PlanRevisionPayloadSchema, ReplanningPausedPayloadSchema, ReplanningPolicyBoundPayloadSchema, ReplanningResolutionPayloadSchema } from "../contracts/replanning.js";
+import { digestCanonical } from "../contracts/authority-attention.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -61,7 +63,15 @@ export function storedEventsToAgentTailEvents(
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
   assertAgentTailCompatibleEvent(event);
   const payload = event.type === "milestone.paused"
-    ? MilestonePausedPayloadSchema.parse(event.payload)
+    ? parseMilestonePausedPayload(event.payload)
+    : event.type === "milestone.plan_revised"
+      ? redactedRevisionPayload(event.payload)
+    : event.type === "milestone.replanning_resolved"
+      ? ReplanningResolutionPayloadSchema.parse(event.payload)
+    : event.type === "milestone.replanning_policy_bound"
+      ? redactedPolicyPayload(event.payload)
+    : event.type === "milestone.authority_envelope_established"
+      ? redactedEnvelopePayload(event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -140,7 +150,16 @@ function spanIdFor(event: StoredEvent): string {
 
 function actorFor(event: StoredEvent): AgentTailActor {
   if (event.type === "milestone.paused") {
-    return { id: MilestonePausedPayloadSchema.parse(event.payload).attention.requestedBy, role: "authority_gate" };
+    const paused = parseMilestonePausedPayload(event.payload);
+    return "revisionId" in paused.attention
+      ? { id: paused.attention.requestedBy, role: "replanning_controller" }
+      : { id: paused.attention.requestedBy, role: "authority_gate" };
+  }
+  if (event.type === "milestone.plan_revised") {
+    return { id: PlanRevisionPayloadSchema.parse(event.payload).requestedBy, role: "replanning_controller" };
+  }
+  if (event.type === "milestone.replanning_resolved") {
+    return { id: ReplanningResolutionPayloadSchema.parse(event.payload).decidedBy, role: "replanning_controller" };
   }
   if (event.type.startsWith("routing.")) {
     return { id: "zentra-model-router", role: "scheduler" };
@@ -212,7 +231,10 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
-  if (event.type === "milestone.paused") return "authority_boundary";
+  if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
+  if (event.type === "milestone.paused") {
+    return ReplanningPausedPayloadSchema.safeParse(event.payload).success ? "milestone_replanning" : "authority_boundary";
+  }
   if (event.type.startsWith("routing.")) return "model_routing";
   if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
@@ -354,4 +376,71 @@ function chosenModelAttributes(type: string, payload: unknown): object {
       model_sheet_sha256: selection.modelSheetSha256,
     }),
   };
+}
+
+function parseMilestonePausedPayload(payload: unknown) {
+  const authority = MilestonePausedPayloadSchema.safeParse(payload);
+  if (authority.success) return authority.data;
+  return ReplanningPausedPayloadSchema.parse(payload);
+}
+
+function redactedRevisionPayload(payload: unknown): unknown {
+  const revision = PlanRevisionPayloadSchema.parse(payload);
+  return Object.freeze({
+    schemaVersion: revision.schemaVersion,
+    revisionId: revision.revisionId,
+    revisionNumber: revision.revisionNumber,
+    milestoneId: revision.milestoneId,
+    projectId: revision.projectId,
+    priorPlanDigest: revision.priorPlanDigest,
+    revisedPlanDigest: revision.revisedPlanDigest,
+    authorityEnvelopeDigest: revision.authorityEnvelopeDigest,
+    securityDigest: revision.securityDigest,
+    modelSheetDigest: revision.modelSheetDigest,
+    requestedBy: revision.requestedBy,
+    priorEvidence: revision.priorEvidence,
+    supersessions: revision.supersessions,
+  });
+}
+
+function redactedPolicyPayload(payload: unknown): unknown {
+  const { policy } = ReplanningPolicyBoundPayloadSchema.parse(payload);
+  return Object.freeze({
+    schemaVersion: policy.schemaVersion,
+    milestoneId: policy.milestoneId,
+    projectId: policy.projectId,
+    securityDigest: policy.securityDigest,
+    networkDigest: policy.networkDigest,
+    modelSheetDigest: policy.modelSheetDigest,
+    releaseBoundary: policy.security.releaseBoundary,
+    allowedRepositoryCount: policy.security.allowedRepositoryCount,
+    allowedFileScopeCount: policy.security.allowedFileScopeCount,
+    forbiddenPathCount: policy.security.forbiddenPathCount,
+    allowedDestinationCount: policy.security.network.allowedDestinationCount,
+    secretHandlingRuleCount: policy.security.secretHandlingRuleCount,
+    approvalRequiredOperations: policy.security.approvalRequiredOperations,
+    stopAndAskConditions: policy.security.stopAndAskConditions,
+    modelCount: policy.modelSheet?.models.length ?? 0,
+  });
+}
+
+function redactedEnvelopePayload(payload: unknown): unknown {
+  const { envelope } = MilestoneAuthorityEnvelopePayloadSchema.parse(payload);
+  return Object.freeze({
+    schemaVersion: envelope.schemaVersion,
+    milestoneId: envelope.milestoneId,
+    projectId: envelope.projectId,
+    envelopeDigest: digestCanonical(envelope),
+    baselinePlanDigest: envelope.baselinePlanDigest,
+    goalDigest: envelope.goalDigest,
+    securityDigest: envelope.securityDigest,
+    networkDigest: envelope.networkDigest,
+    modelSheetDigest: envelope.modelSheetDigest,
+    releaseBoundary: envelope.releaseBoundary,
+    ownedScopeCount: envelope.aggregateOwnedPaths.length,
+    forbiddenScopeCount: envelope.forbiddenPaths.length,
+    authorityCategoryCount: envelope.authorityCategories.length,
+    roleBoundaryCount: envelope.roleBoundaries.length,
+    capabilityCount: envelope.capabilities.length,
+  });
 }

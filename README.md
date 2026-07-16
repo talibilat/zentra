@@ -311,6 +311,31 @@ Recovery is read-only classification and never automatically retries a potential
 
 An `await_reconciliation` decision means a human or later bounded workflow must reconcile uncertain state before another effect is authorized.
 
+### Bounded Replanning
+
+The library API can establish a durable authority envelope when registering an accepted milestone plan and can later call `MilestoneRegistry.revisePlan` after execution-informed evidence exists.
+Registration appends `milestone.replanning_policy_bound` before `milestone.authority_envelope_established` in the same journal append.
+The policy event contains canonical public Security Sheet component digests and bounded counts/enums plus an exact canonical Model Sheet snapshot and digest.
+It does not retain raw network destinations or secret-handling prose.
+The envelope binds the exact goal, project and milestone identities, aggregate ownership and budget ceilings, forbidden scope, authority and role/harness boundaries, Security Sheet digest, network and release boundaries, and the exact Model Sheet capability set.
+Model-backed tasks fail closed when no Model Sheet is supplied, and admission must match the pinned capability's role, harness, tools, network, context, authority, and transport identity.
+
+An accepted in-bound request appends `milestone.plan_revised` with the complete revised acyclic plan and immutable references to prior strictly parsed evidence in the same milestone stream.
+Completed successful tasks may be carried unchanged without rerunning, removed failed attempts remain visible in `historicalTasks`, and `planHistory` plus `revisions` retain deterministic ancestry.
+Replacing a failed terminal task requires an explicit old-task to new-task supersession relation retained in revision history.
+The latest active plan governs milestone completion.
+
+Stale, malformed, forged, expanded, security-changing, active-effect, or uncertain-effect requests append one bounded `milestone.paused` replanning attention instead.
+The attention contains only canonical identities, digests, and the violated dimension; it does not copy plan, policy, evidence, or secret bodies.
+Paused milestones cannot project later readiness, worker, resource, or effect events.
+An exact `abandon_candidate` decision appends `milestone.replanning_resolved`, preserves the attention in history, grants no authority, and restores the unchanged current plan for a fresh bounded request.
+
+`ProjectingEventJournal` writes accepted revision, pause, and resolution events to Agent Tail JSONL after the SQLite append.
+Agent Tail receives only revision identities, digests, evidence references, and supersession metadata rather than the journal's full plan descriptions, goals, or paths.
+SQLite remains authoritative if that projection fails, and `revisePlan` reports the projection failure separately through `traceProjectionFailed`.
+`EventJournal.append` is trusted infrastructure and does not perform domain authorization itself, while milestone replay rejects histories whose policy, envelope, capability, revision, evidence, or resolution events are internally inconsistent.
+There is intentionally no installed replanning CLI in this release.
+
 ## Tests
 
 Run the complete test suite, type check, build, and built CLI help verification from the repository root.
