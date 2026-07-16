@@ -10,23 +10,41 @@ import {
 import {
   ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
   artifactEvidenceSha256,
+  type ArtifactKind,
   type PatchArtifactEvidence,
 } from "../contracts/artifact.js";
+import type { TerminalOutcome } from "../contracts/task.js";
 import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
 import {
   isVerifiedOpenCodeProbeReport,
   type OpenCodeProbeReport,
 } from "../harnesses/opencode-probe.js";
+import {
+  IntegrationExecutionError,
+  type IntegrationQueue,
+  type IntegrationReceipt,
+  IntegrationUncertainError,
+} from "../integration/integration-queue.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectConfig } from "../projects/project-config.js";
+import type { ReviewGate } from "../reviews/review-gate.js";
+import { assessReviewPolicy } from "../reviews/review-policy.js";
+import {
+  ReviewerExecutionError,
+  type ReviewInput,
+  type ReviewerAdapter,
+} from "../reviews/reviewer-adapter.js";
 import type { TaskService } from "../tasks/task-service.js";
 import type { TaskView } from "../tasks/task-projection.js";
+import type { GitClient } from "../workspaces/git-client.js";
 import type { WorkspaceLease, WorktreeManager } from "../workspaces/worktree-manager.js";
 import {
+  WorkspaceCommitUncertainError,
   WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
 } from "../workspaces/worktree-manager.js";
+import { verifyCompletedIntegrationReceipt } from "./tracer-bullet.js";
 import type {
   WriterCapsuleResult,
   WriterWorktreeCapsule,
@@ -38,7 +56,46 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
   readonly probe: OpenCodeProbeReport;
+  readonly reviewerId?: string;
   readonly signal: AbortSignal;
+}
+
+export interface OpenCodeIntegrationDependencies {
+  readonly reviewer: ReviewerAdapter;
+  readonly reviews: ReviewGate;
+  readonly integrations: IntegrationQueue;
+  readonly git: GitClient;
+}
+
+export interface OpenCodeIntegratedSingleFileTracerRequest
+  extends OpenCodeSingleFileTracerRequest {
+  readonly reviewerId: string;
+}
+
+const GIT_OPERATION_TIMEOUT_MS = 30_000;
+
+export class OpenCodeIntegratedSingleFileTracer {
+  private readonly tracer: OpenCodeSingleFileTracerBullet;
+
+  constructor(
+    tasks: TaskService,
+    capsule: WriterWorktreeCapsule,
+    validations: ValidationRunner,
+    worktrees: WorktreeManager,
+    integration: OpenCodeIntegrationDependencies,
+  ) {
+    this.tracer = new OpenCodeSingleFileTracerBullet(
+      tasks,
+      capsule,
+      validations,
+      worktrees,
+      integration,
+    );
+  }
+
+  run(request: OpenCodeIntegratedSingleFileTracerRequest): Promise<TaskView> {
+    return this.tracer.run(request);
+  }
 }
 
 export class OpenCodeSingleFileTracerBullet {
@@ -47,6 +104,7 @@ export class OpenCodeSingleFileTracerBullet {
     private readonly capsule: WriterWorktreeCapsule,
     private readonly validations: ValidationRunner,
     private readonly worktrees: WorktreeManager,
+    private readonly integration?: OpenCodeIntegrationDependencies,
   ) {}
 
   async run(request: OpenCodeSingleFileTracerRequest): Promise<TaskView> {
@@ -131,11 +189,13 @@ export class OpenCodeSingleFileTracerBullet {
     try {
       inspected = await this.worktrees.inspect(lease, { signal: request.signal });
     } catch (error) {
-      return this.tasks.append(request.task.taskId, "task.failed", {
-        stage: "artifact",
-        reason: error instanceof Error ? error.message : String(error),
-        workspace: lease.path,
-      }, null);
+      return this.terminate(
+        request.task.taskId,
+        error instanceof WorkspaceGitTerminationError ? error.outcome : "failed",
+        "artifact",
+        errorMessage(error),
+        { workspace: lease.path },
+      );
     }
     const diffSha256 = createHash("sha256").update(inspected.diff, "utf8").digest("hex");
     if (inspected.diff === "") {
@@ -198,28 +258,27 @@ export class OpenCodeSingleFileTracerBullet {
         workspace: lease.path,
       }, null);
     }
-    try {
-      this.recordArtifact(request.task.taskId, "validation_report", validation, {
-        type: "task.validation_completed",
-        payload: { outcome: validation.outcome, validation, diffSha256 },
-      });
-    } catch (error) {
-      return this.tasks.append(request.task.taskId, "task.failed", {
-        stage: "validation",
-        reason: error instanceof Error ? error.message : String(error),
-        workspace: lease.path,
-      }, null);
-    }
     let postValidation;
     try {
       postValidation = await this.worktrees.inspect(lease, { signal: request.signal });
     } catch (error) {
-      return this.tasks.append(request.task.taskId, "task.failed", {
-        stage: "validation",
-        reason: error instanceof Error ? error.message : String(error),
-        validation,
-        workspace: lease.path,
-      }, null);
+      const outcome = error instanceof WorkspaceGitTerminationError ? error.outcome : "failed";
+      this.recordArtifact(request.task.taskId, "validation_report", validation, [
+        {
+          type: "task.validation_completed",
+          payload: { outcome: validation.outcome, validation, diffSha256 },
+        },
+        {
+          type: `task.${outcome}`,
+          payload: {
+            stage: "validation",
+            reason: errorMessage(error),
+            validation,
+            workspace: lease.path,
+          },
+        },
+      ]);
+      return this.current(request.task.taskId);
     }
     const postValidationSha256 = createHash("sha256")
       .update(postValidation.diff, "utf8")
@@ -230,27 +289,278 @@ export class OpenCodeSingleFileTracerBullet {
       : validation.outcome === "completed"
       ? "failed"
       : validation.outcome;
-    return this.tasks.append(request.task.taskId, `task.${terminal}`, {
-      stage: "validation",
-      validation,
-      diffSha256,
+    const continueToReview = terminal === "completed" && request.reviewerId !== undefined;
+    try {
+      this.recordArtifact(
+        request.task.taskId,
+        "validation_report",
+        validation,
+        [
+          {
+            type: "task.validation_completed",
+            payload: { outcome: validation.outcome, validation, diffSha256 },
+          },
+          ...(continueToReview
+            ? [{
+              type: "task.review_requested",
+              payload: { reviewerId: request.reviewerId, validation },
+            }]
+            : []),
+        ],
+      );
+    } catch (error) {
+      return this.terminate(request.task.taskId, "failed", "validation", errorMessage(error), {
+        workspace: lease.path,
+      });
+    }
+    if (!continueToReview) {
+      return this.terminate(request.task.taskId, terminal, "validation", "focused validation finished", {
+        validation,
+        diffSha256,
+        changedPath,
+        workspace: lease.path,
+      });
+    }
+    return this.reviewCommitAndIntegrate(
+      request,
+      lease,
       changedPath,
-      workspace: lease.path,
-    }, null);
+      inspected.diff,
+      diffSha256,
+      validation,
+    );
+  }
+
+  private async reviewCommitAndIntegrate(
+    request: OpenCodeSingleFileTracerRequest,
+    lease: WorkspaceLease,
+    changedPath: string,
+    diff: string,
+    diffSha256: string,
+    validation: ValidationReport,
+  ): Promise<TaskView> {
+    const dependencies = this.integration;
+    const reviewerId = request.reviewerId!;
+    if (dependencies === undefined) {
+      return this.terminate(
+        request.task.taskId,
+        "failed",
+        "review",
+        "OpenCode integration dependencies are not configured",
+        { workspace: lease.path },
+      );
+    }
+    const reviewInput: ReviewInput = {
+      workerId: request.model.id,
+      reviewerId,
+      diff,
+      validation,
+    };
+    try {
+      const decision = await dependencies.reviewer.review(reviewInput, request.signal);
+      const evidence = dependencies.reviews.verifyEvidence(reviewInput, decision);
+      if (!evidence.approved) {
+        this.recordArtifact(request.task.taskId, "review_report", evidence, {
+          type: "task.denied",
+          payload: { stage: "review", reason: evidence.reason, review: evidence },
+        });
+        return this.current(request.task.taskId);
+      }
+      const review = dependencies.reviews.verify(reviewInput, evidence);
+      if (review.diffSha256 !== diffSha256) {
+        throw new Error("verified review digest differs from the validated diff");
+      }
+      const policy = assessReviewPolicy({
+        task: request.task,
+        security: request.security,
+        workerId: request.model.id,
+        reviewerIds: [review.reviewerId],
+      });
+      this.recordArtifact(
+        request.task.taskId,
+        "review_report",
+        review,
+        [
+          { type: "task.review_approved", payload: { review } },
+          ...(policy.status === "ready_for_review"
+            ? []
+            : [{
+              type: "task.review_policy_blocked",
+              payload: { stage: "review", reason: policy.reason, reviewPolicy: policy },
+            }]),
+        ],
+      );
+      if (policy.status !== "ready_for_review") return this.current(request.task.taskId);
+
+      const sourceCommit = await this.worktrees.commit(
+        lease,
+        [changedPath],
+        request.task.title,
+        review.diffSha256,
+        {
+          signal: request.signal,
+          timeoutMs: Math.min(
+            request.task.budget.maxSeconds * 1_000,
+            GIT_OPERATION_TIMEOUT_MS,
+          ),
+        },
+      );
+      const postCommitOutcome = signalOutcome(request.signal);
+      if (postCommitOutcome !== null) {
+        return this.terminate(
+          request.task.taskId,
+          postCommitOutcome,
+          "commit",
+          "task signal ended after commit acknowledgement",
+          { sourceCommit, workspace: lease.path },
+        );
+      }
+      this.tasks.append(request.task.taskId, "task.integration_started", {
+        sourceCommit,
+        review,
+      }, null);
+
+      const prepared = { receipt: null as IntegrationReceipt | null };
+      let receipt: IntegrationReceipt;
+      try {
+        receipt = await dependencies.integrations.integrate({
+          project: request.project,
+          lease,
+          review,
+          signal: request.signal,
+          onPrepared: (preparedReceipt) => {
+            prepared.receipt = preparedReceipt;
+            this.recordArtifact(
+              request.task.taskId,
+              "integration_receipt",
+              preparedReceipt,
+              {
+                type: "task.integration_prepared",
+                payload: { receipt: preparedReceipt },
+              },
+              "prepared",
+            );
+          },
+        });
+      } catch (error) {
+        if (error instanceof IntegrationUncertainError) {
+          return this.observeIntegration(request.task.taskId, {
+            reason: error.message,
+            evidence: error.evidence,
+          });
+        }
+        if (error instanceof IntegrationExecutionError) throw error;
+        return this.observeIntegration(request.task.taskId, {
+          error: { name: errorName(error), message: errorMessage(error) },
+        });
+      }
+      if (receipt.outcome !== "completed") {
+        const finalReceipt = prepared.receipt === null
+          ? receipt
+          : { ...prepared.receipt, outcome: receipt.outcome };
+        this.recordArtifact(
+          request.task.taskId,
+          "integration_receipt",
+          finalReceipt,
+          {
+            type: `task.${receipt.outcome}`,
+            payload: {
+              stage: "integration",
+              reason: "integration did not complete successfully",
+              receipt: finalReceipt,
+              candidateCleanupFailures: this.integrationCleanupFailures(request.task.taskId),
+            },
+          },
+          "final",
+        );
+        return this.current(request.task.taskId);
+      }
+      try {
+        await verifyCompletedIntegrationReceipt({
+          project: request.project,
+          taskId: request.task.taskId,
+          sourceCommit,
+          review,
+          receipt,
+          git: dependencies.git,
+        });
+      } catch (error) {
+        return this.observeIntegration(request.task.taskId, {
+          receipt,
+          verification: "failed",
+          reason: errorMessage(error),
+        });
+      }
+      this.tasks.append(request.task.taskId, "task.integration_observed", {
+        receipt,
+        verification: "verified",
+        cleanupFailures: this.integrationCleanupFailures(request.task.taskId),
+      }, null);
+      const cleanup = {
+        sourceCommit,
+        resultCommit: receipt.resultCommit,
+        workspace: lease.path,
+        branch: lease.branch,
+      };
+      this.tasks.append(request.task.taskId, "task.cleanup_started", cleanup, null);
+      try {
+        await this.worktrees.cleanupCompleted(request.project, lease, sourceCommit, {
+          timeoutMs: GIT_OPERATION_TIMEOUT_MS,
+        });
+      } catch (error) {
+        const observed = error as {
+          readonly phase?: unknown;
+          readonly uncertain?: unknown;
+          readonly evidence?: unknown;
+        };
+        return this.tasks.append(request.task.taskId, "task.cleanup_observed", {
+          phase: typeof observed.phase === "string" ? observed.phase : "unknown",
+          uncertain: observed.uncertain === true,
+          evidence: observed.evidence ?? {},
+          reason: errorMessage(error),
+        }, null);
+      }
+      this.tasks.append(request.task.taskId, "task.cleanup_completed", cleanup, null);
+      return this.tasks.append(request.task.taskId, "task.completed", { receipt }, null);
+    } catch (error) {
+      if (error instanceof WorkspaceCommitUncertainError) {
+        return this.tasks.append(request.task.taskId, "task.commit_observed", {
+          stage: "commit",
+          reason: error.message,
+        }, null);
+      }
+      const outcome = error instanceof ReviewerExecutionError ||
+          error instanceof WorkspaceGitTerminationError ||
+          error instanceof IntegrationExecutionError
+        ? error.outcome
+        : signalOutcome(request.signal) ?? "failed";
+      const current = this.current(request.task.taskId);
+      if (current.lifecycle === "integrating" && !(error instanceof IntegrationExecutionError)) {
+        return this.observeIntegration(request.task.taskId, {
+          error: { name: errorName(error), message: errorMessage(error) },
+        });
+      }
+      return this.terminate(request.task.taskId, outcome, current.lifecycle, errorMessage(error), {
+        workspace: lease.path,
+      });
+    }
   }
 
   private recordArtifact(
     taskId: string,
-    kind: "patch" | "validation_report",
+    kind: ArtifactKind,
     evidence: unknown,
-    following: { readonly type: string; readonly payload: unknown },
+    following:
+      | { readonly type: string; readonly payload: unknown }
+      | readonly { readonly type: string; readonly payload: unknown }[],
+    phase?: "prepared" | "final",
   ): void {
     const sha256 = artifactEvidenceSha256(kind, evidence);
     const artifact = {
       artifactId: randomUUID(),
       taskId,
       kind,
-      path: kind === "patch" ? "artifacts/patch.diff" : "artifacts/focused-validation.json",
+      path: artifactPath(kind),
       sha256,
       createdAt: new Date().toISOString(),
     };
@@ -262,12 +572,73 @@ export class OpenCodeSingleFileTracerBullet {
       },
       {
         type: `artifact.${kind}_recorded`,
-        payload: { artifact, evidence },
+        payload: {
+          artifact,
+          evidence,
+          ...(phase === undefined ? {} : { phase }),
+        },
         causationId: null,
       },
-      { ...following, causationId: null },
+      ...(Array.isArray(following) ? following : [following]).map((event) => ({
+        ...event,
+        causationId: null,
+      })),
     ]);
   }
+
+  private terminate(
+    taskId: string,
+    outcome: TerminalOutcome,
+    stage: string,
+    reason: string,
+    evidence: Record<string, unknown> = {},
+  ): TaskView {
+    const current = this.current(taskId);
+    if (current.lifecycle === "terminal") return current;
+    return this.tasks.append(taskId, `task.${outcome}`, { stage, reason, ...evidence }, null);
+  }
+
+  private current(taskId: string): TaskView {
+    const current = this.tasks.get(taskId);
+    if (current === null) throw new Error(`task ${taskId} not found`);
+    return current;
+  }
+
+  private observeIntegration(taskId: string, payload: unknown): TaskView {
+    const durable = typeof payload === "object" && payload !== null
+      ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
+      : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
+    return this.tasks.append(taskId, "task.integration_observed", durable, null);
+  }
+
+  private integrationCleanupFailures(taskId: string): readonly unknown[] {
+    return this.integration?.integrations.getCleanupFailures()
+      .filter((failure) => failure.taskId === taskId) ?? [];
+  }
+}
+
+function artifactPath(kind: ArtifactKind): string {
+  return {
+    patch: "artifacts/patch.diff",
+    validation_report: "artifacts/focused-validation.json",
+    review_report: "artifacts/review-decision.json",
+    integration_receipt: "artifacts/integration-receipt.json",
+  }[kind];
+}
+
+function signalOutcome(signal: AbortSignal): "cancelled" | "timed_out" | null {
+  if (!signal.aborted) return null;
+  return signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
+    ? "timed_out"
+    : "cancelled";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorName(error: unknown): string {
+  return error instanceof Error && error.name !== "" ? error.name : "Error";
 }
 
 function singleOwnedFile(task: PlannedTask): string {
