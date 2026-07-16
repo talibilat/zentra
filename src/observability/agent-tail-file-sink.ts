@@ -120,7 +120,7 @@ export function assertSafeAgentTailJsonlPath(trustedRoot: string, tracePath: str
     throw new Error("Agent Tail trace path contains forbidden characters");
   }
 
-  assertSafeDirectory(trustedRoot, trustedRoot);
+  assertSafeDirectory(trustedRoot);
   const relative = path.relative(trustedRoot, tracePath);
   if (
     relative.length === 0 ||
@@ -145,7 +145,7 @@ export function assertSafeAgentTailJsonlPath(trustedRoot: string, tracePath: str
   throw new Error("Agent Tail trace path must not already exist");
 }
 
-function assertSafeDirectory(directory: string, trustedRoot: string): void {
+function assertSafeDirectory(directory: string): void {
   let stat;
   try {
     stat = lstatSync(directory);
@@ -161,10 +161,6 @@ function assertSafeDirectory(directory: string, trustedRoot: string): void {
   const canonical = realpathSync.native(directory);
   if (canonical !== directory) {
     throw new Error("Agent Tail trace path must not contain symbolic links");
-  }
-  const relative = path.relative(trustedRoot, canonical);
-  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
-    throw new Error("Agent Tail trace path must remain inside the trusted root");
   }
 }
 
