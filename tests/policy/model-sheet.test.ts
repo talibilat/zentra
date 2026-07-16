@@ -141,6 +141,10 @@ describe("model sheet parser", () => {
       () => parseModelSheetMarkdown(validSheet.replace("opencode-general | 8/10", "opencode-general, | 8/10")),
       "MODEL_SHEET_INVALID_FALLBACK",
     );
+    expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("opencode-general | 8/10", " | 8/10")),
+      "MODEL_SHEET_INVALID_FALLBACK",
+    );
   });
 
   it("rejects duplicate model identities and self fallbacks", () => {

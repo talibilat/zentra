@@ -284,7 +284,7 @@ function parsePositiveInteger(value: string | undefined, code: ModelSheetErrorCo
 }
 
 function parseFallbackOrder(value: string | undefined): string[] {
-  if (value === undefined || value === "") throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
+  if (value === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
   if (value === "none") return [];
   const fallbacks = value.split(",").map((token) => token.trim()).filter(Boolean);
   if (
