@@ -435,7 +435,9 @@ function createProgram(
         tracePath: options.agentTailJsonl,
         stopAndAskBoundaries: security.stopAndAskConditions,
       } satisfies Record<string, unknown>;
-      assertOperationalJsonFits(previewValue);
+      if (Buffer.byteLength(serializeJson(previewValue), "utf8") > MAX_OPERATIONAL_JSON_BYTES) {
+        throw new CliFailure("OUTPUT_TOO_LARGE");
+      }
       const trace = prepareAgentTailTrace(
         options.database,
         options.agentTailJsonl,
@@ -998,12 +1000,6 @@ async function waitForPending(
   ]);
   if (timer !== undefined) clearTimeout(timer);
   return completed;
-}
-
-function assertOperationalJsonFits(value: Record<string, unknown>): void {
-  if (Buffer.byteLength(serializeJson(value), "utf8") > MAX_OPERATIONAL_JSON_BYTES) {
-    throw new CliFailure("OUTPUT_TOO_LARGE");
-  }
 }
 
 function deniedCapabilities(security: ReturnType<typeof loadSecuritySheet>): readonly string[] {
