@@ -218,7 +218,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       cleanupStarted = true;
       cleanupStartedSnapshot = canonicalSnapshot(event.payload);
     } else if (event.type === "task.cleanup_completed") {
-      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+      if (!cleanupStarted || cleanupObserved) {
         throw new Error("cleanup completion requires one cleanup start");
       }
       if (canonicalSnapshot(event.payload) !== cleanupStartedSnapshot) {
