@@ -171,6 +171,5 @@ function canonicalExecutable(candidate: string): string {
 }
 
 function providerFromModel(model: string): string {
-  const [provider] = model.split("/", 1);
-  return provider ?? model;
+  return model.replace(/\/.*/, "");
 }
