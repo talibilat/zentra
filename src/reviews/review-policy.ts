@@ -29,8 +29,11 @@ export interface ReviewPolicyDecision {
 }
 
 export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecision {
-  const minimumReviewers = minimumReviewersFor(input.task);
-  const requiredReviewerRoles = requiredRolesFor(input.task);
+  const heightenedReview = requiresHeightenedReview(input.task);
+  const minimumReviewers = heightenedReview ? 2 : 1;
+  const requiredReviewerRoles = heightenedReview
+    ? Object.freeze(["reviewer", "security_reviewer"])
+    : Object.freeze(["reviewer"]);
   const outsideAllowedScope = input.task.ownedPaths.find((ownedPath) =>
     !input.security.allowedFileScopes.some((allowedPath) => pathMatchesScope(ownedPath, allowedPath))
   );
@@ -106,16 +109,6 @@ function reviewerRolesSatisfy(
     for (const role of reviewerRoles[reviewerId] ?? []) assigned.add(role);
   }
   return requiredRoles.every((role) => assigned.has(role));
-}
-
-function minimumReviewersFor(task: PlannedTask): number {
-  return requiresHeightenedReview(task) ? 2 : 1;
-}
-
-function requiredRolesFor(task: PlannedTask): readonly string[] {
-  return requiresHeightenedReview(task)
-    ? Object.freeze(["reviewer", "security_reviewer"])
-    : Object.freeze(["reviewer"]);
 }
 
 function requiresHeightenedReview(task: PlannedTask): boolean {
