@@ -346,9 +346,7 @@ function assertNoFallbackCycles(
     if (visiting.has(model.id)) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
     visiting.add(model.id);
     for (const fallback of model.fallbackOrder) {
-      const fallbackModel = byId.get(fallback);
-      if (fallbackModel === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
-      visit(fallbackModel);
+      visit(byId.get(fallback)!);
     }
     visiting.delete(model.id);
     visited.add(model.id);
