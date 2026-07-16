@@ -269,7 +269,7 @@ function parseTokenList(
 function parseSpecialties(value: string | undefined): string[] {
   if (value === undefined || value === "") throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
   const specialties = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (specialties.length === 0 || specialties.length !== value.split(",").length) {
+  if (specialties.length !== value.split(",").length) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
   }
   const seen = new Set<string>();
