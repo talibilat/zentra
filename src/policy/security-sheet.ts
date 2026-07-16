@@ -149,7 +149,10 @@ export function parseSecuritySheetMarkdown(markdown: string): SecuritySheet {
     allowedFileScopes: Object.freeze(allowedFileScopes),
     forbiddenPaths: Object.freeze(forbiddenPaths),
     network: Object.freeze(parseNetwork(sections.get("Network") ?? [])),
-    secretHandling: Object.freeze(parseSecretHandling(required(sections, "Secret Handling"))),
+    secretHandling: Object.freeze(unique(bulletValues(
+      required(sections, "Secret Handling"),
+      "SECURITY_SHEET_MISSING_SECTION",
+    ))),
     approvalRequiredOperations: Object.freeze(parseEnumList(
       required(sections, "Approval Required Operations"),
       APPROVAL_OPERATIONS,
@@ -250,10 +253,6 @@ function parsePathScopes(lines: readonly string[]): string[] {
     if (!isSafeLogicalGlob(scope)) throw new SecuritySheetError("SECURITY_SHEET_INVALID_PATH_SCOPE");
     return scope;
   }));
-}
-
-function parseSecretHandling(lines: readonly string[]): string[] {
-  return unique(bulletValues(lines, "SECURITY_SHEET_MISSING_SECTION"));
 }
 
 function parseEnumList(
