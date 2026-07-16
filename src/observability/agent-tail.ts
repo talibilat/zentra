@@ -1,6 +1,7 @@
 import type { StoredEvent } from "../contracts/event.js";
 import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
 import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
+import { parseRoutingEventPayload } from "../routing/routing-events.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -36,6 +37,15 @@ export interface AgentTailEvent {
       readonly causation_id: string | null;
       readonly correlation_id: string;
       readonly native_type: string;
+      readonly chosen_model?: {
+        readonly capability_id: string;
+        readonly harness: string;
+        readonly transport_model_sha256: string;
+        readonly role: string;
+        readonly task_type: string;
+        readonly basis: string;
+        readonly model_sheet_sha256: string;
+      };
     };
   };
   readonly payload: unknown;
@@ -51,6 +61,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
   assertAgentTailCompatibleEvent(event);
   const payload = event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
+    : event.type.startsWith("routing.")
+      ? parseRoutingEventPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
       ? parseOpenCodeMilestonePayload(event.type, event.payload)
       : event.payload;
@@ -78,6 +90,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
         causation_id: event.causationId,
         correlation_id: event.correlationId,
         native_type: event.type,
+        ...chosenModelAttributes(event.type, payload),
       }),
     }),
     payload: cloneJson(payload),
@@ -116,12 +129,16 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
   if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
   if (event.type.startsWith("capsule.")) return `capsule:${event.streamId}`;
   return `task:${event.streamId}`;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("routing.")) {
+    return { id: "zentra-model-router", role: "scheduler" };
+  }
   if (isOpenCodeRoleEvent(event)) {
     return {
       id: payloadString(event.payload, "actorId")!,
@@ -189,6 +206,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type.startsWith("routing.")) return "model_routing";
   if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
   if (type === "capsule.proxy_interaction_observed") return "network_policy";
@@ -217,6 +235,10 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (type === "routing.model_selected") return "completed";
+  if (type === "routing.outcome_recorded") {
+    return payloadString(event.payload, "outcome") ?? "failed";
+  }
   if (isOpenCodeRoleEvent(event)) {
     return type === "milestone.task_running"
       ? "running"
@@ -303,4 +325,26 @@ function cloneJson(value: unknown): unknown {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error("Agent Tail payload must be JSON-serializable");
   return JSON.parse(serialized) as unknown;
+}
+
+function chosenModelAttributes(type: string, payload: unknown): object {
+  if (type !== "routing.model_selected" || typeof payload !== "object" || payload === null) return {};
+  const selection = payload as {
+    readonly model: { capabilityId: string; harness: string; transportModelSha256: string };
+    readonly role: string;
+    readonly taskType: string;
+    readonly basis: string;
+    readonly modelSheetSha256: string;
+  };
+  return {
+    chosen_model: Object.freeze({
+      capability_id: selection.model.capabilityId,
+      harness: selection.model.harness,
+      transport_model_sha256: selection.model.transportModelSha256,
+      role: selection.role,
+      task_type: selection.taskType,
+      basis: selection.basis,
+      model_sheet_sha256: selection.modelSheetSha256,
+    }),
+  };
 }

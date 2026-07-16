@@ -277,6 +277,45 @@ describe("Agent Tail event envelope export", () => {
     });
   });
 
+  it("exposes strictly validated chosen-model routing metadata", () => {
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      type: "routing.model_selected",
+      payload: {
+        schemaVersion: 1,
+        executionId: "execution-1",
+        taskId: "task-1",
+        taskType: "single_file_implementation",
+        role: "implementer",
+        model: {
+          capabilityId: "writer-a",
+          harness: "opencode",
+          transportModelSha256: "b".repeat(64),
+        },
+        candidateCapabilityIds: ["writer-a", "writer-b"],
+        modelSheetSha256: "a".repeat(64),
+        algorithmVersion: "approved-history-v1",
+        basis: "outcome_history",
+      },
+    }));
+
+    expect(exported).toMatchObject({
+      actor: { id: "zentra-model-router", role: "scheduler" },
+      operation: { name: "model_routing", status: "completed" },
+      attributes: { zentra: { chosen_model: {
+        capability_id: "writer-a",
+        harness: "opencode",
+        transport_model_sha256: "b".repeat(64),
+        role: "implementer",
+        task_type: "single_file_implementation",
+        basis: "outcome_history",
+      } } },
+    });
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "routing.model_selected",
+      payload: { model: { capabilityId: "spoofed" } },
+    }))).toThrow();
+  });
+
   it("serializes one valid JSONL line without mutating native event payload", () => {
     const payload = { terminalOutcome: "completed" };
     const event = storedEvent({ type: "task.completed", payload });
