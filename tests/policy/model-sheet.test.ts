@@ -87,6 +87,10 @@ describe("model sheet parser", () => {
       "MODEL_SHEET_INVALID_ROLE",
     );
     expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("planner,researcher", "")),
+      "MODEL_SHEET_INVALID_ROLE",
+    );
+    expectErrorCode(
       () => parseModelSheetMarkdown(validSheet.replace("planner,researcher", "planner,planner")),
       "MODEL_SHEET_INVALID_ROLE",
     );

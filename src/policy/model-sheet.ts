@@ -247,7 +247,7 @@ function parseTokenList(
   allowed: ReadonlySet<string>,
   code: ModelSheetErrorCode,
 ): string[] {
-  if (value === undefined || value === "") throw new ModelSheetError(code);
+  if (value === undefined) throw new ModelSheetError(code);
   const tokens = value.split(",").map((token) => token.trim()).filter(Boolean);
   if (tokens.length !== value.split(",").length) {
     throw new ModelSheetError(code);
