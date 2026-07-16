@@ -276,7 +276,6 @@ function parseReleaseBoundary(lines: readonly string[]): string {
 }
 
 function parseNetwork(lines: readonly string[]): NetworkPolicy {
-  if (lines.length === 0) return { default: "denied", allowedDestinations: [] };
   let defaultPolicy: string | null = null;
   let readingDestinations = false;
   const destinations: string[] = [];
