@@ -1148,11 +1148,11 @@ export class RecoveryService {
   }
 
   private async assertSafeGitConfiguration(cwd: string): Promise<void> {
-    const result = await this.readAllowingExitOne(cwd, [
+    const result = await this.readResult(cwd, [
       "config",
       "--get-regexp",
       EXTERNAL_PROGRAM_CONFIG,
-    ]);
+    ], true);
     if (result.exitCode === 0 && result.stdout.trim() !== "") {
       throw new Error("configured external Git programs are not allowed during recovery");
     }
@@ -1160,10 +1160,6 @@ export class RecoveryService {
 
   private read(cwd: string, args: readonly string[]): Promise<CommandResult> {
     return this.readResult(cwd, args, false);
-  }
-
-  private readAllowingExitOne(cwd: string, args: readonly string[]): Promise<CommandResult> {
-    return this.readResult(cwd, args, true);
   }
 
   private async readResult(
