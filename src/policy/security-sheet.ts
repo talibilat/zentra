@@ -236,7 +236,6 @@ function parseAllowedRepositories(lines: readonly string[]): string[] {
       throw new SecuritySheetError("SECURITY_SHEET_INVALID_REPOSITORY");
     }
     if (
-      !path.isAbsolute(repository) ||
       path.normalize(repository) !== repository ||
       repository !== canonicalRepository ||
       repository.includes("\0") ||
