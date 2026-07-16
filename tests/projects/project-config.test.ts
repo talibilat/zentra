@@ -103,6 +103,7 @@ describe("ProjectConfigSchema", () => {
   });
 
   it.each([
+    "",
     "-danger",
     "refs/heads/main",
     "bad..branch",

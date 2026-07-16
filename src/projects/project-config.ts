@@ -145,7 +145,6 @@ const INVALID_REF_CHARACTERS = /[\u0000-\u0020\u007f~^:?*[\\]/;
 
 function isSafeBranchName(branch: string): boolean {
   if (
-    branch === "" ||
     branch === "@" ||
     branch.startsWith("-") ||
     branch.startsWith("refs/") ||
