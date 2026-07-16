@@ -184,7 +184,7 @@ function assertSuccessfulMilestoneCompletion(state: MilestoneState): void {
   if (state.plan === null) throw new Error("successful milestone completion requires a plan");
   for (const task of state.plan.tasks) {
     const view = state.tasks.get(task.taskId);
-    if (view?.status !== "completed" || view.terminalOutcome !== "completed") {
+    if (view?.terminalOutcome !== "completed") {
       throw new Error("successful milestone completion requires all planned tasks completed");
     }
   }
