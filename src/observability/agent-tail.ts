@@ -1,6 +1,7 @@
 import type { StoredEvent } from "../contracts/event.js";
 import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
 import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
+import { MilestonePausedPayloadSchema } from "../contracts/authority-attention.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -49,7 +50,9 @@ export function storedEventsToAgentTailEvents(
 
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
   assertAgentTailCompatibleEvent(event);
-  const payload = event.type.startsWith("capsule.")
+  const payload = event.type === "milestone.paused"
+    ? MilestonePausedPayloadSchema.parse(event.payload)
+    : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
       ? parseOpenCodeMilestonePayload(event.type, event.payload)
@@ -122,6 +125,9 @@ function spanIdFor(event: StoredEvent): string {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type === "milestone.paused") {
+    return { id: MilestonePausedPayloadSchema.parse(event.payload).attention.requestedBy, role: "authority_gate" };
+  }
   if (isOpenCodeRoleEvent(event)) {
     return {
       id: payloadString(event.payload, "actorId")!,
@@ -189,6 +195,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type === "milestone.paused") return "authority_boundary";
   if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
   if (type === "capsule.proxy_interaction_observed") return "network_policy";

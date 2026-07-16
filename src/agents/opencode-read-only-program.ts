@@ -2,6 +2,11 @@ import type { EventJournal } from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import type { AgentTailJsonlFileSink } from "../observability/agent-tail-file-sink.js";
 import type { ModelSheet } from "../policy/model-sheet.js";
+import type { SecuritySheet } from "../policy/security-sheet.js";
+import type { AuthorityAttention } from "../contracts/authority-attention.js";
+import { OpenCodeTaskAdmissionContextSchema } from "../contracts/authority-attention.js";
+import { MilestoneRegistry } from "../milestones/milestone-registry.js";
+import { projectMilestone } from "../milestones/milestone-projection.js";
 import { DockerOpenCodeReadOnlyCapsule } from "../capsule/opencode-read-only-capsule.js";
 import type { ModelBroker } from "../capsule/model-broker.js";
 import {
@@ -17,9 +22,20 @@ import {
   OpenCodeTraceObservedPayloadSchema,
 } from "./opencode-agent-events.js";
 
-export interface OpenCodeReadOnlyProgramResult extends OpenCodeReadOnlyAgentResult {
+export interface OpenCodeReadOnlyExecutedResult extends OpenCodeReadOnlyAgentResult {
+  readonly status: "executed";
   readonly operationOutcome: "completed" | "failed";
 }
+
+export interface OpenCodeReadOnlyPausedResult {
+  readonly status: "paused";
+  readonly operationOutcome: "paused";
+  readonly attention: AuthorityAttention;
+  readonly trace: { readonly outcome: "emitted" | "failed" };
+}
+
+export type OpenCodeReadOnlyProgramResult = OpenCodeReadOnlyExecutedResult | OpenCodeReadOnlyPausedResult;
+export type OpenCodeReadOnlyProgramRequest = Omit<OpenCodeReadOnlyAgentRequest, "admission">;
 
 export class OpenCodeReadOnlyProgram {
   private readonly projected: ProjectingEventJournal;
@@ -29,7 +45,8 @@ export class OpenCodeReadOnlyProgram {
     private readonly journal: EventJournal,
     agentTailSink: AgentTailJsonlFileSink,
     broker: ModelBroker,
-    models: ModelSheet,
+    private readonly models: ModelSheet,
+    private readonly security: SecuritySheet,
     private readonly capsule: OpenCodeReadOnlyCapsule = new DockerOpenCodeReadOnlyCapsule(),
   ) {
     this.projected = new ProjectingEventJournal(journal, agentTailSink);
@@ -43,6 +60,9 @@ export class OpenCodeReadOnlyProgram {
   }): Promise<{ readonly outcome: "completed" | "uncertain"; readonly trace: "emitted" | "failed" }> {
     const events = this.journal.readStream(request.milestoneId);
     if (events.length === 0) throw new Error("OpenCode milestone does not exist");
+    if (projectMilestone(events)?.lifecycle === "paused") {
+      throw new Error("OpenCode reconciliation cannot run while the milestone is paused");
+    }
     const cleanups = new Map<string, "completed" | "uncertain">();
     for (const event of events.filter((candidate) => candidate.type === "milestone.agent_cleanup_observed")) {
       const cleanup = OpenCodeCleanupObservedPayloadSchema.parse(event.payload);
@@ -94,8 +114,46 @@ export class OpenCodeReadOnlyProgram {
     });
   }
 
-  async run(request: OpenCodeReadOnlyAgentRequest): Promise<OpenCodeReadOnlyProgramResult> {
-    const result = await this.agent.run(request);
+  async run(request: OpenCodeReadOnlyProgramRequest): Promise<OpenCodeReadOnlyProgramResult> {
+    const eventsBeforeAdmission = this.journal.readStream(request.milestoneId);
+    const planned = projectMilestone(eventsBeforeAdmission)?.plan?.tasks.find((task) => task.taskId === request.taskId);
+    const capability = planned === undefined
+      ? undefined
+      : this.models.models.find((model) => model.id === planned.roleAssignment.agentId);
+    const context = OpenCodeTaskAdmissionContextSchema.parse({
+      kind: "opencode" as const,
+      repositoryPath: request.repositoryPath,
+      actorId: planned?.roleAssignment.agentId ?? "unassigned",
+      harness: capability?.harness ?? "opencode",
+      role: request.role,
+      capabilityId: planned?.roleAssignment.agentId ?? "unassigned",
+      transportModelId: capability?.model ?? "unavailable",
+      authority: planned?.risk.authority ?? "read_only",
+      roles: [...(capability?.roles ?? [request.role])],
+      toolPermissions: [...(capability?.toolPermissions ?? [])],
+      network: capability?.network === "declared" ? "declared" as const : "denied" as const,
+      contextTokens: capability?.contextTokens ?? 1,
+      requestedBudget: { ...request.budget, timeoutMs: request.timeoutMs },
+    });
+    const admission = new MilestoneRegistry(this.projected).admitTask(
+      request.milestoneId,
+      request.taskId,
+      this.security,
+      context,
+    );
+    if (admission.status === "paused") {
+      return Object.freeze({
+        status: "paused",
+        operationOutcome: "paused",
+        attention: admission.attention,
+        trace: Object.freeze({ outcome: this.projected.projectionFailed ? "failed" : "emitted" }),
+      });
+    }
+    const result = await this.agent.run({
+      ...request,
+      repositoryPath: admission.admission.packet.repository,
+      admission: admission.admission,
+    });
     const traceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
     const events = this.journal.readStream(request.milestoneId);
     const correlationId = events[0]?.correlationId;
@@ -108,6 +166,7 @@ export class OpenCodeReadOnlyProgram {
       correlationId,
     }]);
     return Object.freeze({
+      status: "executed",
       ...result,
       trace: Object.freeze({ outcome: traceOutcome }),
       operationOutcome: result.outcome === "completed" && traceOutcome === "emitted" ? "completed" : "failed",

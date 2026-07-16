@@ -205,6 +205,33 @@ describe("publishable CLI package", () => {
     expect(help.stdout).toMatch(/\btask\b/);
 
     const project = await initializeProject(consumer);
+    const programmaticScript = path.join(consumer, "programmatic-safe-composition.mjs");
+    const programmaticDatabase = path.join(consumer, "programmatic.sqlite");
+    const programmaticTrace = path.join(consumer, "programmatic.jsonl");
+    writeFileSync(programmaticScript, [
+      'import { AgentTailJsonlFileSink, DisabledModelBroker, MilestoneRegistry, OpenCodeReadOnlyProgram, SqliteEventJournal, loadSecuritySheet } from "zentra";',
+      'import { realpathSync } from "node:fs";',
+      `const repository = ${JSON.stringify(project.repository)};`,
+      `const databasePath = ${JSON.stringify(programmaticDatabase)};`,
+      `const tracePath = ${JSON.stringify(programmaticTrace)};`,
+      `const securitySheetPath = ${JSON.stringify(project.securitySheet)};`,
+      "const journal = new SqliteEventJournal(databasePath);",
+      "const sink = AgentTailJsonlFileSink.open(realpathSync(new URL('.', import.meta.url)), tracePath);",
+      "const security = loadSecuritySheet(securitySheetPath);",
+      "const models = { models: [{ id: 'package-researcher', harness: 'opencode', model: 'fixture/model', roles: ['researcher'], specialties: [], costTier: 'low', contextTokens: 1000, maxConcurrency: 1, toolPermissions: ['read_repository'], network: 'denied', fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };",
+      "new MilestoneRegistry(journal).register({ milestoneId: 'package-milestone', projectId: 'package-project', title: 'Safe composition', correlationId: 'package-trace', plan: { milestoneId: 'package-milestone', projectId: 'package-project', goal: 'Pause before effects', tasks: [{ taskId: 'package-research', title: 'Research', description: 'Research safely.', dependencies: [], ownedPaths: ['greeting.txt'], forbiddenPaths: ['.env'], acceptanceCriteria: ['No effect runs without approval.'], roleAssignment: { role: 'researcher', agentId: 'package-researcher', harness: 'opencode' }, risk: { level: 'low', authority: 'read_only', requiresReview: false, requiresApproval: true }, budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 } }] } });",
+      "const program = new OpenCodeReadOnlyProgram(journal, sink, new DisabledModelBroker(), models, security);",
+      "const result = await program.run({ milestoneId: 'package-milestone', taskId: 'package-research', repositoryPath: repository, role: 'researcher', rolePrompt: 'Research.', budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 1000, signal: new AbortController().signal });",
+      "sink.close();",
+      "journal.close();",
+      "process.stdout.write(JSON.stringify({ status: result.status, reason: result.status === 'paused' ? result.attention.reason : null }));",
+    ].join("\n"), "utf8");
+    const programmatic = await run(nodeExecutable, [programmaticScript], consumer);
+    expect(programmatic.stderr).toBe("");
+    expect(JSON.parse(programmatic.stdout)).toEqual({ status: "paused", reason: "missing_authority" });
+    expect(existsSync(programmaticDatabase)).toBe(true);
+    expect(readFileSync(programmaticTrace, "utf8")).toContain('"kind":"milestone.paused"');
+
     const fixtureTemp = path.join(consumer, "fixture-temp");
     mkdirSync(fixtureTemp, { mode: 0o700 });
     const operational = await run(binary, [

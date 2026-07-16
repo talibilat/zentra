@@ -1,6 +1,7 @@
 export { OpenCodeReadOnlyProgram } from "./agents/opencode-read-only-program.js";
-export type { OpenCodeReadOnlyProgramResult } from "./agents/opencode-read-only-program.js";
-export type { OpenCodeReadOnlyAgentRequest, OpenCodeReadOnlyAgentResult } from "./agents/opencode-read-only-agent.js";
+export type { OpenCodeReadOnlyProgramRequest, OpenCodeReadOnlyProgramResult } from "./agents/opencode-read-only-program.js";
+export type { OpenCodeReadOnlyExecutedResult, OpenCodeReadOnlyPausedResult } from "./agents/opencode-read-only-program.js";
+export type { OpenCodeReadOnlyAgentResult } from "./agents/opencode-read-only-agent.js";
 export { DockerOpenCodeReadOnlyCapsule } from "./capsule/opencode-read-only-capsule.js";
 export { DisabledModelBroker } from "./capsule/model-broker.js";
 export type { ModelBroker, ModelBrokerRequest, ModelBrokerReceipt } from "./capsule/model-broker.js";
@@ -10,7 +11,25 @@ export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js"
 export { loadModelSheet, parseModelSheetMarkdown } from "./policy/model-sheet.js";
 export type { ModelCapability, ModelSheet } from "./policy/model-sheet.js";
 export { MilestoneRegistry } from "./milestones/milestone-registry.js";
-export type { RegisterMilestoneInput, MilestoneRecord, MilestoneSummary } from "./milestones/milestone-registry.js";
+export { loadSecuritySheet, parseSecuritySheetMarkdown } from "./policy/security-sheet.js";
+export type { SecuritySheet } from "./policy/security-sheet.js";
+export type { RegisterMilestoneInput, MilestoneRecord, MilestoneSummary, OpenCodeTaskAdmissionContext, ReplaceMilestonePlanInput, TaskAdmissionResult } from "./milestones/milestone-registry.js";
+export {
+  AdmissionRequestedBudgetSchema,
+  AuthorityAttentionSchema,
+  MilestonePausedPayloadSchema,
+  OpenCodeAdmissionPacketSchema,
+  OpenCodeTaskAdmissionContextSchema,
+  PlanReplacementPayloadSchema,
+  TaskReadyPayloadSchema,
+} from "./contracts/authority-attention.js";
+export type {
+  AdmissionRequestedBudget,
+  AuthorityAttention,
+  AuthorityAttentionClassification,
+  OpenCodeAdmissionPacket,
+  PlanReplacementPayload,
+} from "./contracts/authority-attention.js";
 export {
   MilestoneBudgetSchema,
   MilestonePlanSchema,

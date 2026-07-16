@@ -501,7 +501,7 @@ function createProgram(
         if (milestoneView === null) throw new CliFailure("TASK_NOT_FOUND");
         setResult({
           exitCode: 0,
-          value: { command: "milestone.status", milestone: milestoneView },
+          value: { command: "milestone.status", milestone: publicMilestoneStatus(milestoneView) },
         });
       } finally {
         journal.close();
@@ -1161,6 +1161,18 @@ function publicRecoveryDecision(decision: Awaited<ReturnType<RecoveryService["in
     action: decision.action,
     message: messages[decision.action],
   };
+}
+
+function publicMilestoneStatus(milestone: NonNullable<ReturnType<MilestoneRegistry["inspect"]>>) {
+  if (milestone.lifecycle !== "paused" || milestone.attention === null) return milestone;
+  return Object.freeze({
+    milestoneId: milestone.milestoneId,
+    projectId: milestone.projectId,
+    lifecycle: milestone.lifecycle,
+    terminalOutcome: milestone.terminalOutcome,
+    streamVersion: milestone.streamVersion,
+    attention: milestone.attention,
+  });
 }
 
 function commandLabel(argv: readonly string[]): string {

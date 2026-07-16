@@ -5,6 +5,9 @@ import path from "node:path";
 
 import { assessMilestonePlanReadiness } from "../../src/milestones/plan-readiness.js";
 import { parseSecuritySheetMarkdown } from "../../src/policy/security-sheet.js";
+import { createOpenCodeAdmissionPacket } from "../../src/contracts/authority-attention.js";
+import type { OpenCodeTaskAdmissionContext } from "../../src/milestones/milestone-registry.js";
+import { MilestonePlanSchema } from "../../src/contracts/milestone.js";
 
 function securitySheet(options: { network?: boolean } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "zentra-readiness-"));
@@ -71,90 +74,97 @@ const basePlan = {
   tasks: [baseTask],
 };
 
+const context: OpenCodeTaskAdmissionContext = {
+  kind: "opencode", repositoryPath: process.cwd(), actorId: "opencode-general", harness: "opencode",
+  role: "implementer", capabilityId: "opencode-general", transportModelId: "fixture/model",
+  authority: "workspace_write",
+  roles: ["implementer"], toolPermissions: ["read_repository"], network: "denied",
+  contextTokens: 10_000,
+  requestedBudget: { maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000, timeoutMs: 300_000 },
+};
+
+function assess(candidate: unknown, sheet = security) {
+  const parsedCandidate = MilestonePlanSchema.safeParse(candidate);
+  const packetPlan = parsedCandidate.success ? parsedCandidate.data : basePlan;
+  const candidateAuthority = typeof candidate === "object" && candidate !== null && "tasks" in candidate &&
+    Array.isArray((candidate as { tasks: unknown }).tasks)
+    ? ((candidate as { tasks: Array<{ risk?: { authority?: typeof context.authority } }> }).tasks[0]?.risk?.authority ?? context.authority)
+    : context.authority;
+  const boundContext = { ...context, authority: candidateAuthority };
+  const packet = createOpenCodeAdmissionPacket({
+    plan: packetPlan as never, milestoneId: "milestone-ready", taskId: "task-a", security: sheet,
+    canonicalRepository: sheet.allowedRepositories[0]!, actorId: context.actorId, role: context.role,
+    harness: context.harness,
+    capabilityId: context.capabilityId, transportModelId: context.transportModelId,
+    authority: candidateAuthority, roles: context.roles, toolPermissions: context.toolPermissions,
+    network: context.network, contextTokens: context.contextTokens, requestedBudget: context.requestedBudget,
+  });
+  return assessMilestonePlanReadiness({ plan: candidate, taskId: "task-a", security: sheet, packet, context: boundContext });
+}
+
 describe("assessMilestonePlanReadiness", () => {
   it("marks an in-policy milestone plan executable", () => {
-    expect(assessMilestonePlanReadiness({ plan: basePlan, security })).toEqual({
+    expect(assess(basePlan)).toEqual({
       status: "executable",
       reason: "ready",
-      stopAndAsk: null,
+      attention: null,
     });
   });
 
   it("blocks malformed plans with missing acceptance criteria", () => {
     const { acceptanceCriteria: _acceptanceCriteria, ...task } = baseTask;
 
-    expect(assessMilestonePlanReadiness({
-      plan: { ...basePlan, tasks: [task] },
-      security,
-    })).toMatchObject({
+    expect(assess({ ...basePlan, tasks: [task] })).toMatchObject({
       status: "blocked",
       reason: "plan_not_ready",
-      stopAndAsk: { reason: "plan_not_ready" },
+      attention: { reason: "plan_not_ready", classification: "hard_stop" },
     });
   });
 
   it("blocks cyclic dependency graphs", () => {
-    expect(assessMilestonePlanReadiness({
-      plan: {
+    expect(assess({
         ...basePlan,
         tasks: [
           { ...baseTask, taskId: "task-a", dependencies: ["task-b"] },
           { ...baseTask, taskId: "task-b", dependencies: ["task-a"] },
         ],
-      },
-      security,
-    })).toMatchObject({
+      })).toMatchObject({
       status: "blocked",
       reason: "plan_not_ready",
     });
   });
 
-  it("requires approval when owned paths are outside allowed file scope", () => {
-    expect(assessMilestonePlanReadiness({
-      plan: { ...basePlan, tasks: [{ ...baseTask, ownedPaths: ["docs/plan.md"] }] },
-      security,
-    })).toMatchObject({
-      status: "requires_approval",
+  it("hard stops when owned paths are outside allowed file scope", () => {
+    expect(assess({ ...basePlan, tasks: [{ ...baseTask, ownedPaths: ["docs/plan.md"] }] })).toMatchObject({
+      status: "blocked",
       reason: "forbidden_file_scope",
-      stopAndAsk: { reason: "forbidden_file_scope" },
+      attention: { reason: "forbidden_file_scope", classification: "hard_stop" },
     });
   });
 
-  it("requires approval when owned paths overlap forbidden paths", () => {
-    expect(assessMilestonePlanReadiness({
-      plan: { ...basePlan, tasks: [{ ...baseTask, ownedPaths: ["secrets/token.txt"] }] },
-      security,
-    })).toMatchObject({
-      status: "requires_approval",
+  it("hard stops when owned paths overlap forbidden paths", () => {
+    expect(assess({ ...basePlan, tasks: [{ ...baseTask, ownedPaths: ["secrets/token.txt"] }] })).toMatchObject({
+      status: "blocked",
       reason: "forbidden_file_scope",
     });
   });
 
   it("requires approval for undeclared network authority", () => {
-    expect(assessMilestonePlanReadiness({
-      plan: {
+    expect(assess({
         ...basePlan,
         tasks: [{
           ...baseTask,
           risk: { level: "low", authority: "external_effect", requiresReview: true, requiresApproval: true },
         }],
-      },
-      security: securitySheet({ network: false }),
-    })).toMatchObject({
-      status: "requires_approval",
+      }, securitySheet({ network: false }))).toMatchObject({
+      status: "blocked",
       reason: "undeclared_network",
-      stopAndAsk: { reason: "undeclared_network" },
+      attention: { reason: "undeclared_network", classification: "hard_stop" },
     });
   });
 
-  it("requires approval for release effects beyond local preparation", () => {
-    expect(assessMilestonePlanReadiness({
-      plan: { ...basePlan, tasks: [{ ...baseTask, risk: { ...baseTask.risk, authority: "local_release_preparation" } }] },
-      security,
-    })).toMatchObject({
-      status: "requires_approval",
-      reason: "release_boundary",
-      stopAndAsk: { reason: "release_boundary" },
-    });
+  it("allows local release preparation at a local-only boundary", () => {
+    expect(assess({ ...basePlan, tasks: [{ ...baseTask, risk: { ...baseTask.risk, authority: "local_release_preparation" } }] }))
+      .toEqual({ status: "executable", reason: "ready", attention: null });
   });
 });

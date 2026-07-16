@@ -24,6 +24,8 @@ import { pathToFileURL } from "node:url";
 
 import { runCli, type SignalSource } from "../../src/cli/main.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
+import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 
@@ -683,6 +685,88 @@ describe("Zentra CLI", () => {
         },
       },
     });
+    expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
+  });
+
+  it("reports a file-backed durable authority pause as stable secret-free JSON without Git effects", async () => {
+    const testFixture = await fixture();
+    const journal = new SqliteEventJournal(testFixture.databasePath);
+    const registry = new MilestoneRegistry(journal);
+    registry.register({
+      milestoneId: "milestone-authority-status",
+      projectId: "cli-project",
+      title: ATTACKER_MARKER,
+      correlationId: "trace-authority-status",
+      plan: {
+        milestoneId: "milestone-authority-status",
+        projectId: "cli-project",
+        goal: ATTACKER_MARKER,
+        tasks: [{
+          taskId: "task-authority-status",
+          title: ATTACKER_MARKER,
+          description: ATTACKER_MARKER,
+          dependencies: [],
+          ownedPaths: ["secrets/token.txt"],
+          forbiddenPaths: [".env"],
+          acceptanceCriteria: [ATTACKER_MARKER],
+          roleAssignment: { role: "researcher", agentId: "researcher", harness: "opencode" },
+          risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+          budget: { maxSeconds: 30, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+        }],
+      },
+    });
+    const security: SecuritySheet = {
+      allowedRepositories: [testFixture.repositoryPath],
+      allowedFileScopes: ["src/**"],
+      forbiddenPaths: [".env", "secrets/**"],
+      network: { default: "denied", allowedDestinations: [] },
+      secretHandling: [`${ATTACKER_MARKER}_SECRET_HANDLING`],
+      approvalRequiredOperations: [],
+      releaseBoundary: "local_preparation_only",
+      stopAndAskConditions: ["forbidden_file_scope"],
+    };
+    registry.admitTask("milestone-authority-status", "task-authority-status", security, {
+      kind: "opencode", repositoryPath: testFixture.repositoryPath, actorId: "researcher", harness: "opencode",
+      role: "researcher", capabilityId: "researcher", transportModelId: "fixture/model",
+      authority: "read_only",
+      contextTokens: 1_000,
+      roles: ["researcher"], toolPermissions: ["read_repository"], network: "denied",
+      requestedBudget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 30_000 },
+    });
+    journal.close();
+    const refsBefore = await gitOk(testFixture.repositoryPath, ["show-ref"]);
+    const worktreesBefore = await gitOk(testFixture.repositoryPath, ["worktree", "list", "--porcelain"]);
+
+    const status = await invoke([
+      "milestone", "status",
+      "--database", testFixture.databasePath,
+      "--milestone-id", "milestone-authority-status",
+    ]);
+
+    expect(status).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "milestone.status",
+        milestone: {
+          milestoneId: "milestone-authority-status",
+          lifecycle: "paused",
+          terminalOutcome: null,
+          attention: {
+            schemaVersion: 1,
+            attentionId: expect.stringMatching(/^[a-f0-9]{64}$/),
+            taskId: "task-authority-status",
+            reason: "forbidden_file_scope",
+            classification: "hard_stop",
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(status.json)).not.toContain(ATTACKER_MARKER);
+    expect(JSON.stringify(status.json)).not.toContain("secretHandling");
+    expect(JSON.stringify(status.json)).not.toContain("credentials");
+    expect(await gitOk(testFixture.repositoryPath, ["show-ref"])).toBe(refsBefore);
+    expect(await gitOk(testFixture.repositoryPath, ["worktree", "list", "--porcelain"])).toBe(worktreesBefore);
     expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
   });
 

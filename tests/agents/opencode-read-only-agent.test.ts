@@ -16,6 +16,7 @@ import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js"
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
+import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 
 const roots: string[] = [];
 
@@ -57,13 +58,11 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         }],
       },
     });
-    journal.append("milestone-18", 2, [{
-      streamId: "milestone-18",
-      type: "milestone.task_ready",
-      payload: { taskId: "plan-18" },
-      causationId: null,
-      correlationId: "trace-18",
-    }]);
+    const admission = registry.admitTask(
+      "milestone-18", "plan-18", admissionSecurity(root, ["src/**"]),
+      admissionContext(root, "opencode-planner", "planner", { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500, timeoutMs: 20_000 }),
+    );
+    if (admission.status !== "admitted") throw new Error("expected admission");
 
     const broker: ModelBroker = {
       execute: vi.fn(async (request): Promise<ModelBrokerReceipt> => ({
@@ -136,6 +135,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500 },
       timeoutMs: 20_000,
       signal: new AbortController().signal,
+      admission: admission.admission,
     });
 
     expect(result.outcome).toBe("completed");
@@ -184,7 +184,12 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
 
   it.each(["cancelled", "timed_out"] as const)("preserves thrown %s with uncertain cleanup", async (expected) => {
     const journal = new SqliteEventJournal(":memory:");
-    readyMilestone(journal, `milestone-thrown-${expected}`);
+    const admission = readyMilestone(
+      journal,
+      `milestone-thrown-${expected}`,
+      process.cwd(),
+      expected === "timed_out" ? 10 : 1_000,
+    );
     const controller = new AbortController();
     if (expected === "cancelled") controller.abort();
     const capsule: OpenCodeReadOnlyCapsule = {
@@ -198,6 +203,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       role: "researcher", rolePrompt: "Research.",
       budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: expected === "timed_out" ? 10 : 1_000, signal: controller.signal,
+      admission,
     });
     expect(result).toMatchObject({ outcome: expected, cleanup: "uncertain" });
     journal.close();
@@ -206,7 +212,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
   it("surfaces synchronous Agent Tail projection failure without rewriting journal truth", async () => {
     const sqlite = new SqliteEventJournal(":memory:");
     const journal = new ProjectingEventJournal(sqlite, { append: () => { throw new Error("trace failed"); } });
-    readyMilestone(journal as unknown as SqliteEventJournal, "milestone-trace-failed");
+    const admission = readyMilestone(journal, "milestone-trace-failed");
     const capsule: OpenCodeReadOnlyCapsule = {
       execute: async (request, _broker, _signal, observe) => {
         observe?.({ type: "cleanup_observed", payload: {
@@ -229,6 +235,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       role: "researcher", rolePrompt: "Research.",
       budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: 1_000, signal: new AbortController().signal,
+      admission,
     });
     expect(result).toMatchObject({ outcome: "completed", trace: { outcome: "failed" } });
     expect(new MilestoneRegistry(sqlite).inspect("milestone-trace-failed")?.tasks["task-1"]?.terminalOutcome).toBe("completed");
@@ -303,7 +310,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     writeFileSync(outside, "secret\n");
     symlinkSync(outside, path.join(root, "src/escape.ts"));
     const journal = new SqliteEventJournal(":memory:");
-    readyMilestone(journal, "milestone-symlink");
+    const admission = readyMilestone(journal, "milestone-symlink", root);
     const execute = vi.fn();
 
     await expect(new OpenCodeReadOnlyAgent(journal, { execute }, { execute: vi.fn() }, modelSheet("researcher")).run({
@@ -311,6 +318,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       role: "researcher", rolePrompt: "Research.",
       budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: 1_000, signal: new AbortController().signal,
+      admission,
     })).rejects.toThrow("symbolic links");
     expect(execute).not.toHaveBeenCalled();
     expect(journal.readStream("milestone-symlink").at(-1)?.type).toBe("milestone.agent_resource_intent");
@@ -319,7 +327,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
 
   it("rejects a task-assigned model whose parsed capability exceeds the capsule boundary", async () => {
     const journal = new SqliteEventJournal(":memory:");
-    readyMilestone(journal, "milestone-model-policy");
+    const admission = readyMilestone(journal, "milestone-model-policy");
     const execute = vi.fn();
     const models = modelSheet("researcher");
     const incompatible: ModelSheet = { models: [{ ...models.models[0]!, network: "declared" }] };
@@ -328,8 +336,119 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       role: "researcher", rolePrompt: "Research.",
       budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: 1_000, signal: new AbortController().signal,
+      admission,
     })).rejects.toThrow("not approved");
     expect(execute).not.toHaveBeenCalled();
+    journal.close();
+  });
+
+  it("revalidates the exact durable admission packet before resource intent", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const admission = readyMilestone(journal, "milestone-admission-tamper");
+    const execute = vi.fn();
+
+    await expect(new OpenCodeReadOnlyAgent(
+      journal,
+      { execute },
+      { execute: vi.fn() },
+      modelSheet("researcher"),
+    ).run({
+      milestoneId: "milestone-admission-tamper", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal,
+      admission: { ...admission, packet: { ...admission.packet, transportModelId: "attacker/model" } },
+    })).rejects.toThrow("does not match durable task admission");
+    expect(execute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-admission-tamper").at(-1)?.type).toBe("milestone.task_ready");
+    journal.close();
+  });
+
+  it("rejects a stale admission when the canonical model capability snapshot changes", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const admission = readyMilestone(journal, "milestone-model-snapshot");
+    const execute = vi.fn();
+    const changed = modelSheet("researcher");
+    const changedModels: ModelSheet = {
+      models: [{ ...changed.models[0]!, roles: ["planner", "researcher"] }],
+    };
+
+    await expect(new OpenCodeReadOnlyAgent(
+      journal,
+      { execute },
+      { execute: vi.fn() },
+      changedModels,
+    ).run({
+      milestoneId: "milestone-model-snapshot", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal, admission,
+    })).rejects.toThrow("does not match durable task admission");
+    expect(execute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-model-snapshot").at(-1)?.type).toBe("milestone.task_ready");
+    journal.close();
+  });
+
+  it("revalidates admitted context capacity immediately before resource intent", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const admission = readyMilestone(journal, "milestone-context-snapshot");
+    const execute = vi.fn();
+    const changed = modelSheet("researcher");
+    const changedModels: ModelSheet = {
+      models: [{ ...changed.models[0]!, contextTokens: 20_000 }],
+    };
+
+    await expect(new OpenCodeReadOnlyAgent(
+      journal,
+      { execute },
+      { execute: vi.fn() },
+      changedModels,
+    ).run({
+      milestoneId: "milestone-context-snapshot", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal, admission,
+    })).rejects.toThrow("does not match durable task admission");
+    expect(execute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-context-snapshot").at(-1)?.type).toBe("milestone.task_ready");
+    journal.close();
+  });
+
+  it("rejects a paused lifecycle before resource intent, repository view, capsule, or broker effects", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const registry = new MilestoneRegistry(journal);
+    registry.register({
+      milestoneId: "milestone-paused-agent", projectId: "zentra", title: "Paused", correlationId: "trace-paused-agent",
+      plan: { milestoneId: "milestone-paused-agent", projectId: "zentra", goal: "Stop", tasks: [{
+        taskId: "task-1", title: "Stop", description: "Stop.", dependencies: [], ownedPaths: ["secrets/token.txt"], forbiddenPaths: [".env"], acceptanceCriteria: ["No effect."],
+        roleAssignment: { role: "researcher", agentId: "opencode-researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      }] },
+    });
+    const security: SecuritySheet = {
+      allowedRepositories: [process.cwd()], allowedFileScopes: ["src/**"], forbiddenPaths: [".env", "secrets/**"],
+      network: { default: "denied", allowedDestinations: [] }, secretHandling: ["Do not expose secrets."],
+      approvalRequiredOperations: [], releaseBoundary: "local_preparation_only", stopAndAskConditions: ["forbidden_file_scope"],
+    };
+    registry.admitTask(
+      "milestone-paused-agent", "task-1", security,
+      admissionContext(process.cwd(), "opencode-researcher", "researcher"),
+    );
+    const execute = vi.fn();
+    const brokerExecute = vi.fn();
+
+    await expect(new OpenCodeReadOnlyAgent(
+      journal,
+      { execute },
+      { execute: brokerExecute },
+      modelSheet("researcher"),
+    ).run({
+      milestoneId: "milestone-paused-agent", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal,
+      admission: { packet: {} as never, digest: "a".repeat(64) },
+    })).rejects.toThrow("milestone is paused");
+    expect(execute).not.toHaveBeenCalled();
+    expect(brokerExecute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-paused-agent").at(-1)?.type).toBe("milestone.paused");
     journal.close();
   });
 
@@ -339,7 +458,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
   ] as const)("maps capsule %s to the canonical milestone task outcome", async (capsuleOutcome, expected) => {
     const journal = new SqliteEventJournal(":memory:");
     try {
-      readyMilestone(journal, `milestone-${capsuleOutcome}`);
+      const admission = readyMilestone(journal, `milestone-${capsuleOutcome}`);
       const capsule: OpenCodeReadOnlyCapsule = {
         execute: vi.fn(async (): Promise<OpenCodeReadOnlyCapsuleResult> => ({
           outcome: capsuleOutcome,
@@ -360,6 +479,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
         timeoutMs: 1_000,
         signal: new AbortController().signal,
+        admission,
       });
       expect(result.outcome).toBe(expected);
       expect(result.trace).toEqual({ outcome: "not_configured" });
@@ -373,8 +493,13 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
 function readyMilestone(
   journal: SqliteEventJournal | ProjectingEventJournal,
   milestoneId: string,
-  role: "researcher" | "reviewer" = "researcher",
-): void {
+  roleOrRepository: "researcher" | "reviewer" | string = "researcher",
+  timeoutMs = 1_000,
+) {
+  const role = roleOrRepository === "researcher" || roleOrRepository === "reviewer"
+    ? roleOrRepository
+    : "researcher";
+  const repositoryPath = role === roleOrRepository ? process.cwd() : roleOrRepository;
   new MilestoneRegistry(journal).register({
     milestoneId,
     projectId: "zentra",
@@ -402,10 +527,40 @@ function readyMilestone(
       }],
     },
   });
-  journal.append(milestoneId, 2, [{
-    streamId: milestoneId, type: "milestone.task_ready", payload: { taskId: "task-1" },
-    causationId: null, correlationId: milestoneId,
-  }]);
+  const result = new MilestoneRegistry(journal).admitTask(
+    milestoneId,
+    "task-1",
+    admissionSecurity(repositoryPath, ["src/**"]),
+    admissionContext(repositoryPath, role === "reviewer" ? "opencode-reviewer" : "opencode-researcher", role, {
+      maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs,
+    }),
+  );
+  if (result.status !== "admitted") throw new Error("expected test task admission");
+  return result.admission;
+}
+
+function admissionSecurity(repositoryPath: string, scopes: readonly string[]): SecuritySheet {
+  return {
+    allowedRepositories: [realpathSync.native(repositoryPath)], allowedFileScopes: [...scopes], forbiddenPaths: [".env"],
+    network: { default: "denied", allowedDestinations: [] }, secretHandling: ["Do not expose secrets."],
+    approvalRequiredOperations: [], releaseBoundary: "local_preparation_only", stopAndAskConditions: [],
+  };
+}
+
+function admissionContext(
+  repositoryPath: string,
+  actorId: string,
+  role: "planner" | "researcher" | "reviewer",
+  requestedBudget = { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 1_000 },
+) {
+  return {
+    kind: "opencode" as const, repositoryPath, actorId, harness: "opencode" as const, role,
+    capabilityId: actorId, transportModelId: "fixture/model", roles: [role],
+    authority: role === "reviewer" ? "review" as const : "read_only" as const,
+    contextTokens: 10_000,
+    toolPermissions: role === "reviewer" ? ["read_repository", "review_diff"] : ["read_repository"],
+    network: "denied" as const, requestedBudget,
+  };
 }
 
 function modelSheet(role: "planner" | "researcher" | "reviewer"): ModelSheet {

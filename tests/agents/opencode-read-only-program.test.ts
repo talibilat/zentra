@@ -2,15 +2,181 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { OpenCodeReadOnlyProgram } from "../../src/agents/opencode-read-only-program.js";
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
+import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+
+const security: SecuritySheet = {
+  allowedRepositories: ["/tmp/repository"],
+  allowedFileScopes: ["src/**", "missing/**"],
+  forbiddenPaths: [".env"],
+  network: { default: "denied", allowedDestinations: [] },
+  secretHandling: ["Do not inherit parent secrets."],
+  approvalRequiredOperations: [],
+  releaseBoundary: "local_preparation_only",
+  stopAndAskConditions: ["missing_authority", "forbidden_file_scope", "undeclared_network", "release_boundary"],
+};
 
 describe("OpenCodeReadOnlyProgram", () => {
+  it.each([
+    ["claude_code", 1_000, "matching non-OpenCode harness"],
+    ["opencode", 150, "insufficient context capacity"],
+  ] as const)("durably pauses %s before every effect", async (harness, contextTokens, _case) => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-model-boundary-")));
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(path.join(root, "src/context.ts"), "context\n");
+    const journal = new SqliteEventJournal(":memory:");
+    new MilestoneRegistry(journal).register({
+      milestoneId: "milestone-model-boundary", projectId: "zentra", title: "Model boundary", correlationId: "trace-model-boundary",
+      plan: { milestoneId: "milestone-model-boundary", projectId: "zentra", goal: "Research", tasks: [{
+        taskId: "task-model-boundary", title: "Research", description: "Research.", dependencies: [], ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["No effect."],
+        roleAssignment: { role: "researcher", agentId: "boundary-model", harness },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      }] },
+    });
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"));
+    const execute = vi.fn();
+    const brokerExecute = vi.fn();
+    const program = new OpenCodeReadOnlyProgram(
+      journal,
+      sink,
+      { execute: brokerExecute },
+      { models: [{ id: "boundary-model", harness, model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] },
+      { ...security, allowedRepositories: [root] },
+      { execute },
+    );
+
+    const result = await program.run({
+      milestoneId: "milestone-model-boundary", taskId: "task-model-boundary", repositoryPath: root,
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: "paused",
+      attention: { reason: "plan_not_ready", classification: "hard_stop" },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(brokerExecute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-model-boundary").map((event) => event.type)).toEqual([
+      "milestone.created", "milestone.plan_created", "milestone.paused",
+    ]);
+    sink.close();
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("durably pauses a disallowed canonical repository before capsule or broker effects", async () => {
+    const allowed = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-allowed-")));
+    const requested = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-disallowed-")));
+    mkdirSync(path.join(requested, "src"));
+    writeFileSync(path.join(requested, "src/context.ts"), "context\n");
+    const journal = new SqliteEventJournal(":memory:");
+    new MilestoneRegistry(journal).register({
+      milestoneId: "milestone-repository", projectId: "zentra", title: "Repository", correlationId: "trace-repository",
+      plan: { milestoneId: "milestone-repository", projectId: "zentra", goal: "Research", tasks: [{
+        taskId: "task-repository", title: "Research", description: "Research.", dependencies: [], ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["No effect."],
+        roleAssignment: { role: "researcher", agentId: "approved-researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      }] },
+    });
+    const sink = AgentTailJsonlFileSink.open(requested, path.join(requested, "repository.jsonl"));
+    const execute = vi.fn();
+    const brokerExecute = vi.fn();
+    const program = new OpenCodeReadOnlyProgram(
+      journal,
+      sink,
+      { execute: brokerExecute },
+      { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] },
+      { ...security, allowedRepositories: [allowed] },
+      { execute },
+    );
+
+    const result = await program.run({
+      milestoneId: "milestone-repository", taskId: "task-repository", repositoryPath: requested,
+      role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({ status: "paused", attention: { reason: "forbidden_file_scope" } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(brokerExecute).not.toHaveBeenCalled();
+    expect(journal.readStream("milestone-repository").map((event) => event.type)).toEqual([
+      "milestone.created", "milestone.plan_created", "milestone.paused",
+    ]);
+    sink.close();
+    journal.close();
+    rmSync(allowed, { recursive: true, force: true });
+    rmSync(requested, { recursive: true, force: true });
+  });
+
+  it.each([[false, "emitted"], [true, "failed"]] as const)(
+    "durably pauses before every agent effect when the trace sink is closed=%s",
+    async (sinkClosed, traceOutcome) => {
+      const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-boundary-")));
+      mkdirSync(path.join(root, "src"));
+      writeFileSync(path.join(root, "src/context.ts"), "context\n");
+      const journal = new SqliteEventJournal(":memory:");
+      new MilestoneRegistry(journal).register({
+        milestoneId: "milestone-boundary", projectId: "zentra", title: "Boundary", correlationId: "trace-boundary",
+        plan: { milestoneId: "milestone-boundary", projectId: "zentra", goal: "Stop", tasks: [{
+          taskId: "task-boundary", title: "Stop", description: "Stop.", dependencies: [], ownedPaths: ["secrets/token.txt"], forbiddenPaths: [".env"], acceptanceCriteria: ["No effect."],
+          roleAssignment: { role: "researcher", agentId: "approved-researcher", harness: "opencode" },
+          risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+          budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+        }] },
+      });
+      journal.append("milestone-boundary", 2, [{
+        streamId: "milestone-boundary", type: "milestone.task_ready",
+        payload: { taskId: "task-boundary", admissionDigest: "a".repeat(64) },
+        causationId: null, correlationId: "trace-boundary",
+      }]);
+      const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"));
+      if (sinkClosed) sink.close();
+      const execute = vi.fn();
+      const brokerExecute = vi.fn();
+      const boundarySecurity: SecuritySheet = { ...security, allowedRepositories: [root], forbiddenPaths: [".env", "secrets/**"] };
+      const program = new OpenCodeReadOnlyProgram(
+        journal,
+        sink,
+        { execute: brokerExecute },
+        { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] },
+        boundarySecurity,
+        { execute },
+      );
+
+      const result = await program.run({
+        milestoneId: "milestone-boundary", taskId: "task-boundary", repositoryPath: root,
+        role: "researcher", rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+        timeoutMs: 1_000, signal: new AbortController().signal,
+      });
+
+      expect(result).toMatchObject({
+        status: "paused", operationOutcome: "paused", trace: { outcome: traceOutcome },
+        attention: { reason: "forbidden_file_scope", classification: "hard_stop" },
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(brokerExecute).not.toHaveBeenCalled();
+      expect(journal.readStream("milestone-boundary").map((event) => event.type)).toEqual([
+        "milestone.created", "milestone.plan_created", "milestone.task_ready", "milestone.paused",
+      ]);
+      if (!sinkClosed) {
+        sink.close();
+        const tail = JSON.parse((await import("node:fs")).readFileSync(path.join(root, "boundary.jsonl"), "utf8"));
+        expect(tail).toMatchObject({ kind: "milestone.paused", operation: { name: "authority_boundary", status: "waiting" } });
+      }
+      journal.close();
+      rmSync(root, { recursive: true, force: true });
+    },
+  );
+
   it.each([
     [false, "emitted", "completed"],
     [true, "failed", "failed"],
@@ -29,7 +195,6 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    registry.ready("milestone-program", "task-program");
     const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
     if (sinkClosed) sink.close();
     const capsule: OpenCodeReadOnlyCapsule = { execute: async (request, broker, signal, observe) => {
@@ -69,7 +234,7 @@ describe("OpenCodeReadOnlyProgram", () => {
     } };
     const program = new OpenCodeReadOnlyProgram(journal, sink, broker, {
       models: [{ id: "approved-planner", harness: "opencode", model: "fixture/transport-model", roles: ["planner"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }],
-    }, capsule);
+    }, { ...security, allowedRepositories: [root] }, capsule);
 
     const result = await program.run({
       milestoneId: "milestone-program", taskId: "task-program", repositoryPath: root,
@@ -106,7 +271,6 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    registry.ready("milestone-reconcile", "task-reconcile");
     const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
     let reconciliations = 0;
     const capsule = {
@@ -123,7 +287,7 @@ describe("OpenCodeReadOnlyProgram", () => {
     };
     const program = new OpenCodeReadOnlyProgram(journal, sink, { execute: async () => { throw new Error("unused"); } }, {
       models: [{ id: "approved-planner", harness: "opencode", model: "fixture/transport", roles: ["planner"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }],
-    }, capsule);
+    }, { ...security, allowedRepositories: [root] }, capsule);
     const runRequest = {
       milestoneId: "milestone-reconcile", taskId: "task-reconcile", repositoryPath: root,
       role: "planner" as const, rolePrompt: "Plan.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
