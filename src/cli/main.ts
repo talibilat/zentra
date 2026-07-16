@@ -573,7 +573,7 @@ function createProgram(
     .requiredOption("--source-commit <oid>", "exact source commit")
     .requiredOption("--expected-old-oid <oid>", "exact expected old remote commit")
     .requiredOption("--source-repository <path>", "canonical source repository path")
-    .action(async (options: GitHubPushOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.push({ ...options, sourceRepositoryPath: options.sourceRepository, force: false, signal })));
+    .action(async (options: GitHubPushOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.push({ ...options, sourceRepositoryPath: options.sourceRepository, force: false, signal })));
   addGitHubBase(github.command("create-pr").description("Dispatch one exact pull request; completion requires later reconciliation."))
     .requiredOption("--push-grant-id <id>", "completed prerequisite push grant identity")
     .requiredOption("--repository <owner/name>", "exact GitHub repository")
@@ -583,11 +583,11 @@ function createProgram(
     .requiredOption("--title <title>", "pull request title")
     .requiredOption("--body <body>", "pull request body")
     .option("--draft", "create an exact draft pull request", false)
-    .action(async (options: GitHubPrOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.createPullRequest({ ...options, title: options.title!, body: options.body!, draft: options.draft === true, signal })));
+    .action(async (options: GitHubPrOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.createPullRequest({ ...options, title: options.title!, body: options.body!, draft: options.draft === true, signal })));
   addGitHubBase(github.command("reconcile-push").description("Read the exact remote ref for an uncertain push."))
-    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
   addGitHubBase(github.command("reconcile-pr").description("Read exact pull-request state for an uncertain creation."))
-    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
 
   const task = program.command("task").description("Run and inspect deterministic tasks.");
   task
@@ -719,7 +719,6 @@ function createProgram(
 
 async function runGitHubBrokerCli(
   options: GitHubBaseOptions,
-  signal: AbortSignal,
   setResult: (result: CommandResult) => void,
   operation: (broker: GitHubEffectBroker) => Promise<{
     readonly outcome: string;
