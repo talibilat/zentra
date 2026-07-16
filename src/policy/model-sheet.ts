@@ -190,7 +190,6 @@ function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] 
     ids.add(model.id);
     models.push(model);
   }
-  if (models.length === 0) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   return Object.freeze(models);
 }
 
