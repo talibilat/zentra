@@ -341,11 +341,12 @@ export class TracerBulletOrchestrator {
         "worker",
       );
       if (workerResult.outcome !== "completed") {
+        const stderr = workerResult.stderr.trim();
         return this.terminate(
           input.taskId,
           workerResult.outcome,
           stage,
-          workerFailure(workerResult),
+          `worker outcome was ${workerResult.outcome}${stderr === "" ? "" : `: ${stderr}`}`,
         );
       }
       if (workerResult.exitCode !== 0) {
@@ -1090,11 +1091,6 @@ function signalOutcome(
   return signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
     ? "timed_out"
     : "cancelled";
-}
-
-function workerFailure(result: WorkerResult): string {
-  const stderr = result.stderr.trim();
-  return `worker outcome was ${result.outcome}${stderr === "" ? "" : `: ${stderr}`}`;
 }
 
 function sha256(value: string): string {
