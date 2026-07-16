@@ -399,8 +399,8 @@ export class TracerBulletOrchestrator {
         );
         return this.current(input.taskId);
       }
-      const validationOutcome = failedValidationOutcome(validation);
-      if (validationOutcome !== null) {
+      if (validation.outcome !== "completed" || validation.exitCode !== 0) {
+        const validationOutcome = validation.outcome === "completed" ? "failed" : validation.outcome;
         this.recordArtifact(input.taskId, "validation_report", validation, {
           type: `task.${validationOutcome}`,
           payload: {
@@ -969,13 +969,6 @@ function validateRelativePath(candidate: string): void {
   ) {
     throw new Error(`artifact path must not contain traversal: ${candidate}`);
   }
-}
-
-function failedValidationOutcome(
-  validation: ValidationReport,
-): Exclude<TerminalOutcome, "completed" | "denied"> | null {
-  if (validation.outcome !== "completed") return validation.outcome;
-  return validation.exitCode === 0 ? null : "failed";
 }
 
 async function validateIntegrationReceipt(input: {
