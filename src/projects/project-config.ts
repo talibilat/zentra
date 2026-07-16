@@ -151,7 +151,6 @@ function isSafeBranchName(branch: string): boolean {
     branch.startsWith("refs/") ||
     branch.includes("..") ||
     branch.includes("@{") ||
-    branch.includes("//") ||
     INVALID_REF_CHARACTERS.test(branch)
   ) {
     return false;
