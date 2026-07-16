@@ -248,8 +248,9 @@ function parseTokenList(
   code: ModelSheetErrorCode,
 ): string[] {
   if (value === undefined) throw new ModelSheetError(code);
-  const tokens = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (tokens.length !== value.split(",").length) {
+  const segments = value.split(",");
+  const tokens = segments.map((token) => token.trim()).filter(Boolean);
+  if (tokens.length !== segments.length) {
     throw new ModelSheetError(code);
   }
   const seen = new Set<string>();
@@ -263,8 +264,9 @@ function parseTokenList(
 
 function parseSpecialties(value: string | undefined): string[] {
   if (value === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
-  const specialties = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (specialties.length !== value.split(",").length) {
+  const segments = value.split(",");
+  const specialties = segments.map((token) => token.trim()).filter(Boolean);
+  if (specialties.length !== segments.length) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
   }
   const seen = new Set<string>();
@@ -286,9 +288,10 @@ function parsePositiveInteger(value: string | undefined, code: ModelSheetErrorCo
 function parseFallbackOrder(value: string | undefined): string[] {
   if (value === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
   if (value === "none") return [];
-  const fallbacks = value.split(",").map((token) => token.trim()).filter(Boolean);
+  const segments = value.split(",");
+  const fallbacks = segments.map((token) => token.trim()).filter(Boolean);
   if (
-    fallbacks.length !== value.split(",").length ||
+    fallbacks.length !== segments.length ||
     fallbacks.some((fallback) => !SAFE_ID.test(fallback)) ||
     new Set(fallbacks).size !== fallbacks.length
   ) {
