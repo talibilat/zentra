@@ -17,6 +17,7 @@ import {
   type PlannedTask,
 } from "../contracts/milestone.js";
 import type { TerminalOutcome } from "../contracts/task.js";
+import { uncertainEffectPayload } from "../contracts/uncertain-effect.js";
 import {
   IntegrationExecutionError,
   IntegrationUncertainError,
@@ -56,6 +57,7 @@ import type {
   WorktreeManager,
 } from "../workspaces/worktree-manager.js";
 import {
+  IntegrationBranchCreationUncertainError,
   WorkspaceCommitUncertainError,
   WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
@@ -165,7 +167,7 @@ export class TracerBulletOrchestrator {
       );
     } catch (error) {
       if (
-        error instanceof WorkspaceGitTerminationError ||
+        error instanceof IntegrationBranchCreationUncertainError ||
         error instanceof WorkspaceCreationUncertainError
       ) {
         // Worktree creation is effectful: Git may have created the branch
@@ -174,7 +176,16 @@ export class TracerBulletOrchestrator {
         // (task.worktree_creation_started), leave the task nonterminal so
         // recovery can inspect real Git state and reconcile instead of
         // hiding an uncertain effect behind a terminal outcome.
-        return this.current(input.taskId);
+        return this.tasks.pauseForUncertainEffect(input.taskId, uncertainEffectPayload({
+          boundary: "worktree_creation",
+          operation: "Git worktree creation",
+          reason: errorMessage(error),
+          requestedBy: "zentra-recovery-controller",
+          workspace: null,
+        }));
+      }
+      if (error instanceof WorkspaceGitTerminationError) {
+        return this.terminate(input.taskId, error.outcome, stage, error.message);
       }
       return this.terminate(
         input.taskId,
@@ -326,6 +337,7 @@ export class TracerBulletOrchestrator {
     let stage: Stage = "setup";
     try {
       const workerInput = parseWorkerInput(input.workerRequest.args);
+      await validateWorkerTarget(lease.path, workerInput.file);
       this.tasks.append(
         input.taskId,
         "task.started",
@@ -334,7 +346,6 @@ export class TracerBulletOrchestrator {
       );
 
       stage = "worker";
-      await validateWorkerTarget(lease.path, workerInput.file);
       const workerResult = await this.worker.execute(
         workerRequest(input.taskId, lease, input.workerRequest, workerInput),
         input.signal,
@@ -537,12 +548,12 @@ export class TracerBulletOrchestrator {
           return this.observeIntegration(input.taskId, {
             reason: error.message,
             evidence: error.evidence,
-          });
+          }, true, lease);
         }
         if (error instanceof IntegrationExecutionError) throw error;
         return this.observeIntegration(input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
-        });
+        }, true, lease);
       }
       if (receipt.outcome !== "completed") {
         const finalReceipt = prepared.receipt === null
@@ -579,18 +590,27 @@ export class TracerBulletOrchestrator {
           receipt,
           verification: "failed",
           reason: errorMessage(error),
-        });
+        }, true, lease);
       }
-      this.tasks.append(
-        input.taskId,
-        "task.integration_observed",
-        {
-          receipt,
-          verification: "verified",
-          cleanupFailures: this.integrationCleanupFailures(input.taskId),
-        },
-        null,
-      );
+      const cleanupFailures = this.integrationCleanupFailures(input.taskId);
+      const integrationObserved = { receipt, verification: "verified", cleanupFailures };
+      if (cleanupFailures.length > 0) {
+        return this.tasks.appendBatch(input.taskId, [
+          { type: "task.integration_observed", payload: integrationObserved, causationId: null },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "cleanup",
+              operation: "integration candidate cleanup",
+              reason: "integration candidate cleanup was not proven complete",
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
+          },
+        ]);
+      }
+      this.tasks.append(input.taskId, "task.integration_observed", integrationObserved, null);
       stage = "cleanup";
       this.tasks.append(
         input.taskId,
@@ -613,17 +633,31 @@ export class TracerBulletOrchestrator {
           readonly uncertain?: unknown;
           readonly evidence?: unknown;
         };
-        return this.tasks.append(
-          input.taskId,
-          "task.cleanup_observed",
-          {
+        const observation = {
             phase: typeof cleanupError.phase === "string" ? cleanupError.phase : "unknown",
             uncertain: cleanupError.uncertain === true,
             evidence: cleanupError.evidence ?? {},
             reason: errorMessage(error),
+        };
+        if (cleanupError.uncertain !== true) {
+          return this.terminate(input.taskId, "failed", "cleanup", errorMessage(error), {
+            cleanup: observation,
+          });
+        }
+        return this.tasks.appendBatch(input.taskId, [
+          { type: "task.cleanup_observed", payload: observation, causationId: null },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "cleanup",
+              operation: "ticket worktree cleanup",
+              reason: errorMessage(error),
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
           },
-          null,
-        );
+        ]);
       }
       this.tasks.append(
         input.taskId,
@@ -646,12 +680,24 @@ export class TracerBulletOrchestrator {
     } catch (error) {
       if (stage === "completion") throw error;
       if (error instanceof WorkspaceCommitUncertainError) {
-        return this.tasks.append(
-          input.taskId,
-          "task.commit_observed",
-          { stage: "commit", reason: error.message },
-          null,
-        );
+        return this.tasks.appendBatch(input.taskId, [
+          {
+            type: "task.commit_observed",
+            payload: { stage: "commit", reason: error.message },
+            causationId: null,
+          },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "commit",
+              operation: "reviewed Git commit",
+              reason: error.message,
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
+          },
+        ]);
       }
       const dependencyOutcome =
         error instanceof ReviewerExecutionError ||
@@ -659,10 +705,19 @@ export class TracerBulletOrchestrator {
         error instanceof IntegrationExecutionError
           ? error.outcome
           : null;
+      if (stage === "worker" && dependencyOutcome === null) {
+        return this.tasks.pauseForUncertainEffect(input.taskId, uncertainEffectPayload({
+          boundary: stage,
+          operation: stage === "worker" ? "deterministic worker" : "focused validation",
+          reason: errorMessage(error),
+          requestedBy: "zentra-recovery-controller",
+          workspace: { path: lease.path, branch: lease.branch },
+        }));
+      }
       if (stage === "integration" && dependencyOutcome === null) {
         return this.observeIntegration(input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
-        });
+        }, true, lease);
       }
       // Unlike run()/resume()'s own setup stage, runFromLease() is only ever
       // invoked after a durable task.leased fact already exists, so a
@@ -696,16 +751,30 @@ export class TracerBulletOrchestrator {
     );
   }
 
-  private observeIntegration(taskId: string, payload: unknown): TaskView {
+  private observeIntegration(
+    taskId: string,
+    payload: unknown,
+    uncertain = false,
+    lease?: WorkspaceLease,
+  ): TaskView {
     const durablePayload = typeof payload === "object" && payload !== null
       ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
       : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
-    return this.tasks.append(
-      taskId,
-      "task.integration_observed",
-      durablePayload,
-      null,
-    );
+    if (!uncertain) return this.tasks.append(taskId, "task.integration_observed", durablePayload, null);
+    return this.tasks.appendBatch(taskId, [
+      { type: "task.integration_observed", payload: durablePayload, causationId: null },
+      {
+        type: "task.effect_uncertain",
+        payload: uncertainEffectPayload({
+          boundary: "integration",
+          operation: "integration candidate and branch update",
+          reason: integrationPayloadReason(payload),
+          requestedBy: "zentra-integration-controller",
+          workspace: lease === undefined ? null : { path: lease.path, branch: lease.branch },
+        }),
+        causationId: null,
+      },
+    ]);
   }
 
   private integrationCleanupFailures(taskId: string): readonly unknown[] {
@@ -1098,4 +1167,17 @@ function errorMessage(error: unknown): string {
 
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : "UnknownError";
+}
+
+function integrationPayloadReason(payload: unknown): string {
+  if (typeof payload === "object" && payload !== null) {
+    const reason = (payload as Readonly<Record<string, unknown>>)["reason"];
+    if (typeof reason === "string" && reason !== "") return reason;
+    const error = (payload as Readonly<Record<string, unknown>>)["error"];
+    if (typeof error === "object" && error !== null) {
+      const message = (error as Readonly<Record<string, unknown>>)["message"];
+      if (typeof message === "string" && message !== "") return message;
+    }
+  }
+  return "integration result requires explicit reconciliation";
 }

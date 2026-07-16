@@ -1140,6 +1140,9 @@ function assertRepresentableTaskRun(input: {
     terminalOutcome: "completed",
     streamVersion: Number.MAX_SAFE_INTEGER,
     leaseOwner: WORKER_ID,
+    paused: false,
+    stopAndAsk: null,
+    uncertainEffect: null,
   });
   if (Buffer.byteLength(serializeJson(prospective.value)) > MAX_OPERATIONAL_JSON_BYTES) {
     throw new CliFailure("INVALID_CONFIG");

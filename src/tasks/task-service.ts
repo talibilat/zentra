@@ -9,6 +9,12 @@ import {
   projectTask,
   type TaskView,
 } from "./task-projection.js";
+import {
+  EffectReconciliationPayloadSchema,
+  type EffectReconciliationPayload,
+  UncertainEffectPayloadSchema,
+  type UncertainEffectPayload,
+} from "../contracts/uncertain-effect.js";
 
 export class TaskService {
   constructor(private readonly journal: EventJournal) {}
@@ -98,6 +104,32 @@ export class TaskService {
 
   readStream(taskId: string): readonly StoredEvent[] {
     return this.journal.readStream(taskId);
+  }
+
+  pauseForUncertainEffect(
+    taskId: string,
+    payload: UncertainEffectPayload,
+    causationId: string | null = null,
+  ): TaskView {
+    return this.append(
+      taskId,
+      "task.effect_uncertain",
+      UncertainEffectPayloadSchema.parse(payload),
+      causationId,
+    );
+  }
+
+  recordEffectReconciliation(
+    taskId: string,
+    payload: EffectReconciliationPayload,
+    causationId: string | null = null,
+  ): TaskView {
+    return this.append(
+      taskId,
+      "task.effect_reconciled",
+      EffectReconciliationPayloadSchema.parse(payload),
+      causationId,
+    );
   }
 }
 
