@@ -50,6 +50,25 @@ export {
   OpenCodeReviewerAdapter,
   OpenCodeReviewerUncertainError,
 } from "./reviews/opencode-reviewer-adapter.js";
+export {
+  modelSheetSha256,
+  routeApprovedModel,
+} from "./routing/model-router.js";
+export type {
+  ApprovedModelSelection,
+  RouteApprovedModelRequest,
+} from "./routing/model-router.js";
+export { JournalOutcomeHistoryStore } from "./routing/outcome-history.js";
+export {
+  OutcomeHistoryRecordSchema,
+  RoutingSelectionSchema,
+} from "./routing/routing-events.js";
+export { RoutedOpenCodeExecution } from "./routing/routed-opencode-execution.js";
+export type { OpenCodeCapabilityProbe } from "./routing/routed-opencode-execution.js";
+export type {
+  OutcomeHistoryRecord,
+  RoutingSelection,
+} from "./routing/routing-events.js";
 export type {
   OpenCodeReviewerAssignment,
   OpenCodeReviewerProgram,

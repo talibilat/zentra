@@ -410,11 +410,15 @@ describe("Zentra CLI", () => {
     expect(milestone.milestoneId).toMatch(/^milestone-[a-f0-9]{12}$/);
     expect(milestone.streamVersion).toBe(2);
     const traceLines = readFileSync(tracePath, "utf8").trim().split("\n");
-    expect(traceLines).toHaveLength(2);
+    expect(traceLines).toHaveLength(3);
     const traceEvents = traceLines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(traceEvents.map((event) => event.kind)).toEqual(["milestone.created", "milestone.plan_created"]);
+    expect(traceEvents.map((event) => event.kind)).toEqual([
+      "routing.model_selected",
+      "milestone.created",
+      "milestone.plan_created",
+    ]);
     expect(traceEvents.every((event) => event.trace_id === milestone.milestoneId)).toBe(true);
-    expect((traceEvents[1]!.payload as { stopAndAskBoundaries: unknown }).stopAndAskBoundaries)
+    expect((traceEvents[2]!.payload as { stopAndAskBoundaries: unknown }).stopAndAskBoundaries)
       .toEqual(["missing_authority", "undeclared_network", "forbidden_file_scope"]);
     expect(eventTypes(testFixture.databasePath, milestone.milestoneId)).toEqual([
       "milestone.created",
@@ -449,7 +453,7 @@ describe("Zentra CLI", () => {
 
     expect(code).toBe(0);
     expect(stdout).toBe(readFileSync(tracePath, "utf8"));
-    expect(stdout.trimEnd().split("\n")).toHaveLength(2);
+    expect(stdout.trimEnd().split("\n")).toHaveLength(3);
     expect(JSON.parse(stderr) as unknown).toMatchObject({
       command: "milestone.preview",
       tracePath,
@@ -492,7 +496,7 @@ describe("Zentra CLI", () => {
       "milestone.created",
       "milestone.plan_created",
     ]);
-    expect(readFileSync(tracePath, "utf8").trimEnd().split("\n")).toHaveLength(2);
+    expect(readFileSync(tracePath, "utf8").trimEnd().split("\n")).toHaveLength(3);
   });
 
   it("documents that live Agent Tail uses stdin instead of following files", async () => {

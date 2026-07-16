@@ -7,6 +7,9 @@ import {
   OpenCodeReviewerAdapter,
   OpenCodeTaskAdmissionContextSchema,
   PlanReplacementPayloadSchema,
+  JournalOutcomeHistoryStore,
+  routeApprovedModel,
+  RoutedOpenCodeExecution,
   SqliteEventJournal,
 } from "../../src/index.js";
 
@@ -20,6 +23,9 @@ describe("package-root programmatic API", () => {
     expect(OpenCodeTaskAdmissionContextSchema.parse).toBeTypeOf("function");
     expect(PlanReplacementPayloadSchema.parse).toBeTypeOf("function");
     expect(MilestoneRegistry.prototype.replacePlan).toBeTypeOf("function");
+    expect(JournalOutcomeHistoryStore).toBeTypeOf("function");
+    expect(routeApprovedModel).toBeTypeOf("function");
+    expect(RoutedOpenCodeExecution).toBeTypeOf("function");
     expect(SqliteEventJournal).toBeTypeOf("function");
   });
 });

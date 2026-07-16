@@ -37,8 +37,7 @@ export interface OpenCodeWriterReport {
   readonly exitCode: number | null;
   readonly executable: string;
   readonly modelId: string;
-  readonly model: string;
-  readonly provider: string;
+  readonly requestedModelSha256: string;
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly packetSha256: string;
@@ -109,9 +108,8 @@ function report(
     exitCode: result.exitCode,
     executable,
     modelId: request.model.id,
-    model: request.model.model,
-    provider: request.model.model.replace(/\/.*/, ""),
-    argv: Object.freeze([...argv.slice(0, -1), "<writer-task-packet>"]),
+    requestedModelSha256: sha256(request.model.model),
+    argv: Object.freeze(redactedArgv(argv)),
     cwd,
     packetSha256: sha256(packet),
     stdoutSha256: sha256(result.rawStdout),
@@ -121,6 +119,15 @@ function report(
     startedAt,
     finishedAt: new Date().toISOString(),
   });
+}
+
+function redactedArgv(argv: readonly string[]): readonly string[] {
+  const retained = [...argv.slice(0, -1), "<writer-task-packet>"];
+  const modelIndex = retained.indexOf("--model");
+  if (modelIndex !== -1 && retained[modelIndex + 1] !== undefined) {
+    retained[modelIndex + 1] = "<approved-model>";
+  }
+  return retained;
 }
 
 function writerConfiguration(model: ModelCapability, ownedPaths: readonly string[]): string {
