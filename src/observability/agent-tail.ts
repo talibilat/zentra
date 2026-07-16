@@ -63,7 +63,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     kind: event.type,
     actor: Object.freeze(actorFor(event)),
     operation: Object.freeze({
-      name: operationName(event.type),
+      name: operationName(event),
       status: operationStatus(event),
     }),
     attributes: Object.freeze({
@@ -133,7 +133,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
     if (event.type === "milestone.plan_created") return { id: "zentra-planner", role: "planner" };
     return { id: "zentra-orchestrator", role: "orchestrator" };
   }
-  if (event.type === "task.started") {
+  if (event.type === "task.started" || event.type === "task.writer_completed") {
     return { id: payloadString(event.payload, "workerId") ?? "zentra-worker", role: "worker" };
   }
   if (event.type.startsWith("task.validation_")) {
@@ -176,14 +176,21 @@ function actorFor(event: StoredEvent): AgentTailActor {
   return { id: "zentra-orchestrator", role: "orchestrator" };
 }
 
-function operationName(type: string): string {
+function operationName(event: StoredEvent): string {
+  const type = event.type;
   if (type === "capsule.proxy_interaction_observed") return "network_policy";
   if (type.startsWith("capsule.github_broker_") || type === "capsule.github_grant_consumed") return "github_effect";
   if (type === "capsule.cleanup_observed") return "cleanup";
   if (type.startsWith("capsule.")) return "capsule";
   if (type.startsWith("milestone.")) return "milestone";
   if (type.startsWith("artifact.")) return "artifact";
-  if (type === "task.denied") return "review";
+  if (
+    type === "task.writer_completed" ||
+    type === "task.started"
+  ) return "writer";
+  if (type === "task.denied") {
+    return payloadString(event.payload, "stage") === "ownership" ? "ownership" : "review";
+  }
   if (type.includes("validation")) return "validation";
   if (type.includes("review")) return "review";
   if (type.includes("integration")) return "integration";
@@ -212,6 +219,9 @@ function operationStatus(event: StoredEvent): string {
   if (type === "milestone.cancelled") return "cancelled";
   if (type === "milestone.timed_out") return "timed_out";
   if (type === "milestone.denied") return "denied";
+  if (type === "task.writer_completed" || type === "task.validation_completed") {
+    return payloadString(event.payload, "outcome") ?? "failed";
+  }
   if (type.startsWith("milestone.") && type.endsWith("ed")) return "completed";
   if (type.endsWith("_started") || type === "task.started") return "running";
   if (type.endsWith("_requested")) return "waiting";

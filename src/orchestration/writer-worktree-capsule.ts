@@ -12,7 +12,24 @@ import type {
   WorkspaceOwnershipGate,
   WorkspaceOwnershipReport,
 } from "../workspaces/workspace-ownership.js";
-import type { WorkspaceLease, WorktreeManager } from "../workspaces/worktree-manager.js";
+import type {
+  WorkspaceCreationIntent,
+  WorkspaceLease,
+  WorktreeManager,
+} from "../workspaces/worktree-manager.js";
+
+export interface WriterCapsuleObserver {
+  onWorktreeCreationStarted?(intent: WorkspaceCreationIntent): void | Promise<void>;
+  onLeaseCreated?(input: {
+    readonly lease: WorkspaceLease;
+    readonly baseCommit: string;
+  }): void | Promise<void>;
+  onWriterStarted?(input: {
+    readonly lease: WorkspaceLease;
+    readonly modelId: string;
+  }): void | Promise<void>;
+  onWriterCompleted?(report: OpenCodeWriterReport): void | Promise<void>;
+}
 
 export interface WriterCapsuleRequest {
   readonly project: ProjectConfig;
@@ -20,7 +37,9 @@ export interface WriterCapsuleRequest {
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
   readonly executable: string;
+  readonly executableSha256?: string;
   readonly signal: AbortSignal;
+  readonly observer?: WriterCapsuleObserver;
 }
 
 export interface WriterCapsuleResult {
@@ -44,9 +63,12 @@ export class WriterWorktreeCapsule {
     const primaryHeadRef = await this.symbolicRef(request.project.repositoryPath, "HEAD");
     await this.assertPrimaryClean(request.project.repositoryPath);
     await this.worktrees.ensureIntegrationBranch(request.project, { signal: request.signal });
-    const lease = await this.worktrees.create(request.project, request.task.taskId, {
-      signal: request.signal,
-    });
+    const lease = await this.worktrees.create(
+      request.project,
+      request.task.taskId,
+      { signal: request.signal },
+      request.observer?.onWorktreeCreationStarted,
+    );
     const packet = writerPacket(request.task, request.security);
     const baseCommit = await this.gitRead(lease.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
     const integrationHead = await this.gitRead(request.project.repositoryPath, [
@@ -60,7 +82,9 @@ export class WriterWorktreeCapsule {
     ) !== null) {
       throw new Error("integration branch must not be symbolic");
     }
+    await request.observer?.onLeaseCreated?.({ lease, baseCommit });
     await this.ownership.assertSafeBaseline(lease, packet.ownedPaths, { signal: request.signal });
+    await request.observer?.onWriterStarted?.({ lease, modelId: request.model.id });
     const writer = await this.writer.execute({
       taskId: request.task.taskId,
       executable: request.executable,
@@ -68,7 +92,11 @@ export class WriterWorktreeCapsule {
       workspace: lease,
       packet,
       timeoutMs: request.task.budget.maxSeconds * 1_000,
+      ...(request.executableSha256 === undefined
+        ? {}
+        : { expectedExecutableSha256: request.executableSha256 }),
     }, request.signal);
+    await request.observer?.onWriterCompleted?.(writer);
 
     await this.assertPrimaryUnchanged(
       request.project,
