@@ -121,13 +121,3 @@ function pathMatchesScope(candidate: string, scope: string): boolean {
   }
   return candidate === scope;
 }
-
-export function assertMilestonePlanReady(input: PlanReadinessInput): MilestonePlan {
-  const parsed = MilestonePlanSchema.safeParse(input.plan);
-  if (!parsed.success) throw new Error("Milestone plan is not structurally ready");
-  const decision = assessMilestonePlanReadiness(input);
-  if (decision.status !== "executable") {
-    throw new Error(`Milestone plan is not executable: ${decision.reason}`);
-  }
-  return parsed.data;
-}
