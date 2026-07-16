@@ -1039,15 +1039,11 @@ function unavailableValidation(
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout: "", stderr: reason })),
     provenance: Object.freeze({
-      invocationId: `unavailable-${safeEvidenceName(project.projectId)}-${outcome}`,
+      invocationId: `unavailable-${project.projectId.replace(/[^A-Za-z0-9._-]/g, "_") || "unknown"}-${outcome}`,
       canonicalCwd: project.repositoryPath,
       subjectSha256: null,
     }),
   };
-}
-
-function safeEvidenceName(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, "_") || "unknown";
 }
 
 function sha256(value: string): string {
