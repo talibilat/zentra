@@ -254,7 +254,7 @@ function parseTokenList(
 ): string[] {
   if (value === undefined || value === "") throw new ModelSheetError(code);
   const tokens = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (tokens.length === 0 || tokens.length !== value.split(",").length) {
+  if (tokens.length !== value.split(",").length) {
     throw new ModelSheetError(code);
   }
   const seen = new Set<string>();
