@@ -953,7 +953,7 @@ class LiveStdoutOutput {
     let completion: Promise<void>;
     completion = new Promise((resolve) => {
       process.stdout.write(value, (error) => {
-        if (error !== null && error !== undefined) this.failed = true;
+        if (error != null) this.failed = true;
         this.pendingBytes -= bytes;
         this.pending.delete(completion);
         resolve();
