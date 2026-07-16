@@ -603,7 +603,9 @@ function createProgram(
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
       assertSafeRootFile(options.file);
-      assertSafeContent(options.content);
+      if (Buffer.byteLength(options.content, "utf8") > MAX_CONTENT_BYTES) {
+        throw new CliFailure("INVALID_CONTENT");
+      }
       const reviewPolicyTask = reviewPolicyTaskFromOptions(options);
       const configs = loadProjects(options.config);
       if (configs.length !== 1) {
@@ -1067,12 +1069,6 @@ function assertSafeRootFile(candidate: string): void {
 function assertSafeTitle(title: string): void {
   if (title.length === 0 || Buffer.byteLength(title, "utf8") > MAX_TITLE_BYTES) {
     throw new CliFailure("INVALID_TITLE");
-  }
-}
-
-function assertSafeContent(content: string): void {
-  if (Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES) {
-    throw new CliFailure("INVALID_CONTENT");
   }
 }
 
