@@ -226,7 +226,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       }
       cleanupCompleted = true;
     } else if (event.type === "task.cleanup_observed") {
-      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+      if (!cleanupStarted || cleanupCompleted) {
         throw new Error("cleanup observation requires one cleanup start");
       }
       cleanupObserved = true;
