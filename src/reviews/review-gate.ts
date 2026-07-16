@@ -93,8 +93,7 @@ export class ReviewGate {
       );
     }
 
-    Object.freeze(snapshot);
-    return snapshot;
+    return Object.freeze(snapshot);
   }
 
   verify(input: ReviewInput, decision: ReviewDecision): ReviewDecision {
