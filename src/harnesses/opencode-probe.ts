@@ -102,7 +102,7 @@ function reportFromWorkerResult(
       executable,
       argv: Object.freeze(["--version"]),
       cwd,
-      version: firstNonemptyLine(result.stdout),
+      version: result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? null,
       startedAt,
       finishedAt: new Date().toISOString(),
     });
@@ -173,8 +173,4 @@ function canonicalExecutable(candidate: string): string {
 function providerFromModel(model: string): string {
   const [provider] = model.split("/", 1);
   return provider ?? model;
-}
-
-function firstNonemptyLine(output: string): string | null {
-  return output.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? null;
 }
