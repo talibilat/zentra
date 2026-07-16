@@ -1,5 +1,4 @@
 import { realpathSync, statSync } from "node:fs";
-import path from "node:path";
 
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
@@ -149,7 +148,7 @@ function failure(
 function canonicalDirectory(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
-  if (!path.isAbsolute(candidate) || candidate !== canonical) {
+  if (candidate !== canonical) {
     throw new Error("OpenCode probe cwd must be a canonical absolute path");
   }
   if (!stat.isDirectory()) {
@@ -161,7 +160,7 @@ function canonicalDirectory(candidate: string): string {
 function canonicalExecutable(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
-  if (!path.isAbsolute(candidate) || candidate !== canonical) {
+  if (candidate !== canonical) {
     throw new Error("OpenCode probe executable must be a canonical absolute path");
   }
   if (!stat.isFile() || (stat.mode & 0o111) === 0) {
