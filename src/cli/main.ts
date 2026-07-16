@@ -51,6 +51,9 @@ import {
   publicSecuritySheetSummary,
   SecuritySheetError,
 } from "../policy/security-sheet.js";
+import { routeApprovedModel } from "../routing/model-router.js";
+import { JournalOutcomeHistoryStore } from "../routing/outcome-history.js";
+import type { OutcomeHistoryRecord } from "../routing/routing-events.js";
 import {
   APPROVED_VALIDATION_EXECUTABLE,
   assertApprovedValidationExecutableIdentity,
@@ -359,10 +362,37 @@ function createProgram(
       if (!security.allowedRepositories.includes(canonicalRepository)) {
         throw new CliFailure("INVALID_SECURITY_SHEET");
       }
-      const firstModel = model.models.find((candidate) => candidate.roles.includes("planner"));
-      if (firstModel === undefined) throw new CliFailure("INVALID_MODEL_SHEET");
       const milestoneId = `milestone-${createHash("sha256").update(`${project.projectId}\0${options.task}`, "utf8").digest("hex").slice(0, 12)}`;
       const taskId = `${milestoneId}-task-1`;
+      let routed;
+      try {
+        let history: OutcomeHistoryRecord[] = [];
+        if (existsSync(options.database)) {
+          const historyJournal = SqliteEventJournal.openReadOnly(options.database);
+          try {
+            history = [...new JournalOutcomeHistoryStore(historyJournal).list({
+              taskType: "milestone_planning",
+              role: "planner",
+              harness: "opencode",
+            })];
+          } finally {
+            historyJournal.close();
+          }
+        }
+        routed = routeApprovedModel(model, history, {
+          executionId: `${milestoneId}-preview-routing`,
+          taskId,
+          taskType: "milestone_planning",
+          role: "planner",
+          harness: "opencode",
+          requiredTools: ["read_repository"],
+          network: "denied",
+          requiredContextTokens: 2_000,
+        });
+      } catch {
+        throw new CliFailure("INVALID_MODEL_SHEET");
+      }
+      const firstModel = routed.capability;
       const ownedPath = security.allowedFileScopes[0]!;
       const plan = {
         milestoneId,
@@ -450,6 +480,21 @@ function createProgram(
       try {
         sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
         journal = new ProjectingEventJournal(sqliteJournal, sink);
+        new JournalOutcomeHistoryStore(journal).begin({
+          executionId: routed.executionId,
+          taskId,
+          taskType: "milestone_planning",
+          role: "planner",
+          model: {
+            capabilityId: firstModel.id,
+            harness: "opencode",
+            transportModelSha256: createHash("sha256").update(firstModel.model, "utf8").digest("hex"),
+          },
+          candidateCapabilityIds: [...routed.candidateCapabilityIds],
+          modelSheetSha256: routed.modelSheetSha256,
+          basis: routed.basis,
+          correlationId: milestoneId,
+        });
         stored = journal.append(milestoneId, 0, events);
       } finally {
         trace.projectionFailed = (journal?.projectionFailed ?? false) || (sink?.streamFailed ?? false);
