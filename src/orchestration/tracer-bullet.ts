@@ -960,10 +960,7 @@ function validateRelativePath(candidate: string): void {
     throw new Error(`artifact path must be a safe relative path: ${candidate}`);
   }
   const segments = candidate.split(/[\\/]/);
-  if (
-    segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
-    path.posix.normalize(candidate) !== candidate
-  ) {
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`artifact path must not contain traversal: ${candidate}`);
   }
 }
