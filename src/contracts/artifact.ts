@@ -460,24 +460,19 @@ function validateLifecycleArtifactReference(
     }
   }
   if (
-    event.type === "task.completed" ||
-    "receipt" in payload
+    "receipt" in payload &&
+    event.type !== "task.integration_prepared" &&
+    event.type !== "task.integration_observed"
   ) {
+    const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
+    if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory integration receipt evidence");
+    }
     if (
-      "receipt" in payload &&
-      event.type !== "task.integration_prepared" &&
-      event.type !== "task.integration_observed"
+      isTerminalEvent(event.type) &&
+      IntegrationReceiptEvidenceSchema.parse(payload.receipt).outcome !== event.type.slice(5)
     ) {
-      const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
-      if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory integration receipt evidence");
-      }
-      if (
-        isTerminalEvent(event.type) &&
-        IntegrationReceiptEvidenceSchema.parse(payload.receipt).outcome !== event.type.slice(5)
-      ) {
-        throw new Error(`${event.type} contradicts integration receipt outcome`);
-      }
+      throw new Error(`${event.type} contradicts integration receipt outcome`);
     }
   }
 }
