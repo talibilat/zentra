@@ -78,15 +78,12 @@ export class ReviewGate {
       throw new Error("review gate: decision reviewer identity does not match requested reviewer");
     }
 
-    // Compute current digests
-    const currentDiffSha256 = inputDiffSha256;
-
     const currentValidationSha256 = canonicalValidationDigest(input.validation);
 
     // Reject if diff digest does not match
-    if (snapshot.diffSha256 !== currentDiffSha256) {
+    if (snapshot.diffSha256 !== inputDiffSha256) {
       throw new Error(
-        `review gate: diff digest mismatch - decision was ${snapshot.diffSha256}, current is ${currentDiffSha256}`
+        `review gate: diff digest mismatch - decision was ${snapshot.diffSha256}, current is ${inputDiffSha256}`
       );
     }
 
