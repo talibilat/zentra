@@ -7,13 +7,16 @@ export { DisabledModelBroker } from "./capsule/model-broker.js";
 export type { ModelBroker, ModelBrokerRequest, ModelBrokerReceipt } from "./capsule/model-broker.js";
 export type { EventJournal } from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
+export { ProjectingEventJournal } from "./journal/projecting-journal.js";
+export type { StoredEventSink } from "./journal/projecting-journal.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";
 export { loadModelSheet, parseModelSheetMarkdown } from "./policy/model-sheet.js";
 export type { ModelCapability, ModelSheet } from "./policy/model-sheet.js";
 export { MilestoneRegistry } from "./milestones/milestone-registry.js";
 export { loadSecuritySheet, parseSecuritySheetMarkdown } from "./policy/security-sheet.js";
 export type { SecuritySheet } from "./policy/security-sheet.js";
-export type { RegisterMilestoneInput, MilestoneRecord, MilestoneSummary, OpenCodeTaskAdmissionContext, ReplaceMilestonePlanInput, TaskAdmissionResult } from "./milestones/milestone-registry.js";
+export type { RegisterMilestoneInput, MilestoneRecord, MilestoneSummary, OpenCodeTaskAdmissionContext, PlanRevisionResult, ReplaceMilestonePlanInput, ResolveReplanningInput, ReviseMilestonePlanInput, TaskAdmissionResult } from "./milestones/milestone-registry.js";
+export type { MilestoneView, PlannedTaskView } from "./milestones/milestone-projection.js";
 export {
   AdmissionRequestedBudgetSchema,
   AuthorityAttentionSchema,
@@ -38,6 +41,39 @@ export {
   PlannedTaskSchema,
   RoleAssignmentSchema,
 } from "./contracts/milestone.js";
+export {
+  createMilestoneAuthorityEnvelope,
+  createReplanningPolicyBinding,
+  capabilitySnapshot,
+  capabilitySupportsAdmission,
+  derivePlanAuthority,
+  MilestoneAuthorityEnvelopePayloadSchema,
+  MilestoneAuthorityEnvelopeSchema,
+  PlanRevisionPayloadSchema,
+  PublicReplanningSecuritySnapshotSchema,
+  ReplanningAttentionSchema,
+  ReplanningCapabilitySchema,
+  ReplanningPausedPayloadSchema,
+  ReplanningPolicyBindingSchema,
+  ReplanningPolicyBoundPayloadSchema,
+  ReplanningModelCapabilitySnapshotSchema,
+  ReplanningModelSheetSnapshotSchema,
+  ReplanningResolutionPayloadSchema,
+  RevisionEvidenceReferenceSchema,
+} from "./contracts/replanning.js";
+export type {
+  MilestoneAuthorityEnvelope,
+  PlanRevisionPayload,
+  ReplanningAttention,
+  ReplanningCapability,
+  ReplanningReason,
+  ReplanningPolicyBinding,
+  ReplanningModelSheetSnapshot,
+  ReplanningModelCapabilitySnapshot,
+  PublicReplanningSecuritySnapshot,
+  ReplanningResolutionPayload,
+  RevisionEvidenceReference,
+} from "./contracts/replanning.js";
 export type {
   Milestone,
   MilestoneBudget,
