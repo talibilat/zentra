@@ -38,8 +38,7 @@ export class ReviewGate {
       throw new Error(`review gate: invalid decision: ${parsed.error.message}`);
     }
     const snapshot: ReviewDecision = parsed.data;
-    // Reject nonempty diff requirement
-    if (!input.diff || input.diff.trim() === "") {
+    if (input.diff.trim() === "") {
       throw new Error("review gate: diff is empty");
     }
     const inputDiffSha256 = createHash("sha256").update(input.diff, "utf8").digest("hex");
