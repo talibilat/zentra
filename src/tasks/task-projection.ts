@@ -194,7 +194,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
 
     if (event.type === "task.integration_prepared") {
-      if (integrationObserved || cleanupStarted) {
+      if (integrationObserved) {
         throw new Error("task.integration_prepared is out of order");
       }
       integrationPrepared = true;
