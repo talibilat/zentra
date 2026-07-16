@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 
 import { z } from "zod";
 
@@ -723,10 +722,7 @@ function isSafeLogicalPath(candidate: string): boolean {
     candidate.includes("\\")
   ) return false;
   const segments = candidate.split("/");
-  return (
-    segments.every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
-    path.posix.normalize(candidate) === candidate
-  );
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function sha256(value: string): string {
