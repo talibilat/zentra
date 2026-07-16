@@ -441,7 +441,7 @@ function validateLifecycleArtifactReference(
   if (event.type === "task.integration_prepared" && !("receipt" in payload)) {
     throw new Error("task.integration_prepared payload must carry receipt evidence");
   }
-  if (event.type === "task.integration_prepared" && "receipt" in payload) {
+  if (event.type === "task.integration_prepared") {
     const receipt = requireArtifact(byKind, "integration_receipt", event.type);
     if (
       receipt.phase !== "prepared" ||
