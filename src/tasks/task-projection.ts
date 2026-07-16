@@ -293,11 +293,7 @@ function canonicalSnapshot(value: unknown): string {
 }
 
 function requirePayloadString(event: StoredEvent, field: string): string {
-  const payload = event.payload;
-  const value =
-    typeof payload === "object" && payload !== null
-      ? (payload as Record<string, unknown>)[field]
-      : undefined;
+  const value = payloadField(event, field);
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(
       `${event.type} payload.${field} must be a nonempty string`,
