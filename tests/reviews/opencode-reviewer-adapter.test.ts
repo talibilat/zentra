@@ -99,6 +99,7 @@ function reviewerProgram(
         reason: decision === "approve" ? "The validated change is acceptable." : "The change is unsafe.",
       };
       return {
+        status: "executed",
         outcome: "completed",
         openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
         model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },

@@ -352,6 +352,7 @@ class DenyingOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
       reason: "The OpenCode reviewer found an unsafe change.",
     };
     return Promise.resolve({
+      status: "executed",
       outcome: "completed",
       openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
       model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
@@ -378,6 +379,7 @@ class UncertainOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
   run(request: Parameters<OpenCodeReviewerProgram["run"]>[0]): Promise<OpenCodeReadOnlyProgramResult> {
     this.calls += 1;
     return Promise.resolve({
+      status: "executed",
       outcome: "failed",
       openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
       model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },

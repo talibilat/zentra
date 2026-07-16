@@ -244,7 +244,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
 
   it("runs an OpenCode reviewer with review authority inside the read-only capsule boundary", async () => {
     const journal = new SqliteEventJournal(":memory:");
-    readyMilestone(journal, "milestone-reviewer", "reviewer");
+    const admission = readyMilestone(journal, "milestone-reviewer", "reviewer");
     const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
       expect(request.role).toBe("reviewer");
       expect(request).not.toHaveProperty("worktree");
@@ -291,6 +291,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: 1_000,
       signal: new AbortController().signal,
+      admission,
     });
 
     expect(result.outcome).toBe("completed");

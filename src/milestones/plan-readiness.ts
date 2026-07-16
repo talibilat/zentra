@@ -140,10 +140,10 @@ function assessAuthority(
   ) {
     return stopped(packet, "undeclared_network", "hard_stop", security);
   }
-  if (
-    !context.toolPermissions.includes("read_repository") ||
-    context.toolPermissions.some((permission) => permission !== "read_repository")
-  ) {
+  const expectedTools = packet.role === "reviewer"
+    ? ["read_repository", "review_diff"]
+    : ["read_repository"];
+  if (!sameCanonicalSet(context.toolPermissions, expectedTools)) {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }
   if (context.requestedBudget.maxInputTokens + context.requestedBudget.maxOutputTokens > context.contextTokens) {
