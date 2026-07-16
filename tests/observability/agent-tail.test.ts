@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
+import { createAuthorityAttention, createOpenCodeAdmissionPacket } from "../../src/contracts/authority-attention.js";
+import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import {
   agentTailEventToJsonLine,
   storedEventToAgentTailEvent,
@@ -189,6 +191,49 @@ describe("Agent Tail event envelope export", () => {
       actor: { id: "zentra-recovery-controller", role: "recovery" },
       operation: { name: "integration", status: "waiting" },
     });
+  });
+
+  it("strictly maps authority pauses to waiting without exposing policy prose", () => {
+    const plan = {
+      milestoneId: "milestone-1", projectId: "zentra", goal: "Stop safely.", tasks: [{
+        taskId: "task-1", title: "Stop", description: "Stop.", dependencies: [], ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Stopped."],
+        roleAssignment: { role: "researcher", agentId: "researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 10, maxOutputTokens: 10 },
+      }],
+    } as const;
+    const security: SecuritySheet = {
+      allowedRepositories: ["/tmp/repository"], allowedFileScopes: ["src/**"], forbiddenPaths: [".env"],
+      network: { default: "denied", allowedDestinations: [] }, secretHandling: ["ATTACKER_CANARY"],
+      approvalRequiredOperations: [], releaseBoundary: "local_preparation_only", stopAndAskConditions: ["missing_authority"],
+    };
+    const packet = createOpenCodeAdmissionPacket({
+      plan: plan as never, milestoneId: "milestone-1", taskId: "task-1", security, canonicalRepository: "/tmp/repository",
+      actorId: "researcher", harness: "opencode", role: "researcher", capabilityId: "researcher", transportModelId: "fixture/model",
+      authority: "read_only", roles: ["researcher"], toolPermissions: ["read_repository"], network: "denied", contextTokens: 1_000,
+      requestedBudget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 10, maxOutputTokens: 10, timeoutMs: 5_000 },
+    });
+    const attention = createAuthorityAttention({
+      packet,
+      reason: "missing_authority",
+      classification: "exact_approval_required",
+      configuredStopCondition: true,
+    });
+
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1", type: "milestone.paused", payload: { attention },
+    }));
+
+    expect(exported).toMatchObject({
+      kind: "milestone.paused",
+      actor: { id: "zentra-authority-gate", role: "authority_gate" },
+      operation: { name: "authority_boundary", status: "waiting" },
+      payload: { attention: { attentionId: attention.attentionId, reason: "missing_authority" } },
+    });
+    expect(JSON.stringify(exported)).not.toContain("ATTACKER_CANARY");
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1", type: "milestone.paused", payload: { attention: { ...attention, unexpected: true } },
+    }))).toThrow();
   });
 
   it("maps capsule proxy, worker, cleanup, and terminal events without changing v1", () => {

@@ -3,9 +3,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 
 import type {
-  OpenCodeReadOnlyAgentRequest,
-} from "../agents/opencode-read-only-agent.js";
-import type { OpenCodeReadOnlyProgramResult } from "../agents/opencode-read-only-program.js";
+  OpenCodeReadOnlyProgramRequest,
+  OpenCodeReadOnlyProgramResult,
+} from "../agents/opencode-read-only-program.js";
 import type { MilestoneBudget } from "../contracts/milestone.js";
 import {
   canonicalValidationDigest,
@@ -29,7 +29,7 @@ const OpenCodeReviewResponseSchema = z.strictObject({
 });
 
 export interface OpenCodeReviewerProgram {
-  run(request: OpenCodeReadOnlyAgentRequest): Promise<OpenCodeReadOnlyProgramResult>;
+  run(request: OpenCodeReadOnlyProgramRequest): Promise<OpenCodeReadOnlyProgramResult>;
 }
 
 export interface OpenCodeReviewerAssignment {
@@ -118,6 +118,9 @@ export class OpenCodeReviewerAdapter implements ReviewerAdapter {
       timeoutMs: this.assignment.timeoutMs,
       signal,
     });
+    if (result.status === "paused") {
+      throw new ReviewerExecutionError("failed", "OpenCode reviewer paused at an authority boundary");
+    }
     const uncertainty = Object.freeze({
       reviewerId: input.reviewerId,
       milestoneId: result.execution.milestoneId,

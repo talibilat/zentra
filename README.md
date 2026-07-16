@@ -152,7 +152,7 @@ External repository actors can still move or delete the head after that final ch
 The conformance command keeps model traffic disabled and proves only the OpenCode version and executable digest.
 The programmatic read-only OpenCode role requires an explicitly supplied typed `ModelBroker` and records the broker-reported model metadata and bounded evidence in the milestone journal.
 Installed milestone CLI composition belongs to issue #34 and is not exposed by issue #18.
-Issue #18 supports programmatic composition through `OpenCodeReadOnlyProgram`, which requires an authoritative journal, retained `AgentTailJsonlFileSink`, trusted `ModelBroker`, and parsed `ModelSheet`.
+Issue #18 supports programmatic composition through `OpenCodeReadOnlyProgram`, which requires an authoritative journal, retained `AgentTailJsonlFileSink`, trusted `ModelBroker`, parsed `ModelSheet`, and parsed `SecuritySheet`.
 The program resolves the task-assigned capability from that sheet and constructs `DockerOpenCodeReadOnlyCapsule`; callers do not select a model in each run request.
 `ModelCapability.id` remains the local assignment and policy identity, while `ModelCapability.model` is the approved provider transport identity sent to `ModelBroker` and required in its receipt.
 The broker is a trusted capability-runner contract and must acknowledge abort promptly.
@@ -165,12 +165,22 @@ import {
   OpenCodeReadOnlyProgram,
   SqliteEventJournal,
   loadModelSheet,
+  loadSecuritySheet,
 } from "zentra";
 
-const program = new OpenCodeReadOnlyProgram(journal, agentTailSink, modelBroker, modelSheet);
+const journal = new SqliteEventJournal(databasePath);
+const agentTailSink = AgentTailJsonlFileSink.open(traceRoot, tracePath);
+const modelSheet = loadModelSheet(modelSheetPath);
+const securitySheet = loadSecuritySheet(securitySheetPath);
+const program = new OpenCodeReadOnlyProgram(
+  journal,
+  agentTailSink,
+  modelBroker,
+  modelSheet,
+  securitySheet,
+);
 const milestones = new MilestoneRegistry(journal);
 milestones.register({ milestoneId, projectId, title, correlationId, plan });
-milestones.ready(milestoneId, taskId);
 const result = await program.run({
   milestoneId,
   taskId,
@@ -183,8 +193,21 @@ const result = await program.run({
 });
 ```
 
-The exported milestone contracts and `MilestoneRegistry.ready()` provide the supported preparation path without raw event appends.
-The milestone and ready task must already exist in the supplied journal, and the task assignment must name an approved OpenCode capability with only `read_repository` tool authority and denied direct network access.
+`OpenCodeReadOnlyProgram.run()` constructs a required identity-bearing OpenCode admission context and calls `MilestoneRegistry.admitTask()` before any repository view, resource intent, capsule, Docker, or broker action.
+The registry canonicalizes the requested repository, requires an exact security-sheet repository match, checks the assigned model, requested budget, file scope, network, approval, and release boundary, and atomically records either the packet-bound task readiness digest or one durable pause.
+OpenCode admission requires the assigned model harness to be exactly `opencode` and binds its canonical roles, tool permissions, network declaration, and positive context-token capacity into the packet digest.
+Requested input and output tokens must fit within that bound capacity, and the complete snapshot is checked again immediately before resource intent.
+Direct callers of `MilestoneRegistry.admitTask()` must provide its complete `OpenCodeTaskAdmissionContext`; there is no context-free readiness API.
+The milestone must already exist in the supplied journal, and an executable task assignment must name an approved OpenCode capability with only `read_repository` tool authority and denied direct network access.
+When no valid plan exists yet, admission records bounded `plan_not_ready` attention instead of starting work.
+`stopAndAskConditions` records the configured escalation vocabulary but never disables mandatory repository, file, authority, network, release, or budget stops.
+The current OpenCode admission packet has no optional advisory condition beyond those mandatory checks.
+`approvalRequiredOperations` is consulted only for operations represented by the typed request; it does not turn a broad authority label into an inferred remote operation or standing approval.
+Because the current milestone plan cannot express an exact remote destination and release target, remote effects remain stopped rather than borrowing authority from an allowed destination or approval-operation name.
+An unstarted paused milestone may replace its plan through `MilestoneRegistry.replacePlan()` only when the request exactly binds the durable `attentionId`, prior plan digest, prior security digest, milestone identity, and project identity.
+The replacement event clears attention into `planning`, resets only unstarted task projections, and grants no readiness or execution authority; every replacement task must pass current-policy admission again.
+Once any task has started or created a resource intent, same-milestone replacement is prohibited even after successful completion and cleanup.
+Create a new milestone to revise work after execution has started.
 Before creating the deterministic sanitized view or any Docker resource, the program journals `milestone.agent_resource_intent` with reconstructable names, label, and controlled view path.
 After an interrupted attempt, `program.reconcile({ milestoneId, taskId, capsuleId? })` discovers labeled resources, removes and proves their absence, and journals cleanup before another attempt can start.
 The built-in `DisabledModelBroker` performs no provider transport and no provider credentials are invented or passed into the capsule.

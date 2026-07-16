@@ -4,6 +4,12 @@ import { realpathSync, rmSync, statSync } from "node:fs";
 import { z } from "zod";
 
 import type { MilestoneBudget, MilestoneRole } from "../contracts/milestone.js";
+import {
+  admissionPacketDigest,
+  digestCanonical,
+  OpenCodeAdmissionPacketSchema,
+  type OpenCodeAdmissionPacket,
+} from "../contracts/authority-attention.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import type { EventJournal } from "../journal/journal.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
@@ -117,6 +123,10 @@ export interface OpenCodeReadOnlyAgentRequest {
   readonly budget: Omit<MilestoneBudget, "maxRetries">;
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
+  readonly admission: {
+    readonly packet: OpenCodeAdmissionPacket;
+    readonly digest: string;
+  };
 }
 
 export class OpenCodeReadOnlyAgent {
@@ -131,11 +141,20 @@ export class OpenCodeReadOnlyAgent {
     const events = this.journal.readStream(request.milestoneId);
     const milestone = projectMilestone(events);
     if (milestone === null || milestone.plan === null) throw new Error("OpenCode role requires a planned milestone");
+    if (milestone.lifecycle === "paused") throw new Error("OpenCode role cannot run while the milestone is paused");
     const task = milestone.plan.tasks.find((candidate) => candidate.taskId === request.taskId);
     if (task === undefined) throw new Error("OpenCode role task is not in the milestone plan");
     assertAssignment(task.roleAssignment.role, task.roleAssignment.harness, task.roleAssignment.agentId, task.risk.authority, request);
     const model = approvedModel(this.models, task.roleAssignment.agentId, request.role, request.budget);
     if (milestone.tasks[request.taskId]?.status !== "ready") throw new Error("OpenCode role task must be ready");
+    assertAdmission(
+      request,
+      milestone.tasks[request.taskId]?.admissionDigest ?? null,
+      task.roleAssignment.agentId,
+      task.risk.authority,
+      model,
+      digestCanonical(milestone.plan),
+    );
     assertBudget(request, task.budget);
     const repositoryPath = canonicalDirectory(request.repositoryPath);
     const correlationId = events[0]!.correlationId;
@@ -152,6 +171,19 @@ export class OpenCodeReadOnlyAgent {
     if (pending !== undefined) throw new Error("OpenCode resource intent requires reconciliation before execution");
     const identity = openCodeResourceIdentity(request.milestoneId, request.taskId, resourceEvents.length + 1);
     const intentPayload = OpenCodeResourceIntentPayloadSchema.parse({ taskId: request.taskId, ...identity });
+    const currentEvents = this.journal.readStream(request.milestoneId);
+    const currentMilestone = projectMilestone(currentEvents);
+    if (currentMilestone?.lifecycle === "paused") throw new Error("OpenCode role cannot run while the milestone is paused");
+    if (currentMilestone?.tasks[request.taskId]?.status !== "ready") throw new Error("OpenCode role task must remain ready");
+    assertAdmission(
+      request,
+      currentMilestone.tasks[request.taskId]?.admissionDigest ?? null,
+      task.roleAssignment.agentId,
+      task.risk.authority,
+      model,
+      digestCanonical(currentMilestone.plan),
+    );
+    version = currentEvents.at(-1)!.streamVersion;
     version = this.journal.append(request.milestoneId, version, [{
       streamId: request.milestoneId, type: "milestone.agent_resource_intent", payload: intentPayload,
       causationId: null, correlationId,
@@ -332,6 +364,42 @@ export class OpenCodeReadOnlyAgent {
       }),
     });
   }
+}
+
+function assertAdmission(
+  request: OpenCodeReadOnlyAgentRequest,
+  durableDigest: string | null,
+  actorId: string,
+  authority: string,
+  model: ModelCapability,
+  planDigest: string,
+): void {
+  const packet = OpenCodeAdmissionPacketSchema.parse(request.admission.packet);
+  const digest = admissionPacketDigest(packet);
+  if (
+    request.admission.digest !== digest ||
+    durableDigest !== digest ||
+    packet.milestoneId !== request.milestoneId ||
+    packet.taskId !== request.taskId ||
+    packet.repository !== request.repositoryPath ||
+    packet.role !== request.role ||
+    packet.actorId !== actorId ||
+    packet.harness !== model.harness ||
+    packet.capabilityId !== model.id ||
+    packet.transportModelId !== model.model ||
+    JSON.stringify(packet.roles) !== JSON.stringify([...new Set(model.roles)].sort()) ||
+    JSON.stringify(packet.toolPermissions) !== JSON.stringify([...new Set(model.toolPermissions)].sort()) ||
+    packet.network !== model.network ||
+    packet.contextTokens !== model.contextTokens ||
+    packet.requestedBudget.maxInputTokens + packet.requestedBudget.maxOutputTokens > packet.contextTokens ||
+    packet.authority !== authority ||
+    packet.planDigest !== planDigest ||
+    packet.requestedBudget.maxSeconds !== request.budget.maxSeconds ||
+    packet.requestedBudget.maxCostUsd !== request.budget.maxCostUsd ||
+    packet.requestedBudget.maxInputTokens !== request.budget.maxInputTokens ||
+    packet.requestedBudget.maxOutputTokens !== request.budget.maxOutputTokens ||
+    packet.requestedBudget.timeoutMs !== request.timeoutMs
+  ) throw new Error("OpenCode execution does not match durable task admission");
 }
 
 function objectString(payload: unknown, key: string): string | null {

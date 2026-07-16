@@ -6,6 +6,13 @@ import {
   type MilestonePlan,
   type StopAndAskState,
 } from "../contracts/milestone.js";
+import {
+  digestCanonical,
+  MilestonePausedPayloadSchema,
+  PlanReplacementPayloadSchema,
+  TaskReadyPayloadSchema,
+  type AuthorityAttention,
+} from "../contracts/authority-attention.js";
 import { TerminalOutcomeSchema, type TerminalOutcome } from "../contracts/task.js";
 import {
   OpenCodeCleanupObservedPayloadSchema,
@@ -23,6 +30,7 @@ export interface PlannedTaskView {
   readonly status: PlannedTaskStatus;
   readonly terminalOutcome: TerminalOutcome | null;
   readonly blockedReason: string | null;
+  readonly admissionDigest: string | null;
 }
 
 export interface MilestoneView {
@@ -34,6 +42,7 @@ export interface MilestoneView {
   readonly streamVersion: number;
   readonly plan: MilestonePlan | null;
   readonly stopAndAsk: StopAndAskState | null;
+  readonly attention: AuthorityAttention | null;
   readonly tasks: Readonly<Record<string, PlannedTaskView>>;
 }
 
@@ -46,10 +55,12 @@ interface MilestoneState {
   streamVersion: number;
   plan: MilestonePlan | null;
   stopAndAsk: StopAndAskState | null;
+  attention: AuthorityAttention | null;
   tasks: Map<string, PlannedTaskView>;
   openCodeRuns: Map<string, { actorId: string; role: string; capsuleId: string; capabilityId: string; transportModelId: string; repositoryRevision: string }>;
   resources: Map<string, { taskId: string; intent: Record<string, unknown>; prepared: Record<string, unknown> | null; cleanup: Record<string, unknown> | null }>;
   tracedTasks: Set<string>;
+  startedTasks: Set<string>;
 }
 
 const TERMINAL_EVENTS = new Map<string, TerminalOutcome>([
@@ -75,14 +86,24 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     streamVersion: first.streamVersion,
     plan: null,
     stopAndAsk: null,
+    attention: null,
     tasks: new Map(),
     openCodeRuns: new Map(),
     resources: new Map(),
     tracedTasks: new Set(),
+    startedTasks: new Set(),
   };
 
   for (const event of events.slice(1)) {
     if (state.lifecycle === "terminal") throw new Error("milestone is already terminal");
+    if (
+      state.lifecycle === "paused" &&
+      event.type !== "milestone.cancelled" &&
+      event.type !== "milestone.denied" &&
+      event.type !== "milestone.plan_replaced"
+    ) {
+      throw new Error("milestone is paused pending plan replacement");
+    }
     state.streamVersion = event.streamVersion;
     const terminalOutcome = TERMINAL_EVENTS.get(event.type);
     if (terminalOutcome !== undefined) {
@@ -90,6 +111,7 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       state.lifecycle = "terminal";
       state.terminalOutcome = terminalOutcome;
       state.stopAndAsk = null;
+      state.attention = null;
       continue;
     }
 
@@ -105,7 +127,6 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
         observeOpenCodeRunning(state, event);
         updateTask(state, event, "running");
         state.lifecycle = "running";
-        state.stopAndAsk = null;
         break;
       case "milestone.task_blocked":
         updateTask(state, event, "blocked");
@@ -116,6 +137,9 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
         break;
       case "milestone.paused":
         applyPaused(state, event);
+        break;
+      case "milestone.plan_replaced":
+        applyPlanReplaced(state, event);
         break;
       case "milestone.agent_trace_observed":
         observeTrace(state, event);
@@ -185,6 +209,7 @@ function observeResourceIntent(state: MilestoneState, event: StoredEvent): void 
     prepared: null,
     cleanup: null,
   });
+  state.startedTasks.add(parsed.taskId);
 }
 
 function observeResourcesPrepared(state: MilestoneState, event: StoredEvent): void {
@@ -268,16 +293,71 @@ function applyPlanCreated(state: MilestoneState, event: StoredEvent): void {
       status: "planned",
       terminalOutcome: null,
       blockedReason: null,
+      admissionDigest: null,
     }));
   }
 }
 
 function applyPaused(state: MilestoneState, event: StoredEvent): void {
-  const payload = objectPayload(event);
-  const parsed = StopAndAskStateSchema.safeParse(payload["stopAndAsk"]);
-  if (!parsed.success) throw new Error("invalid milestone stop-and-ask state");
+  const parsed = MilestonePausedPayloadSchema.safeParse(objectPayload(event));
+  if (!parsed.success) throw new Error("invalid milestone authority attention");
+  const attention = parsed.data.attention;
+  if (
+    [...state.resources.values()].some((resource) => resource.cleanup?.["outcome"] !== "completed") ||
+    state.openCodeRuns.size > 0 ||
+    [...state.tasks.values()].some((task) => task.status === "running")
+  ) throw new Error("authority pause must precede active or uncertain milestone effects");
+  if (
+    attention.milestoneId !== state.milestoneId ||
+    (state.plan === null ? attention.reason !== "plan_not_ready" : !state.tasks.has(attention.taskId)) ||
+    attention.planDigest !== digestCanonical(state.plan)
+  ) throw new Error("milestone authority attention binding is invalid");
   state.lifecycle = "paused";
-  state.stopAndAsk = parsed.data;
+  state.attention = attention;
+  state.stopAndAsk = StopAndAskStateSchema.parse({
+    reason: attention.reason,
+    message: attention.message,
+    requestedBy: attention.requestedBy,
+    requiredDecision: attention.requiredDecision,
+  });
+}
+
+function applyPlanReplaced(state: MilestoneState, event: StoredEvent): void {
+  if (state.lifecycle !== "paused" || state.attention === null) {
+    throw new Error("milestone plan replacement requires an exact pause");
+  }
+  if (
+    state.startedTasks.size > 0 ||
+    state.resources.size > 0 ||
+    state.openCodeRuns.size > 0 ||
+    [...state.tasks.values()].some((task) => task.status === "running" || task.status === "completed")
+  ) throw new Error("create a new milestone after task execution has started");
+  const parsed = PlanReplacementPayloadSchema.safeParse(objectPayload(event));
+  if (!parsed.success) throw new Error("invalid milestone plan replacement");
+  const replacement = parsed.data;
+  if (
+    replacement.milestoneId !== state.milestoneId ||
+    replacement.projectId !== state.projectId ||
+    replacement.replacementPlan.milestoneId !== state.milestoneId ||
+    replacement.replacementPlan.projectId !== state.projectId ||
+    replacement.attentionId !== state.attention.attentionId ||
+    replacement.priorPlanDigest !== state.attention.planDigest ||
+    replacement.priorSecurityDigest !== state.attention.policyDigest
+  ) throw new Error("paused plan replacement binding is stale");
+  state.plan = replacement.replacementPlan;
+  state.tasks.clear();
+  for (const task of replacement.replacementPlan.tasks) {
+    state.tasks.set(task.taskId, Object.freeze({
+      taskId: task.taskId,
+      status: "planned",
+      terminalOutcome: null,
+      blockedReason: null,
+      admissionDigest: null,
+    }));
+  }
+  state.lifecycle = "planning";
+  state.attention = null;
+  state.stopAndAsk = null;
 }
 
 function updateTask(
@@ -291,6 +371,8 @@ function updateTask(
   if (current === undefined) throw new Error(`unknown planned task: ${taskId}`);
   if (current.status === "completed") throw new Error(`planned task ${taskId} is already completed`);
   if (status === "ready") {
+    const parsed = TaskReadyPayloadSchema.safeParse(objectPayload(event));
+    if (!parsed.success || parsed.data.taskId !== taskId) throw new Error("invalid milestone task admission");
     if (current.status !== "planned" && current.status !== "blocked") {
       throw new Error(`planned task ${taskId} cannot become ready from ${current.status}`);
     }
@@ -311,6 +393,7 @@ function updateTask(
   if (status === "running" && current.status !== "ready" && current.status !== "blocked") {
     throw new Error(`planned task ${taskId} must be ready before running`);
   }
+  if (status === "running") state.startedTasks.add(taskId);
   if (status === "completed" && current.status !== "running") {
     throw new Error(`planned task ${taskId} must be running before completion`);
   }
@@ -319,6 +402,9 @@ function updateTask(
     status,
     terminalOutcome: status === "completed" ? terminalOutcome(event) : null,
     blockedReason: status === "blocked" ? payloadString(event, "reason") : null,
+    admissionDigest: status === "ready"
+      ? TaskReadyPayloadSchema.parse(objectPayload(event)).admissionDigest
+      : current.admissionDigest,
   }));
 }
 
@@ -349,6 +435,7 @@ function freezeView(state: MilestoneState): MilestoneView {
     streamVersion: state.streamVersion,
     plan: state.plan,
     stopAndAsk: state.stopAndAsk,
+    attention: state.attention,
     tasks: Object.freeze(Object.fromEntries(state.tasks)),
   });
 }

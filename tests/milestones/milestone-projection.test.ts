@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { projectMilestone } from "../../src/milestones/milestone-projection.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
+import { createAuthorityAttention, createOpenCodeAdmissionPacket } from "../../src/contracts/authority-attention.js";
+import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 
 function event(input: Partial<StoredEvent> & { type: string; payload?: unknown }): StoredEvent {
   const version = input.streamVersion ?? 1;
@@ -52,13 +54,46 @@ const plan = {
   ],
 };
 
+const security: SecuritySheet = {
+  allowedRepositories: ["/tmp/repository"], allowedFileScopes: ["src/**", "tests/**"], forbiddenPaths: [".env"],
+  network: { default: "denied", allowedDestinations: [] }, secretHandling: ["Do not expose secrets."],
+  approvalRequiredOperations: [], releaseBoundary: "local_preparation_only", stopAndAskConditions: ["plan_not_ready"],
+};
+
+function pausedPayload(taskId: string) {
+  const packet = createOpenCodeAdmissionPacket({
+    plan: plan as never, milestoneId: "milestone-1", taskId, security, canonicalRepository: "/tmp/repository",
+    actorId: taskId === "task-a" ? "agent-a" : "agent-b",
+    harness: "opencode",
+    role: taskId === "task-a" ? "implementer" : "verifier",
+    capabilityId: taskId === "task-a" ? "agent-a" : "agent-b",
+    transportModelId: "fixture/model",
+    authority: taskId === "task-a" ? "workspace_write" : "read_only",
+    roles: [taskId === "task-a" ? "implementer" : "verifier"],
+    toolPermissions: ["read_repository"], network: "denied", contextTokens: 10_000,
+    requestedBudget: { maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000, timeoutMs: 300_000 },
+  });
+  return {
+    attention: createAuthorityAttention({
+      packet,
+      reason: "plan_not_ready",
+      classification: "hard_stop",
+      configuredStopCondition: true,
+    }),
+  };
+}
+
+function readyPayload(taskId: string) {
+  return { taskId, admissionDigest: "a".repeat(64) };
+}
+
 describe("projectMilestone", () => {
   it("rejects duplicate resource intents and trace observations before task completion", () => {
     const intent = { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", imageName: "image-a", repositoryViewPath: "/tmp/view-a" };
     const prefix = [
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Resources" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 4 }),
     ];
     expect(() => projectMilestone([
@@ -102,7 +137,7 @@ describe("projectMilestone", () => {
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "OpenCode" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 4 }),
       event({ type: "milestone.task_running", payload: running, streamVersion: 5 }),
       event({ type: "milestone.agent_resources_prepared", payload: prepared, streamVersion: 6 }),
@@ -115,19 +150,7 @@ describe("projectMilestone", () => {
     const view = projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Agent Tail milestone" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
-      event({ type: "milestone.task_running", payload: { taskId: "task-a" }, streamVersion: 4 }),
-      event({ type: "milestone.task_completed", payload: { taskId: "task-a", outcome: "completed" }, streamVersion: 5 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-b" }, streamVersion: 6 }),
-      event({ type: "milestone.task_blocked", payload: { taskId: "task-b", reason: "waiting for review" }, streamVersion: 7 }),
-      event({ type: "milestone.paused", payload: {
-        stopAndAsk: {
-          reason: "plan_not_ready",
-          message: "Verifier is blocked.",
-          requestedBy: "agent-b",
-          requiredDecision: "Choose next step.",
-        },
-      }, streamVersion: 8 }),
+      event({ type: "milestone.paused", payload: pausedPayload("task-a"), streamVersion: 3 }),
     ]);
 
     expect(view).toMatchObject({
@@ -136,10 +159,10 @@ describe("projectMilestone", () => {
       title: "Agent Tail milestone",
       lifecycle: "paused",
       terminalOutcome: null,
-      streamVersion: 8,
+      streamVersion: 3,
       tasks: {
-        "task-a": { status: "completed", terminalOutcome: "completed" },
-        "task-b": { status: "blocked", terminalOutcome: null, blockedReason: "waiting for review" },
+        "task-a": { status: "planned", terminalOutcome: null },
+        "task-b": { status: "planned", terminalOutcome: null },
       },
     });
   });
@@ -162,32 +185,32 @@ describe("projectMilestone", () => {
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "unknown" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("unknown"), streamVersion: 3 }),
     ])).toThrow("unknown planned task");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.failed", payload: {}, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
     ])).toThrow("milestone is already terminal");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.task_running", payload: { taskId: "task-a" }, streamVersion: 4 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 5 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 5 }),
     ])).toThrow("cannot become ready from running");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-b" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-b"), streamVersion: 3 }),
     ])).toThrow("dependency task-a is not completed");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.task_running", payload: { taskId: "task-a" }, streamVersion: 4 }),
       event({ type: "milestone.task_completed", payload: { taskId: "task-a", outcome: "failed" }, streamVersion: 5 }),
-      event({ type: "milestone.task_ready", payload: { taskId: "task-b" }, streamVersion: 6 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-b"), streamVersion: 6 }),
     ])).toThrow("dependency task-a is not completed successfully");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
@@ -199,30 +222,16 @@ describe("projectMilestone", () => {
     ])).toThrow("milestone.created streamId must be a nonempty string");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
-      event({ type: "milestone.paused", payload: {
-        stopAndAsk: {
-          reason: "plan_not_ready",
-          message: "Need a plan decision.",
-          requestedBy: "zentra-planner",
-          requiredDecision: "Approve a plan.",
-        },
-      }, streamVersion: 2 }),
+      event({ type: "milestone.paused", payload: pausedPayload("task-a"), streamVersion: 2 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 3 }),
-    ])).toThrow("milestone.plan_created cannot follow a pause");
+    ])).toThrow("milestone authority attention binding is invalid");
   });
 
   it("clears stop-and-ask when a paused milestone reaches a terminal outcome", () => {
     const view = projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Paused" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.paused", payload: {
-        stopAndAsk: {
-          reason: "plan_not_ready",
-          message: "Need a decision.",
-          requestedBy: "agent-a",
-          requiredDecision: "Cancel or continue.",
-        },
-      }, streamVersion: 3 }),
+      event({ type: "milestone.paused", payload: pausedPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.cancelled", payload: { reason: "operator cancelled" }, streamVersion: 4 }),
     ]);
 
@@ -230,6 +239,49 @@ describe("projectMilestone", () => {
     expect(view.lifecycle).toBe("terminal");
     expect(view.terminalOutcome).toBe("cancelled");
     expect(view.stopAndAsk).toBeNull();
+  });
+
+  it.each([
+    ["milestone.task_ready", { taskId: "task-a" }],
+    ["milestone.task_blocked", { taskId: "task-a", reason: "blocked" }],
+    ["milestone.agent_resource_intent", { taskId: "task-a" }],
+    ["milestone.agent_resources_prepared", { taskId: "task-a" }],
+    ["milestone.task_running", { taskId: "task-a" }],
+    ["milestone.task_completed", { taskId: "task-a", outcome: "completed" }],
+    ["milestone.agent_trace_observed", { taskId: "task-a", outcome: "emitted" }],
+    ["milestone.agent_cleanup_observed", { taskId: "task-a" }],
+    ["milestone.completed", {}],
+    ["milestone.failed", {}],
+  ])("rejects post-pause execution or effect event %s", (type, payload) => {
+    expect(() => projectMilestone([
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "Paused" }, streamVersion: 1 }),
+      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      event({ type: "milestone.paused", payload: pausedPayload("task-a"), streamVersion: 3 }),
+      event({ type, payload, streamVersion: 4 }),
+    ])).toThrow("milestone is paused pending plan replacement");
+  });
+
+  it.each([
+    ["resource intent", [
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
+      event({ type: "milestone.agent_resource_intent", payload: { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", imageName: "image-a", repositoryViewPath: "/tmp/view-a" }, streamVersion: 4 }),
+    ]],
+    ["running execution", [
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
+      event({ type: "milestone.task_running", payload: { taskId: "task-a" }, streamVersion: 4 }),
+    ]],
+    ["prepared resources", [
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
+      event({ type: "milestone.agent_resource_intent", payload: { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", imageName: "image-a", repositoryViewPath: "/tmp/view-a" }, streamVersion: 4 }),
+      event({ type: "milestone.agent_resources_prepared", payload: { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", containerId: "b".repeat(64), imageName: "image-a", imageId: `sha256:${"c".repeat(64)}`, repositoryViewPath: "/tmp/view-a", repositoryRevision: "d".repeat(64) }, streamVersion: 5 }),
+    ]],
+  ] as const)("rejects a pause after any task has %s", (_name, progress) => {
+    expect(() => projectMilestone([
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "Progress" }, streamVersion: 1 }),
+      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      ...progress,
+      event({ type: "milestone.paused", payload: pausedPayload("task-b"), streamVersion: progress.length + 3 }),
+    ])).toThrow("authority pause must precede active or uncertain milestone effects");
   });
 
   it("maps milestone events into one Agent Tail trace", () => {
