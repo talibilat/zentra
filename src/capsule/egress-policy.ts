@@ -146,7 +146,7 @@ export function loadCapsulePolicy(policyPath: string): CapsulePolicy {
       offset += count;
     }
     const after = fstatSync(descriptor);
-    if (offset !== stat.size || after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size || offset > MAX_POLICY_BYTES) {
+    if (offset !== stat.size || after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) {
       throw new Error("capsule policy changed while reading");
     }
     return CapsulePolicySchema.parse(JSON.parse(buffer.subarray(0, offset).toString("utf8")) as unknown);
