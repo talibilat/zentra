@@ -116,11 +116,7 @@ function assertTimestamp(timestamp: string): void {
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
   if (event.type.startsWith("capsule.")) return `capsule:${event.streamId}`;
-  return taskSpanId(event.streamId);
-}
-
-function taskSpanId(streamId: string): string {
-  return `task:${streamId}`;
+  return `task:${event.streamId}`;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
