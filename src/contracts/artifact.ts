@@ -416,6 +416,17 @@ function validateLifecycleArtifactReference(
         throw new Error("task.review_requested requires successful validation evidence");
       }
     }
+    if (event.type === "task.validation_completed") {
+      const report = ValidationEvidenceSchema.parse(payload.validation);
+      const patch = requireArtifact(byKind, "patch", event.type);
+      if (
+        payload.outcome !== report.outcome ||
+        payload.diffSha256 !== patch.artifact.sha256 ||
+        report.provenance.subjectSha256 !== patch.artifact.sha256
+      ) {
+        throw new Error("task.validation_completed contradicts patch or validation evidence");
+      }
+    }
   }
   if (
     (event.type === "task.review_approved" || event.type === "task.integration_started") &&
@@ -637,8 +648,8 @@ function requiredMarkedArtifactConsumer(
       eventTypes: subjectMismatch
         ? ["task.failed"]
         : report.outcome === "completed"
-        ? ["task.review_requested", "task.failed"]
-        : [`task.${report.outcome}`],
+        ? ["task.validation_completed", "task.review_requested", "task.failed"]
+        : ["task.validation_completed", `task.${report.outcome}`],
       evidenceField: "validation",
     };
   }

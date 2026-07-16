@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
+import { createReadStream, realpathSync, statSync } from "node:fs";
 
 import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
@@ -29,6 +29,7 @@ export interface OpenCodeWriterRequest {
   readonly workspace: WorkspaceLease;
   readonly packet: WriterTaskPacket;
   readonly timeoutMs: number;
+  readonly expectedExecutableSha256?: string;
 }
 
 export interface OpenCodeWriterReport {
@@ -55,6 +56,12 @@ export class OpenCodeWriter {
   async execute(request: OpenCodeWriterRequest, signal: AbortSignal): Promise<OpenCodeWriterReport> {
     const startedAt = new Date().toISOString();
     const executable = canonicalExecutable(request.executable);
+    if (
+      request.expectedExecutableSha256 !== undefined &&
+      await sha256File(executable) !== request.expectedExecutableSha256
+    ) {
+      throw new Error("OpenCode writer executable changed after capability probe");
+    }
     const cwd = canonicalDirectory(request.workspace.path);
     if (cwd !== request.workspace.path) throw new Error("OpenCode writer workspace must be canonical");
     const packet = JSON.stringify(request.packet);
@@ -168,4 +175,14 @@ function canonicalExecutable(candidate: string): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
 }

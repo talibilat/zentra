@@ -52,10 +52,8 @@ const SafePatchPathSchema = z.string().min(1).refine((candidate) =>
   !candidate.includes("\0") &&
   !candidate.includes("\n") &&
   !candidate.includes("\r") &&
-  !candidate.includes("/") &&
   !candidate.includes("\\") &&
-  candidate !== "." &&
-  candidate !== ".."
+  candidate.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
 );
 const ArtifactReadySchema = z.strictObject({
   type: z.literal("artifact.ready"),
@@ -150,9 +148,20 @@ const CleanupReconciledPayloadSchema = z.strictObject({
   cleanup: CleanupStartedPayloadSchema,
   observation: CleanupObservedPayloadSchema,
 });
-const CompletedPayloadSchema = z.strictObject({
+const IntegratedCompletedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
 });
+const FocusedCompletedPayloadSchema = z.strictObject({
+  stage: z.literal("validation"),
+  validation: ValidationReportSchema,
+  diffSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  changedPath: SafePatchPathSchema,
+  workspace: z.string().min(1),
+});
+const CompletedPayloadSchema = z.union([
+  IntegratedCompletedPayloadSchema,
+  FocusedCompletedPayloadSchema,
+]);
 const CreatedPayloadSchema = z.strictObject({
   projectId: z.string().min(1),
   title: z.string().min(1),
@@ -486,12 +495,32 @@ export class RecoveryService {
         );
       }
 
+      if (last.type === "task.writer_completed") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "writer result is durable but workspace ownership and patch evidence require reconciliation",
+        );
+      }
+
+      if (last.type === "task.validation_completed") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "focused validation is durable but terminal recording requires reconciliation",
+        );
+      }
+
       if (last.type === "task.validation_started") {
         const started = chain.validationStarted!;
         if (workspace.diff === null || sha256(workspace.diff) !== started.diffSha256) {
           return decision(taskId, "record_failure", "validation-start evidence does not match the exact worktree diff");
         }
-        return decision(taskId, "resume_preparation", "validation is non-effectful and may be run again from the recorded diff");
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "validation started without a durable result and must not be retried automatically",
+        );
       }
 
       if (last.type === "task.review_requested") {
@@ -1450,14 +1479,14 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     }
   }
   if (
-    completedPayload !== null &&
+    completedPayload !== null && "receipt" in completedPayload &&
     cleanupCompleted === null &&
     cleanupReconciled === null
   ) {
     throw new Error("completed task has no cleanup completion or reconciliation");
   }
   if (
-    completedPayload !== null &&
+    completedPayload !== null && "receipt" in completedPayload &&
     (!successfulObservation?.success ||
       canonicalJson(completedPayload.receipt) !==
         canonicalJson(successfulObservation.data.receipt))

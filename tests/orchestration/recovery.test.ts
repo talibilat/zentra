@@ -820,7 +820,7 @@ describe("RecoveryService", () => {
     expect(decision.reason).toMatch(/worker|dirty|effect/i);
   });
 
-  it("resumes validation safely after validation completion was not recorded", async () => {
+  it("does not retry validation after its result was not recorded", async () => {
     const testFixture = await fixture();
     const first = openSystem(testFixture);
     const { tasks } = first;
@@ -849,7 +849,8 @@ describe("RecoveryService", () => {
     closeJournal(first.journal);
 
     await expect(openSystem(testFixture).recovery.inspect("task-9")).resolves.toMatchObject({
-      action: "resume_preparation",
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/must not be retried/i),
     });
   });
 

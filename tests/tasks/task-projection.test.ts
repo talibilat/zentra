@@ -121,6 +121,84 @@ describe("projectTask", () => {
     expect(projectTask(happyPath().slice(0, 4))?.lifecycle).toBe("validating");
   });
 
+  it("completes a focused writer task only after durable successful validation", () => {
+    const events = focusedCompletionEvents();
+
+    expect(projectTask(events)).toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+      streamVersion: 11,
+    });
+  });
+
+  function focusedCompletionEvents(): StoredEvent[] {
+    const diff = "diff --git a/src/a.ts b/src/a.ts\n";
+    const diffSha256 = createHash("sha256").update(diff).digest("hex");
+    const validation = {
+      ...serviceValidation,
+      provenance: { ...serviceValidation.provenance, subjectSha256: diffSha256 },
+    };
+    const validationSha256 = artifactEvidenceSha256("validation_report", validation);
+    return [
+      createdEvent(),
+      makeEvent("task.leased", 2, { leaseOwner: "writer-1" }),
+      makeEvent("task.started", 3),
+      makeEvent("task.writer_completed", 4, { outcome: "completed" }),
+      makeEvent("task.artifact_recording", 5, { artifactProtocolVersion: 1, artifactId: "patch-1", kind: "patch", sha256: diffSha256 }),
+      makeEvent("artifact.patch_recorded", 6, {
+        artifact: { artifactId: "patch-1", taskId: "task-1", kind: "patch", path: "artifacts/patch.diff", sha256: diffSha256, createdAt: "2026-07-12T00:00:00.000Z" },
+        evidence: { diff, diffSha256, changedPath: "src/a.ts", changedContentSha256: "a".repeat(64) },
+      }),
+      makeEvent("task.validation_started", 7, { patch: { type: "artifact.ready", path: "src/a.ts", sha256: "a".repeat(64) }, diffSha256 }),
+      makeEvent("task.artifact_recording", 8, { artifactProtocolVersion: 1, artifactId: "validation-1", kind: "validation_report", sha256: validationSha256 }),
+      makeEvent("artifact.validation_report_recorded", 9, {
+        artifact: { artifactId: "validation-1", taskId: "task-1", kind: "validation_report", path: "artifacts/focused-validation.json", sha256: validationSha256, createdAt: "2026-07-12T00:00:00.000Z" },
+        evidence: validation,
+      }),
+      makeEvent("task.validation_completed", 10, { outcome: "completed", validation, diffSha256, workspaceUnchanged: true }),
+      makeEvent("task.completed", 11),
+    ];
+  }
+
+  it("rejects focused completion without successful validation evidence", () => {
+    const validating = [
+      createdEvent(),
+      makeEvent("task.leased", 2, { leaseOwner: "writer-1" }),
+      makeEvent("task.started", 3),
+      makeEvent("task.writer_completed", 4, { outcome: "completed" }),
+      makeEvent("task.validation_started", 5),
+    ];
+
+    expect(() => projectTask([...validating, makeEvent("task.completed", 6)]))
+      .toThrow(/successful.*validation evidence/i);
+    expect(() => projectTask([
+      ...validating,
+      makeEvent("task.validation_completed", 6, { outcome: "failed" }),
+      makeEvent("task.completed", 7),
+    ])).toThrow(/successful.*validation evidence/i);
+  });
+
+  it.each(["task.writer_completed", "task.validation_completed"])(
+    "rejects duplicate %s evidence",
+    (type) => {
+      const prefix = type === "task.writer_completed"
+        ? [createdEvent(), makeEvent("task.leased", 2, { leaseOwner: "writer-1" }), makeEvent("task.started", 3)]
+        : [
+          createdEvent(),
+          makeEvent("task.leased", 2, { leaseOwner: "writer-1" }),
+          makeEvent("task.started", 3),
+          makeEvent("task.writer_completed", 4, { outcome: "completed" }),
+          makeEvent("task.validation_started", 5),
+        ];
+      const version = prefix.length + 1;
+      expect(() => projectTask([
+        ...prefix,
+        makeEvent(type, version, { outcome: "completed" }),
+        makeEvent(type, version + 1, { outcome: "completed" }),
+      ])).toThrow(`duplicate ${type} event`);
+    },
+  );
+
   it("projects task.review_requested into awaiting_review", () => {
     expect(projectTask(happyPath().slice(0, 5))?.lifecycle).toBe("awaiting_review");
   });

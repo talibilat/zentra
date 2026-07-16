@@ -108,6 +108,34 @@ describe("Agent Tail event envelope export", () => {
     expect(exported.operation).toEqual({ name: "review", status: "completed" });
   });
 
+  it("maps OpenCode writer and validation completion outcomes", () => {
+    const exported = storedEventsToAgentTailEvents([
+      storedEvent({
+        type: "task.started",
+        payload: { workerId: "opencode-writer", harness: "opencode" },
+      }),
+      storedEvent({
+        type: "task.writer_completed",
+        payload: { workerId: "opencode-writer", outcome: "failed" },
+      }),
+      storedEvent({
+        type: "task.validation_completed",
+        payload: { outcome: "timed_out" },
+      }),
+    ]);
+
+    expect(exported.map((event) => event.actor)).toEqual([
+      { id: "opencode-writer", role: "worker" },
+      { id: "opencode-writer", role: "worker" },
+      { id: "zentra-validator", role: "validator" },
+    ]);
+    expect(exported.map((event) => event.operation)).toEqual([
+      { name: "writer", status: "running" },
+      { name: "writer", status: "failed" },
+      { name: "validation", status: "timed_out" },
+    ]);
+  });
+
   it("maps review denial terminal events to the reviewer actor", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "task.denied",
@@ -116,6 +144,15 @@ describe("Agent Tail event envelope export", () => {
 
     expect(exported.actor).toEqual({ id: "opencode-reviewer-3", role: "reviewer" });
     expect(exported.operation).toEqual({ name: "review", status: "denied" });
+  });
+
+  it("maps ownership denial to the ownership operation", () => {
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      type: "task.denied",
+      payload: { stage: "ownership" },
+    }));
+
+    expect(exported.operation).toEqual({ name: "ownership", status: "denied" });
   });
 
   it("maps capsule proxy, worker, cleanup, and terminal events without changing v1", () => {
