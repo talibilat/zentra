@@ -348,8 +348,7 @@ function isSafeLogicalGlob(candidate: string): boolean {
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
-    candidate.includes("\\") ||
-    path.posix.isAbsolute(candidate)
+    candidate.includes("\\")
   ) return false;
   if (candidate.includes("*")) {
     if (!candidate.endsWith("/**") || candidate.slice(0, -3).includes("*")) return false;
