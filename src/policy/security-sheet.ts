@@ -336,7 +336,7 @@ function scopesOverlap(first: string, second: string): boolean {
 }
 
 function scopeBase(scope: string): string {
-  return scope.replace(/\/\*\*$/, "").replace(/\/\*$/, "");
+  return scope.replace(/\/\*\*$/, "");
 }
 
 function isSafeLogicalGlob(candidate: string): boolean {
