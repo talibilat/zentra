@@ -392,7 +392,7 @@ export class GitHubEffectBroker {
     }
     const actionDigest = sha256(JSON.stringify(action));
     const grant = this.policy.githubWrites.find((candidate) => candidate.grantId === grantId) ?? null;
-    const exactAction = grant === null ? false : sha256(JSON.stringify(grant.action)) === actionDigest;
+    const exactAction = grant !== null && sha256(JSON.stringify(grant.action)) === actionDigest;
     const payload = { requestId, grantId, policyDigest: this.policyDigest, actionDigest, ...action };
     if (
       this.policy.brokers.github !== "host" || grant === null || !exactAction ||
