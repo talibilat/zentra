@@ -134,7 +134,9 @@ export function assertSafeAgentTailJsonlPath(trustedRoot: string, tracePath: str
   try {
     lstatSync(tracePath);
   } catch (error) {
-    if (isMissingFileError(error)) return;
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
     throw error;
   }
   throw new Error("Agent Tail trace path must not already exist");
@@ -166,10 +168,6 @@ function assertSafeDirectory(directory: string, trustedRoot: string): void {
 function isFileExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error &&
     ((error as NodeJS.ErrnoException).code === "EEXIST" || (error as NodeJS.ErrnoException).code === "ELOOP");
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function writeAll(descriptor: number, bytes: Buffer): void {
