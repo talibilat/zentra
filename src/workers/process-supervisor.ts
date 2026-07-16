@@ -397,7 +397,7 @@ function validateProtocolOutput(
     case "validation":
       return undefined;
     case "reviewer":
-      return isReviewDecision(events)
+      return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success
         ? undefined
         : `reviewer protocol requires exactly one valid review decision, received ${events.length}`;
     case "worker":
@@ -420,10 +420,6 @@ function isArtifactReady(events: readonly unknown[]): boolean {
     typeof event["sha256"] === "string" &&
     /^[a-f0-9]{64}$/.test(event["sha256"])
   );
-}
-
-function isReviewDecision(events: readonly unknown[]): boolean {
-  return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
