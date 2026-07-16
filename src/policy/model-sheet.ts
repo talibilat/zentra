@@ -284,7 +284,7 @@ function parseSpecialties(value: string | undefined): string[] {
 function parsePositiveInteger(value: string | undefined, code: ModelSheetErrorCode): number {
   if (value === undefined || !/^[1-9][0-9]*$/.test(value)) throw new ModelSheetError(code);
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new ModelSheetError(code);
+  if (!Number.isSafeInteger(parsed)) throw new ModelSheetError(code);
   return parsed;
 }
 
