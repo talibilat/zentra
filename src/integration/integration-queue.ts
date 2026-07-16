@@ -848,7 +848,7 @@ function prepareCompletedReceipt(input: {
   const command = Object.freeze([...input.validation.command]);
   const provenance = Object.freeze({ ...input.validation.provenance });
   const validation = Object.freeze({ ...input.validation, command, provenance });
-  const receipt: IntegrationReceipt = Object.freeze({
+  return Object.freeze({
     taskId: input.taskId,
     projectId: input.projectId,
     sourceCommit: input.sourceCommit,
@@ -858,7 +858,6 @@ function prepareCompletedReceipt(input: {
     validation,
     outcome: "completed",
   });
-  return receipt;
 }
 
 function registerCompletedReceipt(receipt: IntegrationReceipt): IntegrationReceipt {
