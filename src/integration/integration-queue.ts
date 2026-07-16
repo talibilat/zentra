@@ -934,9 +934,7 @@ async function withIntegrationLease<T>(
       lease = store.acquire(key, timings.leaseMs);
     }
 
-    const acquiredLease = lease;
-    if (acquiredLease === null) throw new Error("integration lease acquisition failed");
-    let currentLease = acquiredLease;
+    let currentLease = lease;
     let lost = false;
     const leaseController = new AbortController();
     const renew = (): void => {
