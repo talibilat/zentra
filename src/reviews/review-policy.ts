@@ -61,7 +61,7 @@ export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecisi
   }
 
   const uniqueReviewerIds = [...new Set(input.reviewerIds)];
-  if (uniqueReviewerIds.length === 0 || uniqueReviewerIds.length < minimumReviewers) {
+  if (uniqueReviewerIds.length < minimumReviewers) {
     return paused(
       "missing_review_policy",
       minimumReviewers,
