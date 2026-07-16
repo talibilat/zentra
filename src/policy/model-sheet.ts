@@ -164,9 +164,6 @@ function parseSections(markdown: string): Map<string, readonly string[]> {
 }
 
 function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] {
-  if (lines.some((line) => !line.startsWith("|"))) {
-    throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
-  }
   if (lines.length < 3) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   const header = splitRow(lines[0]!);
   if (JSON.stringify(header) !== JSON.stringify(REQUIRED_COLUMNS)) {
