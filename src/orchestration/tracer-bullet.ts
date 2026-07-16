@@ -749,7 +749,7 @@ export class TracerBulletOrchestrator {
     taskId: string,
     kind: ArtifactKind,
     evidence: unknown,
-    digest = artifactEvidenceSha256(kind, evidence),
+    digest: string,
     phase?: "prepared" | "final",
   ): unknown {
     const logicalPaths: Record<ArtifactKind, string> = {
