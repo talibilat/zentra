@@ -1,5 +1,4 @@
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
-import path from "node:path";
 
 const MAX_SECURITY_SHEET_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 4096;
@@ -236,7 +235,6 @@ function parseAllowedRepositories(lines: readonly string[]): string[] {
       throw new SecuritySheetError("SECURITY_SHEET_INVALID_REPOSITORY");
     }
     if (
-      path.normalize(repository) !== repository ||
       repository !== canonicalRepository ||
       repository.includes("\0") ||
       repository.includes("\n")
