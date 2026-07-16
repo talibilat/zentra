@@ -1062,8 +1062,6 @@ function assertSafeRootFile(candidate: string): void {
     candidate === ".." ||
     candidate.includes("/") ||
     candidate.includes("\\") ||
-    path.isAbsolute(candidate) ||
-    path.win32.isAbsolute(candidate) ||
     /[\u0000-\u001f\u007f]/.test(candidate)
   ) {
     throw new CliFailure("INVALID_FILE");
