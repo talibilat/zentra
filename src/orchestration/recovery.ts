@@ -1423,7 +1423,6 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     }
   }
   if (cleanupCompleted !== null || cleanupObserved !== null) {
-    const cleanupEnd = cleanupCompleted ?? cleanupObserved;
     if (
       cleanupStarted === null ||
       indexOf(cleanupCompleted !== null ? "task.cleanup_completed" : "task.cleanup_observed") <
@@ -1437,7 +1436,6 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     ) {
       throw new Error("cleanup completion contradicts cleanup start");
     }
-    void cleanupEnd;
   }
   if (cleanupCompleted !== null && cleanupObserved !== null) {
     throw new Error("cleanup cannot be both completed and observed as uncertain");
