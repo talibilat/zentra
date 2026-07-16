@@ -284,7 +284,7 @@ export class ProcessReviewerAdapter implements ReviewerAdapter {
           return;
         }
         if (outcome !== undefined) {
-          reject(new ReviewerExecutionError(outcome, reason || stderrText));
+          reject(new ReviewerExecutionError(outcome, reason));
           return;
         }
         if (!exitObserved || exitCode !== 0) {
