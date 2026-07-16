@@ -58,7 +58,7 @@ export function resolveBundledFixture(
   } catch {
     throw new Error(`bundled fixture is unavailable or not a regular file: ${name}`);
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
+  if (!stat.isFile()) {
     throw new Error(`bundled fixture must be a regular non-symlink file: ${name}`);
   }
 
