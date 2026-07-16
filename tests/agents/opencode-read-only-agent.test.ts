@@ -235,6 +235,66 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     sqlite.close();
   });
 
+  it("runs an OpenCode reviewer with review authority inside the read-only capsule boundary", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    readyMilestone(journal, "milestone-reviewer", "reviewer");
+    const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
+      expect(request.role).toBe("reviewer");
+      expect(request).not.toHaveProperty("worktree");
+      expect(request.securityBoundary).toMatchObject({
+        repository: "sanitized_read_only_bind_mount",
+        credentials: "none",
+        shell: "none",
+      });
+      observe?.({ type: "cleanup_observed", payload: {
+        capsuleId: request.capsuleId,
+        resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName,
+        containerId: null,
+        imageName: request.resources.imageName,
+        imageId: null,
+        repositoryViewPath: request.repositoryPath,
+        repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed",
+        containerAbsent: true,
+        imageAbsent: true,
+        repositoryViewAbsent: false,
+      } });
+      return {
+        outcome: "completed",
+        openCode: { version: "1.18.1", executableSha256: "a".repeat(64) },
+        model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
+        evidence: [{ kind: "review", summary: "{\"decision\":\"approve\"}" }],
+        cleanup: "completed",
+        brokerTransport: "completed",
+      };
+    });
+
+    const result = await new OpenCodeReadOnlyAgent(
+      journal,
+      { execute },
+      { execute: vi.fn() },
+      modelSheet("reviewer"),
+    ).run({
+      milestoneId: "milestone-reviewer",
+      taskId: "task-1",
+      repositoryPath: process.cwd(),
+      role: "reviewer",
+      rolePrompt: "Review the digest-bound evidence.",
+      budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(journal.readStream("milestone-reviewer").find((event) =>
+      event.type === "milestone.task_running")?.payload).toMatchObject({
+      actorId: "opencode-reviewer",
+      role: "reviewer",
+    });
+    journal.close();
+  });
+
   it("rejects a symlink in planned readable scope before capsule execution", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-agent-symlink-")));
     roots.push(root);
@@ -310,7 +370,11 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
   });
 });
 
-function readyMilestone(journal: SqliteEventJournal | ProjectingEventJournal, milestoneId: string): void {
+function readyMilestone(
+  journal: SqliteEventJournal | ProjectingEventJournal,
+  milestoneId: string,
+  role: "researcher" | "reviewer" = "researcher",
+): void {
   new MilestoneRegistry(journal).register({
     milestoneId,
     projectId: "zentra",
@@ -323,8 +387,17 @@ function readyMilestone(journal: SqliteEventJournal | ProjectingEventJournal, mi
       tasks: [{
         taskId: "task-1", title: "Research", description: "Research.", dependencies: [],
         ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Evidence."],
-        roleAssignment: { role: "researcher", agentId: "opencode-researcher", harness: "opencode" },
-        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        roleAssignment: {
+          role,
+          agentId: role === "reviewer" ? "opencode-reviewer" : "opencode-researcher",
+          harness: "opencode",
+        },
+        risk: {
+          level: "low",
+          authority: role === "reviewer" ? "review" : "read_only",
+          requiresReview: false,
+          requiresApproval: false,
+        },
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }],
     },
@@ -335,10 +408,14 @@ function readyMilestone(journal: SqliteEventJournal | ProjectingEventJournal, mi
   }]);
 }
 
-function modelSheet(role: "planner" | "researcher"): ModelSheet {
+function modelSheet(role: "planner" | "researcher" | "reviewer"): ModelSheet {
   return {
     models: [{
-      id: role === "planner" ? "opencode-planner" : "opencode-researcher",
+      id: role === "planner"
+        ? "opencode-planner"
+        : role === "reviewer"
+        ? "opencode-reviewer"
+        : "opencode-researcher",
       harness: "opencode",
       model: "fixture/model",
       roles: [role],
@@ -346,7 +423,9 @@ function modelSheet(role: "planner" | "researcher"): ModelSheet {
       costTier: "low",
       contextTokens: 10_000,
       maxConcurrency: 1,
-      toolPermissions: ["read_repository"],
+      toolPermissions: role === "reviewer"
+        ? ["review_diff", "read_repository"]
+        : ["read_repository"],
       network: "denied",
       fallbackOrder: [],
       qualityHistory: { successes: 1, attempts: 1 },

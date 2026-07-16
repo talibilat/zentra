@@ -28,7 +28,7 @@ export const OpenCodeMilestoneRunningPayloadSchema = z.strictObject({
   taskId: IdSchema,
   capsuleId: IdSchema,
   actorId: IdSchema,
-  role: z.enum(["planner", "researcher"]),
+  role: z.enum(["planner", "researcher", "reviewer"]),
   harness: z.literal("opencode"),
   requestedModel: z.strictObject({ capabilityId: IdSchema, transportModelId: IdSchema }),
   budget: BudgetSchema,
@@ -46,7 +46,7 @@ const ModelMetadataSchema = z.strictObject({
   name: z.string().min(1).max(256),
 });
 const EvidenceSchema = z.strictObject({
-  kind: z.enum(["plan", "research", "finding"]),
+  kind: z.enum(["plan", "research", "finding", "review"]),
   summary: z.string().min(1).max(256 * 1024),
   sha256: DigestSchema,
   provenance: z.strictObject({
@@ -62,7 +62,7 @@ export const OpenCodeMilestoneCompletedPayloadSchema = z.strictObject({
   capsuleId: IdSchema,
   outcome: TerminalOutcomeSchema.exclude(["denied"]),
   actorId: IdSchema,
-  role: z.enum(["planner", "researcher"]),
+  role: z.enum(["planner", "researcher", "reviewer"]),
   harness: z.literal("opencode"),
   capabilityId: IdSchema,
   transportModelId: IdSchema,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { StoredEvent } from "../../src/contracts/event.js";
+import { OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import {
   agentTailEventToJsonLine,
@@ -238,6 +239,42 @@ describe("Agent Tail event envelope export", () => {
       type: "milestone.task_running",
       payload: { harness: "opencode", actorId: "spoofed", role: "planner" },
     }))).toThrow("invalid OpenCode milestone event payload");
+  });
+
+  it("attributes read-only OpenCode reviewer activity to the reviewer actor", () => {
+    const payload = OpenCodeMilestoneRunningPayloadSchema.parse({
+      taskId: "review-task",
+      capsuleId: "capsule-review-1",
+      actorId: "opencode-reviewer",
+      role: "reviewer",
+      harness: "opencode",
+      requestedModel: {
+        capabilityId: "opencode-reviewer",
+        transportModelId: "fixture/model",
+      },
+      budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500 },
+      timeoutMs: 20_000,
+      securityBoundary: {
+        repository: "sanitized_read_only_bind_mount",
+        scratch: "bounded_ephemeral",
+        network: "model_broker_only",
+        home: "ephemeral",
+        credentials: "none",
+        shell: "none",
+        readableScopes: ["src/**"],
+        forbiddenPaths: [".env"],
+        repositoryRevision: "a".repeat(64),
+      },
+    });
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      type: "milestone.task_running",
+      payload,
+    }));
+
+    expect(exported).toMatchObject({
+      actor: { id: "opencode-reviewer", role: "reviewer" },
+      operation: { name: "opencode_agent", status: "running" },
+    });
   });
 
   it("serializes one valid JSONL line without mutating native event payload", () => {

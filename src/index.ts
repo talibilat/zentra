@@ -27,3 +27,11 @@ export type {
   PlannedTask,
   RoleAssignment,
 } from "./contracts/milestone.js";
+export {
+  OpenCodeReviewerAdapter,
+  OpenCodeReviewerUncertainError,
+} from "./reviews/opencode-reviewer-adapter.js";
+export type {
+  OpenCodeReviewerAssignment,
+  OpenCodeReviewerProgram,
+} from "./reviews/opencode-reviewer-adapter.js";
