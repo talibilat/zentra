@@ -226,8 +226,7 @@ function dependencyProblem(tasks: readonly PlannedTask[]): string | null {
     if (visited.has(taskId)) return null;
     if (visiting.has(taskId)) return `milestone plan contains a dependency cycle involving ${taskId}`;
     visiting.add(taskId);
-    const task = byId.get(taskId);
-    if (task === undefined) return `planned task ${taskId} is missing`;
+    const task = byId.get(taskId)!;
     for (const dependency of task.dependencies) {
       const problem = visit(dependency);
       if (problem !== null) return problem;
