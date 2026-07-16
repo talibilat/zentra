@@ -127,7 +127,7 @@ export function parseModelSheetMarkdown(markdown: string): ModelSheet {
   if (modelLines === undefined) throw new ModelSheetError("MODEL_SHEET_MISSING_SECTION");
   const models = parseModelsTable(modelLines);
   validateFallbacks(models);
-  return Object.freeze({ models: Object.freeze(models) });
+  return Object.freeze({ models });
 }
 
 export function publicModelSheetSummary(sheet: ModelSheet): PublicModelSheetSummary {
