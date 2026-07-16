@@ -4,6 +4,7 @@ export interface WorkerRequest {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly timeoutMs: number;
+  readonly environment?: Readonly<Record<string, string>>;
 }
 
 export interface WorkerResult {
@@ -15,7 +16,7 @@ export interface WorkerResult {
   readonly stderr: string;
 }
 
-export type InvocationKind = "worker" | "validation" | "reviewer";
+export type InvocationKind = "worker" | "validation" | "reviewer" | "opencode_writer";
 
 export interface WorkerAdapter {
   execute(
