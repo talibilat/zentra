@@ -149,7 +149,7 @@ export class GitHubEffectBroker {
   }): Promise<GitHubEffectReceipt> {
     assertBoundedText(input.title, 1_024, "title");
     assertBoundedText(input.body, 65_536, "body");
-    const finalBody = bodyWithRequestMarker(input.body, input.grantId);
+    const finalBody = `${input.body}\n\n${requestMarker(input.grantId)}`;
     const action: PullRequestAction = {
       operation: "create_pull_request", repository: input.repository, pushGrantId: input.pushGrantId, headRef: input.headRef,
       headCommit: input.headCommit, base: input.base, titleSha256: sha256(input.title),
@@ -728,7 +728,6 @@ export function repositoryLeaseKey(repository: string): IntegrationLeaseKey {
 }
 function grantStreamId(grantId: string): string { return `github-grant:${grantId}`; }
 function requestMarker(requestId: string): string { return `Zentra-Request-ID: ${requestId}`; }
-function bodyWithRequestMarker(body: string, requestId: string): string { return `${body}\n\n${requestMarker(requestId)}`; }
 function sha256(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 function assertRequestId(value: string): void { if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error("invalid GitHub request identity"); }
 function assertBoundedText(value: string, max: number, field: string): void { if (value.length === 0 || Buffer.byteLength(value, "utf8") > max) throw new Error(`GitHub ${field} is invalid`); }
