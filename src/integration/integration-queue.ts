@@ -844,7 +844,6 @@ function prepareCompletedReceipt(input: {
   if (!isVerifiedReviewDecision(input.review)) {
     throw new Error("completed receipt review lacks provenance");
   }
-  ValidationReportSchema.parse(input.validation);
   const command = Object.freeze([...input.validation.command]);
   const provenance = Object.freeze({ ...input.validation.provenance });
   const validation = Object.freeze({ ...input.validation, command, provenance });
