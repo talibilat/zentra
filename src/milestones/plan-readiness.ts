@@ -2,7 +2,6 @@ import {
   MilestonePlanSchema,
   StopAndAskStateSchema,
   type MilestonePlan,
-  type PlannedTask,
   type StopAndAskReason,
   type StopAndAskState,
 } from "../contracts/milestone.js";
@@ -131,8 +130,4 @@ export function assertMilestonePlanReady(input: PlanReadinessInput): MilestonePl
     throw new Error(`Milestone plan is not executable: ${decision.reason}`);
   }
   return parsed.data;
-}
-
-export function plannedTaskRequiresReview(task: PlannedTask): boolean {
-  return task.risk.requiresReview;
 }
