@@ -813,7 +813,7 @@ function parseWorkerInput(args: readonly string[]): DeterministicWorkerInput {
   }
   const file = values.get("--file");
   const content = values.get("--content");
-  if (file === undefined || content === undefined || values.size !== 2) {
+  if (file === undefined || content === undefined) {
     throw new Error("worker args require exactly --file and --content");
   }
   // MVP fixture scope is deliberately one root-level file, currently greeting.txt.
