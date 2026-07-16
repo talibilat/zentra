@@ -77,11 +77,11 @@ export const CapsulePolicySchema = z.object({
   policy.githubWrites.forEach((grant, index) => {
     if (ids.has(grant.grantId)) context.addIssue({ code: "custom", path: ["githubWrites", index, "grantId"], message: "duplicate GitHub grant identity" });
     ids.add(grant.grantId);
-    if (grant.action.operation === "create_pull_request" && grant.action.headRef !== githubBrokerHeadRef(grant.grantId)) {
-      context.addIssue({ code: "custom", path: ["githubWrites", index, "action", "headRef"], message: "pull request head must be broker-owned" });
-    }
     if (grant.action.operation === "create_pull_request") {
       const action = grant.action;
+      if (action.headRef !== githubBrokerHeadRef(grant.grantId)) {
+        context.addIssue({ code: "custom", path: ["githubWrites", index, "action", "headRef"], message: "pull request head must be broker-owned" });
+      }
       const push = policy.githubWrites.find((candidate) => candidate.grantId === action.pushGrantId);
       if (
         push?.action.operation !== "push" || push.action.repository !== action.repository ||
