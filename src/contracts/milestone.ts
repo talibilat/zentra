@@ -185,7 +185,6 @@ export type RiskClassification = z.infer<typeof RiskClassificationSchema>;
 export type MilestoneBudget = z.infer<typeof MilestoneBudgetSchema>;
 export type StopAndAskReason = z.infer<typeof StopAndAskReasonSchema>;
 export type StopAndAskState = z.infer<typeof StopAndAskStateSchema>;
-export type TaskDependency = z.infer<typeof TaskDependencySchema>;
 export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 export type MilestonePlan = z.infer<typeof MilestonePlanSchema>;
 export type Milestone = z.infer<typeof MilestoneSchema>;
