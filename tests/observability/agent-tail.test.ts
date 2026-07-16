@@ -233,6 +233,13 @@ describe("Agent Tail event envelope export", () => {
     }))).toThrow();
   });
 
+  it("fails closed on spoofed OpenCode milestone actor payloads", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "milestone.task_running",
+      payload: { harness: "opencode", actorId: "spoofed", role: "planner" },
+    }))).toThrow("invalid OpenCode milestone event payload");
+  });
+
   it("serializes one valid JSONL line without mutating native event payload", () => {
     const payload = { terminalOutcome: "completed" };
     const event = storedEvent({ type: "task.completed", payload });

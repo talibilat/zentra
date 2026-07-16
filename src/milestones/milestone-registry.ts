@@ -91,6 +91,33 @@ export class MilestoneRegistry {
     }));
   }
 
+  ready(milestoneId: string, taskId: string): MilestoneRecord {
+    const events = this.journal.readStream(milestoneId);
+    const view = projectMilestone(events);
+    if (view === null || view.plan === null) throw new Error(`milestone ${milestoneId} does not have a plan`);
+    const task = view.plan.tasks.find((candidate) => candidate.taskId === taskId);
+    const current = view.tasks[taskId];
+    if (task === undefined || current === undefined || (current.status !== "planned" && current.status !== "blocked")) {
+      throw new Error(`planned task ${taskId} cannot become ready`);
+    }
+    for (const dependency of task.dependencies) {
+      if (view.tasks[dependency]?.terminalOutcome !== "completed") {
+        throw new Error(`planned task ${taskId} dependency ${dependency} is not completed successfully`);
+      }
+    }
+    const stored = this.journal.append(milestoneId, view.streamVersion, [{
+      streamId: milestoneId,
+      type: "milestone.task_ready",
+      payload: canonicalPayload({ taskId }),
+      causationId: null,
+      correlationId: events[0]!.correlationId,
+    }]);
+    const updatedEvents = [...events, ...stored];
+    const updated = projectMilestone(updatedEvents);
+    if (updated === null) throw new Error("projection should not be null after task readiness");
+    return withTrace(updated, updatedEvents);
+  }
+
   inspect(milestoneId: string): MilestoneRecord | null {
     const events = this.journal.readStream(milestoneId);
     const view = projectMilestone(events);

@@ -1,5 +1,6 @@
 import type { StoredEvent } from "../contracts/event.js";
 import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
+import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -50,7 +51,9 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
   assertAgentTailCompatibleEvent(event);
   const payload = event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
-    : event.payload;
+    : isPotentialOpenCodeRoleEvent(event)
+      ? parseOpenCodeMilestonePayload(event.type, event.payload)
+      : event.payload;
   return Object.freeze({
     schema_version: AGENT_TAIL_SCHEMA_VERSION,
     event_id: event.eventId,
@@ -119,6 +122,12 @@ function spanIdFor(event: StoredEvent): string {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (isOpenCodeRoleEvent(event)) {
+    return {
+      id: payloadString(event.payload, "actorId")!,
+      role: payloadString(event.payload, "role")!,
+    };
+  }
   if (event.type === "capsule.proxy_interaction_observed") {
     return { id: "zentra-policy-proxy", role: "policy_proxy" };
   }
@@ -180,6 +189,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
   if (type === "capsule.proxy_interaction_observed") return "network_policy";
   if (type.startsWith("capsule.github_broker_") || type === "capsule.github_grant_consumed") return "github_effect";
@@ -207,6 +217,11 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (isOpenCodeRoleEvent(event)) {
+    return type === "milestone.task_running"
+      ? "running"
+      : payloadString(event.payload, "outcome") ?? "failed";
+  }
   if (type === "capsule.started") return "running";
   if (type === "capsule.proxy_interaction_observed" && payloadBoolean(event.payload, "allowed") === false) return "denied";
   if (type === "capsule.check_observed" && payloadBoolean(event.payload, "passed") === false) return "failed";
@@ -251,6 +266,18 @@ function operationStatus(event: StoredEvent): string {
   if (type === "task.denied") return "denied";
   if (type === "task.failed") return "failed";
   return "completed";
+}
+
+function isOpenCodeRoleEvent(event: StoredEvent): boolean {
+  return isPotentialOpenCodeRoleEvent(event) &&
+    payloadString(event.payload, "harness") === "opencode" &&
+    payloadString(event.payload, "actorId") !== null &&
+    payloadString(event.payload, "role") !== null;
+}
+
+function isPotentialOpenCodeRoleEvent(event: StoredEvent): boolean {
+  return (event.type === "milestone.task_running" || event.type === "milestone.task_completed") &&
+    (payloadString(event.payload, "harness") === "opencode" || payloadString(event.payload, "actorId") !== null);
 }
 
 function payloadBoolean(payload: unknown, key: string): boolean | null {

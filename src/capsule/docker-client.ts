@@ -6,6 +6,7 @@ const APPROVED_DOCKER_EXECUTABLE = "/Applications/Docker.app/Contents/Resources/
 const MAX_DOCKER_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DOCKER_COMMAND_TIMEOUT_MS = 180_000;
 const TERMINATION_GRACE_MS = 1_000;
+const BROKER_TERMINATION_GRACE_MS = 1_000;
 
 export interface DockerCommandResult {
   readonly exitCode: number;
@@ -34,6 +35,13 @@ export class DockerOutputLimitError extends Error {
   }
 }
 
+export class DockerBrokerTransportUncertainError extends Error {
+  constructor() {
+    super("Model broker did not acknowledge termination; transport outcome is uncertain");
+    this.name = "DockerBrokerTransportUncertainError";
+  }
+}
+
 export class DockerClient {
   readonly executable: string;
 
@@ -50,6 +58,150 @@ export class DockerClient {
   run(args: readonly string[], signal: AbortSignal, timeoutMs = DOCKER_COMMAND_TIMEOUT_MS): Promise<DockerCommandResult> {
     return runBoundedProcess(this.executable, args, dockerEnvironment(), signal, timeoutMs);
   }
+
+  runBrokered(
+    args: readonly string[],
+    signal: AbortSignal,
+    timeoutMs: number,
+    exchange: (request: unknown, signal: AbortSignal) => Promise<unknown>,
+  ): Promise<DockerCommandResult> {
+    return runBrokeredDockerProcess(this.executable, args, dockerEnvironment(), signal, timeoutMs, exchange);
+  }
+}
+
+export function runBrokeredDockerProcess(
+  executable: string,
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  signal: AbortSignal,
+  timeoutMs: number,
+  exchange: (request: unknown, signal: AbortSignal) => Promise<unknown>,
+): Promise<DockerCommandResult> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new DockerCommandCancelledError());
+    const child = spawn(executable, [...args], {
+      shell: false,
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: environment,
+    });
+    let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let pendingLine = "";
+    let reason: "cancelled" | "timed_out" | "output" | "protocol" | null = null;
+    let chain: Promise<void> = Promise.resolve();
+    const exchangeLifecycle = new AbortController();
+    let processClosed = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const terminate = (next: typeof reason): void => {
+      if (reason !== null) return;
+      reason = next;
+      exchangeLifecycle.abort();
+      killGroup(child.pid, "SIGTERM");
+      killTimer = setTimeout(() => killGroup(child.pid, "SIGKILL"), TERMINATION_GRACE_MS);
+    };
+    const collect = (
+      current: Buffer<ArrayBufferLike>,
+      chunk: Buffer<ArrayBufferLike>,
+    ): Buffer<ArrayBufferLike> => {
+      if (current.length + chunk.length > MAX_DOCKER_OUTPUT_BYTES) {
+        terminate("output");
+        return current;
+      }
+      return Buffer.concat([current, chunk]);
+    };
+    const handleLine = (line: string): void => {
+      if (!line.includes('"type":"model_turn"')) return;
+      chain = chain.then(async () => {
+        if (exchangeLifecycle.signal.aborted) return;
+        const response = await exchange(JSON.parse(line) as unknown, exchangeLifecycle.signal);
+        await writeBrokerResponse(child.stdin, `${JSON.stringify(response)}\n`, exchangeLifecycle.signal);
+      }).catch(() => {
+        if (!exchangeLifecycle.signal.aborted) terminate("protocol");
+      });
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout = collect(stdout, chunk);
+      if (reason !== null) return;
+      pendingLine += chunk.toString("utf8");
+      const lines = pendingLine.split(/\r?\n/);
+      pendingLine = lines.pop() ?? "";
+      for (const line of lines) handleLine(line);
+    });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = collect(stderr, chunk); });
+    child.stdin.on("error", () => { if (!processClosed) terminate("protocol"); });
+    child.stdin.on("close", () => { if (!processClosed && reason === null) terminate("protocol"); });
+    const abort = (): void => terminate("cancelled");
+    const deadline = setTimeout(() => terminate("timed_out"), timeoutMs);
+    signal.addEventListener("abort", abort, { once: true });
+    child.once("error", (error) => {
+      processClosed = true;
+      exchangeLifecycle.abort();
+      settleExchanges(() => finish(() => reject(error)));
+    });
+    child.once("close", (code) => {
+      processClosed = true;
+      exchangeLifecycle.abort();
+      settleExchanges(() => finish(() => {
+        if (reason === "cancelled") reject(new DockerCommandCancelledError());
+        else if (reason === "timed_out") reject(new DockerCommandTimeoutError());
+        else if (reason === "output") reject(new DockerOutputLimitError());
+        else if (reason === "protocol") reject(new Error("model broker protocol failed"));
+        else resolve({ exitCode: code ?? 1, stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8") });
+      }));
+    });
+    function settleExchanges(action: () => void): void {
+      let grace: NodeJS.Timeout;
+      void Promise.race([
+        chain.then(() => true),
+        new Promise<boolean>((resolveGrace) => {
+          grace = setTimeout(() => resolveGrace(false), BROKER_TERMINATION_GRACE_MS);
+        }),
+      ]).then((cooperated) => {
+        if (cooperated) {
+          clearTimeout(grace!);
+          action();
+        } else {
+          finish(() => reject(new DockerBrokerTransportUncertainError()));
+        }
+      });
+    }
+    function finish(action: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      signal.removeEventListener("abort", abort);
+      action();
+    }
+  });
+}
+
+function writeBrokerResponse(
+  stdin: NodeJS.WritableStream,
+  response: string,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted || !stdin.writable) return reject(new Error("model broker stdin is unavailable"));
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", abort);
+      stdin.removeListener("error", fail);
+      stdin.removeListener("close", close);
+      stdin.removeListener("drain", drain);
+    };
+    const done = (): void => { cleanup(); resolve(); };
+    const fail = (): void => { cleanup(); reject(new Error("model broker stdin failed")); };
+    const close = (): void => { cleanup(); reject(new Error("model broker stdin closed")); };
+    const abort = (): void => { cleanup(); reject(new Error("model broker exchange aborted")); };
+    const drain = (): void => done();
+    signal.addEventListener("abort", abort, { once: true });
+    stdin.once("error", fail);
+    stdin.once("close", close);
+    if (stdin.write(response, "utf8")) done();
+    else stdin.once("drain", drain);
+  });
 }
 
 export function runBoundedProcess(

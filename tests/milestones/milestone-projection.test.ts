@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { projectMilestone } from "../../src/milestones/milestone-projection.js";
@@ -52,6 +53,64 @@ const plan = {
 };
 
 describe("projectMilestone", () => {
+  it("rejects duplicate resource intents and trace observations before task completion", () => {
+    const intent = { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", imageName: "image-a", repositoryViewPath: "/tmp/view-a" };
+    const prefix = [
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "Resources" }, streamVersion: 1 }),
+      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 4 }),
+    ];
+    expect(() => projectMilestone([
+      ...prefix,
+      event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 5 }),
+    ])).toThrow("duplicate OpenCode resource intent");
+    expect(() => projectMilestone([
+      ...prefix,
+      event({ type: "milestone.agent_trace_observed", payload: { taskId: "task-a", outcome: "emitted" }, streamVersion: 5 }),
+    ])).toThrow("requires task completion");
+    expect(() => projectMilestone([
+      ...prefix,
+      event({ type: "milestone.agent_cleanup_observed", payload: {
+        ...intent, taskId: "task-b", containerId: null, imageId: null, repositoryRevision: null,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true,
+      }, streamVersion: 5 }),
+    ])).toThrow("out of order");
+  });
+
+  it("rejects OpenCode completion evidence that contradicts the running repository revision", () => {
+    const summary = "Evidence.";
+    const running = {
+      taskId: "task-a", capsuleId: "capsule-a", actorId: "agent-a", role: "planner", harness: "opencode",
+      requestedModel: { capabilityId: "agent-a", transportModelId: "provider/model" },
+      budget: { maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000 },
+      timeoutMs: 1_000,
+      securityBoundary: {
+        repository: "sanitized_read_only_bind_mount", scratch: "bounded_ephemeral", network: "model_broker_only",
+        home: "ephemeral", credentials: "none", shell: "none", readableScopes: ["src/**"], forbiddenPaths: [".env"], repositoryRevision: "a".repeat(64),
+      },
+    };
+    const completed = {
+      taskId: "task-a", capsuleId: "capsule-a", outcome: "completed", actorId: "agent-a", role: "planner", harness: "opencode",
+      capabilityId: "agent-a", transportModelId: "provider/model", measuredHarness: { version: "1.18.1", executableSha256: "b".repeat(64) },
+      model: { id: "provider/model", provider: "fixture", name: "model" }, cleanup: "completed", brokerTransport: "completed",
+      evidence: [{ kind: "plan", summary, sha256: createHash("sha256").update(summary).digest("hex"), provenance: { harness: "opencode", capabilityId: "agent-a", transportModelId: "provider/model", repositoryRevision: "c".repeat(64) } }],
+    };
+    const intent = { taskId: "task-a", capsuleId: "capsule-a", resourceLabel: "org.zentra.capsule-id=capsule-a", containerName: "container-a", imageName: "image-a", repositoryViewPath: "/tmp/view-a" };
+    const prepared = { ...intent, containerId: "d".repeat(64), imageId: `sha256:${"e".repeat(64)}`, repositoryRevision: "a".repeat(64) };
+    const cleanup = { ...prepared, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true };
+    expect(() => projectMilestone([
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "OpenCode" }, streamVersion: 1 }),
+      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      event({ type: "milestone.task_ready", payload: { taskId: "task-a" }, streamVersion: 3 }),
+      event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 4 }),
+      event({ type: "milestone.task_running", payload: running, streamVersion: 5 }),
+      event({ type: "milestone.agent_resources_prepared", payload: prepared, streamVersion: 6 }),
+      event({ type: "milestone.agent_cleanup_observed", payload: cleanup, streamVersion: 7 }),
+      event({ type: "milestone.task_completed", payload: completed, streamVersion: 8 }),
+    ])).toThrow("contradicts its running identity");
+  });
+
   it("rebuilds milestone status and planned task states from journal events", () => {
     const view = projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Agent Tail milestone" }, streamVersion: 1 }),

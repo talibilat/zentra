@@ -264,7 +264,7 @@ function createAssets(policy: CapsulePolicy, capsuleId: string): CapsuleAssets {
     const certPath = path.join(directory, "certs");
     mkdirSync(certPath, { mode: 0o755 });
     chmodSync(certPath, 0o755);
-    writeFileSync(path.join(directory, "Dockerfile"), workerDockerfile(capsuleId), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(path.join(directory, "Dockerfile"), openCodeWorkerDockerfile(capsuleId), { encoding: "utf8", mode: 0o600 });
     writeFileSync(addonPath, proxyAddon(), { encoding: "utf8", mode: 0o600 });
     writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, { encoding: "utf8", mode: 0o600 });
     return { directory, addonPath, policyPath, certPath };
@@ -274,7 +274,7 @@ function createAssets(policy: CapsulePolicy, capsuleId: string): CapsuleAssets {
   }
 }
 
-function workerDockerfile(capsuleId: string): string {
+export function openCodeWorkerDockerfile(capsuleId: string): string {
   return `FROM ${NODE_BASE}\nLABEL org.zentra.node-base-digest="${NODE_BASE_INDEX_DIGEST}" org.zentra.capsule-id="${capsuleId}"\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl coreutils && rm -rf /var/lib/apt/lists/*\nRUN npm install --global opencode-ai@${OPENCODE_VERSION} && test "$(opencode --version)" = "${OPENCODE_VERSION}" && printf '%s  %s\\n' "${OPENCODE_EXECUTABLE_SHA256}" /usr/local/bin/opencode | sha256sum --check --strict -\nRUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin zentra\nUSER 10001:10001\nWORKDIR /scratch\n`;
 }
 
