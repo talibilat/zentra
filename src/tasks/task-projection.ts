@@ -254,7 +254,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
 
     const currentLifecycle = state.lifecycle;
-    if (!VALID_TRANSITIONS[currentLifecycle]?.includes(event.type)) {
+    if (!VALID_TRANSITIONS[currentLifecycle].includes(event.type)) {
       throw new Error(
         `invalid transition from ${currentLifecycle} via ${event.type}`,
       );
