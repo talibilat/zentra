@@ -17,7 +17,7 @@ import {
 } from "./agent-tail.js";
 
 export class AgentTailJsonlFileSink {
-  private readonly eventIds = new Set<string>();
+  private eventIds = new Set<string>();
   private lastGlobalPosition = -1;
   private closed = false;
   private liveStreamFailed = false;
@@ -87,8 +87,7 @@ export class AgentTailJsonlFileSink {
 
     for (const line of lines) writeAll(this.descriptor, line);
     if (lines.length > 0) fsyncSync(this.descriptor);
-    this.eventIds.clear();
-    for (const eventId of pendingIds) this.eventIds.add(eventId);
+    this.eventIds = pendingIds;
     this.lastGlobalPosition = pendingPosition;
 
     if (this.liveWriter !== undefined && !this.liveStreamFailed) {
