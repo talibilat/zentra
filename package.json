@@ -7,6 +7,9 @@
   "bin": {
     "zentra": "./dist/src/cli/main.js"
   },
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
   "files": [
     "dist/",
     "fixtures/deterministic-worker.mjs",

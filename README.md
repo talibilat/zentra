@@ -149,7 +149,45 @@ PR dispatch never creates or moves the branch.
 GitHub exposes no atomic pull-request creation primitive with an expected head OID, so the supported boundary combines the broker-owned branch, completed exact push evidence, durable cross-process per-repository serialization, and an immediate head-OID recheck before `gh pr create`.
 Repository leases coexist with journal tables in the canonical event-journal SQLite database; path aliases converge through filesystem canonicalization and no separate lease sidecar database is created.
 External repository actors can still move or delete the head after that final check, so reconciliation verifies the created PR's exact head OID and keeps any mismatch uncertain.
-The model broker remains disabled, so the capsule runs only OpenCode version/digest conformance and does not claim a real agent or model invocation.
+The conformance command keeps model traffic disabled and proves only the OpenCode version and executable digest.
+The programmatic read-only OpenCode role requires an explicitly supplied typed `ModelBroker` and records the broker-reported model metadata and bounded evidence in the milestone journal.
+Installed milestone CLI composition belongs to issue #34 and is not exposed by issue #18.
+Issue #18 supports programmatic composition through `OpenCodeReadOnlyProgram`, which requires an authoritative journal, retained `AgentTailJsonlFileSink`, trusted `ModelBroker`, and parsed `ModelSheet`.
+The program resolves the task-assigned capability from that sheet and constructs `DockerOpenCodeReadOnlyCapsule`; callers do not select a model in each run request.
+`ModelCapability.id` remains the local assignment and policy identity, while `ModelCapability.model` is the approved provider transport identity sent to `ModelBroker` and required in its receipt.
+The broker is a trusted capability-runner contract and must acknowledge abort promptly.
+If it ignores abort beyond the fixed termination grace, Zentra records a failed task with uncertain broker transport rather than claiming successful cancellation or completion.
+
+```ts
+import {
+  AgentTailJsonlFileSink,
+  MilestoneRegistry,
+  OpenCodeReadOnlyProgram,
+  SqliteEventJournal,
+  loadModelSheet,
+} from "zentra";
+
+const program = new OpenCodeReadOnlyProgram(journal, agentTailSink, modelBroker, modelSheet);
+const milestones = new MilestoneRegistry(journal);
+milestones.register({ milestoneId, projectId, title, correlationId, plan });
+milestones.ready(milestoneId, taskId);
+const result = await program.run({
+  milestoneId,
+  taskId,
+  repositoryPath,
+  role: "researcher",
+  rolePrompt,
+  budget,
+  timeoutMs,
+  signal,
+});
+```
+
+The exported milestone contracts and `MilestoneRegistry.ready()` provide the supported preparation path without raw event appends.
+The milestone and ready task must already exist in the supplied journal, and the task assignment must name an approved OpenCode capability with only `read_repository` tool authority and denied direct network access.
+Before creating the deterministic sanitized view or any Docker resource, the program journals `milestone.agent_resource_intent` with reconstructable names, label, and controlled view path.
+After an interrupted attempt, `program.reconcile({ milestoneId, taskId, capsuleId? })` discovers labeled resources, removes and proves their absence, and journals cleanup before another attempt can start.
+The built-in `DisabledModelBroker` performs no provider transport and no provider credentials are invented or passed into the capsule.
 Policy files, journals, command results, and Agent Tail JSONL must never contain credentials.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
@@ -223,8 +261,13 @@ mitmproxy raw TCP fallback is disabled, and both raw TCP lifecycle hooks kill an
 Redirect targets and every subsequent flow are checked again.
 HTTPS method enforcement depends on the mounted mitmproxy CA and decrypted HTTP requests; proxy environment variables and CONNECT destination allowlisting are not treated as containment or method enforcement.
 Allowed internet reads remain an exfiltration channel and are not claimed to be side-effect-free.
-The worker receives no GitHub or model credential.
-GitHub broker credentials exist only in the host effect runner environment for one exact granted operation, and model calls remain disabled until a separately authorised transport broker is configured.
+The worker receives no GitHub or provider credential.
+GitHub broker credentials exist only in the host effect runner environment for one exact granted operation.
+The read-only OpenCode role runs in a separate non-root, read-only, network-disabled worker with a sanitized planned-scope repository view mounted read-only and a `noexec,nosuid` 16 MiB scratch tmpfs.
+The view contains only planned readable paths, excludes planned forbidden paths, rejects symlink traversal, and records a content revision digest in journal evidence.
+Typed text and `read`, `glob`, or `grep` model turns cross the supervised Docker process stream to a host `ModelBroker`; all other OpenCode tools are denied.
+No general proxy POST permission, host HOME, provider credential, arbitrary executable, argument vector, working directory, shell, or writable worktree is exposed.
+OpenCode version and executable digest are measured in the named execution container before model work, and container and image absence are inspected after cleanup before success is claimed.
 Pushes run from a broker-owned bare repository with isolated HOME/XDG and fixed Git configuration, disabled hooks/helpers/external programs, no caller local config, exact source-object verification, fast-forward proof, and an expected-old-OID lease.
 The production broker pins `/usr/bin/git` to SHA-256 `97be7fb98d7272d97ca3034740883a93c12c5a438b313fd618a80aca102a3dda` and GitHub CLI `2.76.2` at `/opt/homebrew/Cellar/gh/2.76.2/bin/gh` to SHA-256 `2ee6cbdeee81adabbdd0d379610054d9e55d047067ff70401ad2fa5b5b3f9e0d` before credential resolution.
 Cleanup failure is journaled as uncertain and turns an otherwise completed conformance result into failure.
