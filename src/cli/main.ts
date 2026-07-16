@@ -615,10 +615,7 @@ function createProgram(
       });
       const reviewer = await configuredReviewer();
       const reviewPolicySecurity = loadSecuritySheetForCli(options.securitySheet);
-      if (
-        reviewPolicySecurity !== undefined &&
-        !reviewPolicySecurity.allowedRepositories.includes(realpathSync.native(projectConfig.repositoryPath))
-      ) {
+      if (!reviewPolicySecurity.allowedRepositories.includes(realpathSync.native(projectConfig.repositoryPath))) {
         throw new CliFailure("INVALID_SECURITY_SHEET");
       }
       if (options.agentTailStream === true && options.agentTailJsonl === undefined) {
