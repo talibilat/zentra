@@ -788,8 +788,7 @@ async function validateWorkerAuthority(
   }
 
   const parsedInput = parseWorkerInput(request.args);
-  const fixture = parsedInput.fixture;
-  const fixturePath = await realpath(fixture);
+  const fixturePath = await realpath(parsedInput.fixture);
   const bundledFixture = await realpath(expectedFixture);
   if (fixturePath !== bundledFixture) {
     throw new Error("tracer worker script must be Zentra's bundled deterministic fixture");
