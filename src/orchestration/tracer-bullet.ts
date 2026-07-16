@@ -4,10 +4,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import type {
-  ValidationReport,
-  ValidationRunner,
-} from "../capabilities/validation-runner.js";
+import type { ValidationRunner } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
 import {
   ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
