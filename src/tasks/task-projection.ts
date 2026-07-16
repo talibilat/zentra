@@ -232,7 +232,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       cleanupObserved = true;
       cleanupObservationSnapshot = canonicalSnapshot(event.payload);
     } else if (event.type === "task.cleanup_reconciled") {
-      if (!cleanupObserved || cleanupCompleted || cleanupReconciled) {
+      if (!cleanupObserved || cleanupCompleted) {
         throw new Error("cleanup reconciliation requires one uncertain cleanup observation");
       }
       if (
