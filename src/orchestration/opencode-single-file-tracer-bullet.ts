@@ -14,6 +14,10 @@ import {
   type PatchArtifactEvidence,
 } from "../contracts/artifact.js";
 import type { TerminalOutcome } from "../contracts/task.js";
+import {
+  uncertainEffectPayload,
+  type UncertainEffectBoundary,
+} from "../contracts/uncertain-effect.js";
 import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
 import {
   isVerifiedOpenCodeProbeReport,
@@ -40,6 +44,7 @@ import type { TaskView } from "../tasks/task-projection.js";
 import type { GitClient } from "../workspaces/git-client.js";
 import type { WorkspaceLease, WorktreeManager } from "../workspaces/worktree-manager.js";
 import {
+  IntegrationBranchCreationUncertainError,
   WorkspaceCommitUncertainError,
   WorkspaceCreationUncertainError,
   WorkspaceGitTerminationError,
@@ -157,8 +162,32 @@ export class OpenCodeSingleFileTracerBullet {
     } catch (error) {
       if (
         error instanceof WorkspaceCreationUncertainError ||
-        error instanceof WorkspaceGitTerminationError
-      ) throw error;
+        error instanceof IntegrationBranchCreationUncertainError
+      ) {
+        return this.pauseForUncertainty(
+          request.task.taskId,
+          "worktree_creation",
+          "Git worktree creation",
+          errorMessage(error),
+          observedWorkspace === null
+            ? null
+            : { path: observedWorkspace, branch: `ticket/${request.task.taskId}` },
+        );
+      }
+      if (error instanceof WorkspaceGitTerminationError) {
+        return this.terminate(request.task.taskId, error.outcome, "setup", error.message);
+      }
+      if (this.current(request.task.taskId).lifecycle === "running") {
+        return this.pauseForUncertainty(
+          request.task.taskId,
+          "worker",
+          "OpenCode writer",
+          errorMessage(error),
+          observedWorkspace === null
+            ? null
+            : { path: observedWorkspace, branch: `ticket/${request.task.taskId}` },
+        );
+      }
       return this.tasks.append(request.task.taskId, "task.failed", {
         stage: "writer",
         reason: error instanceof Error ? error.message : String(error),
@@ -189,12 +218,12 @@ export class OpenCodeSingleFileTracerBullet {
     try {
       inspected = await this.worktrees.inspect(lease, { signal: request.signal });
     } catch (error) {
-      return this.terminate(
+      return this.pauseForUncertainty(
         request.task.taskId,
-        error instanceof WorkspaceGitTerminationError ? error.outcome : "failed",
-        "artifact",
+        "worker",
+        "writer workspace inspection",
         errorMessage(error),
-        { workspace: lease.path },
+        { path: lease.path, branch: lease.branch },
       );
     }
     const diffSha256 = createHash("sha256").update(inspected.diff, "utf8").digest("hex");
@@ -250,13 +279,21 @@ export class OpenCodeSingleFileTracerBullet {
         request.signal,
         { invocationId, subjectSha256: diffSha256 },
       );
+    } catch (error) {
+      return this.terminate(
+        request.task.taskId,
+        "failed",
+        "validation",
+        errorMessage(error),
+        { workspace: lease.path },
+      );
+    }
+    try {
       assertValidationEvidence(validation, request, lease, invocationId, diffSha256);
     } catch (error) {
-      return this.tasks.append(request.task.taskId, "task.failed", {
-        stage: "validation",
-        reason: error instanceof Error ? error.message : String(error),
+      return this.terminate(request.task.taskId, "failed", "validation", errorMessage(error), {
         workspace: lease.path,
-      }, null);
+      });
     }
     let postValidation;
     try {
@@ -447,12 +484,12 @@ export class OpenCodeSingleFileTracerBullet {
           return this.observeIntegration(request.task.taskId, {
             reason: error.message,
             evidence: error.evidence,
-          });
+          }, true, lease);
         }
         if (error instanceof IntegrationExecutionError) throw error;
         return this.observeIntegration(request.task.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
-        });
+        }, true, lease);
       }
       if (receipt.outcome !== "completed") {
         const finalReceipt = prepared.receipt === null
@@ -489,13 +526,31 @@ export class OpenCodeSingleFileTracerBullet {
           receipt,
           verification: "failed",
           reason: errorMessage(error),
-        });
+        }, true, lease);
       }
-      this.tasks.append(request.task.taskId, "task.integration_observed", {
+      const cleanupFailures = this.integrationCleanupFailures(request.task.taskId);
+      const integrationObserved = {
         receipt,
         verification: "verified",
-        cleanupFailures: this.integrationCleanupFailures(request.task.taskId),
-      }, null);
+        cleanupFailures,
+      };
+      if (cleanupFailures.length > 0) {
+        return this.tasks.appendBatch(request.task.taskId, [
+          { type: "task.integration_observed", payload: integrationObserved, causationId: null },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "cleanup",
+              operation: "integration candidate cleanup",
+              reason: "integration candidate cleanup was not proven complete",
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
+          },
+        ]);
+      }
+      this.tasks.append(request.task.taskId, "task.integration_observed", integrationObserved, null);
       const cleanup = {
         sourceCommit,
         resultCommit: receipt.resultCommit,
@@ -513,21 +568,58 @@ export class OpenCodeSingleFileTracerBullet {
           readonly uncertain?: unknown;
           readonly evidence?: unknown;
         };
-        return this.tasks.append(request.task.taskId, "task.cleanup_observed", {
+        const cleanupObservation = {
           phase: typeof observed.phase === "string" ? observed.phase : "unknown",
           uncertain: observed.uncertain === true,
           evidence: observed.evidence ?? {},
           reason: errorMessage(error),
-        }, null);
+        };
+        if (observed.uncertain !== true) {
+          return this.terminate(
+            request.task.taskId,
+            "failed",
+            "cleanup",
+            errorMessage(error),
+            { cleanup: cleanupObservation },
+          );
+        }
+        return this.tasks.appendBatch(request.task.taskId, [
+          { type: "task.cleanup_observed", payload: cleanupObservation, causationId: null },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "cleanup",
+              operation: "ticket worktree cleanup",
+              reason: errorMessage(error),
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
+          },
+        ]);
       }
       this.tasks.append(request.task.taskId, "task.cleanup_completed", cleanup, null);
       return this.tasks.append(request.task.taskId, "task.completed", { receipt }, null);
     } catch (error) {
       if (error instanceof WorkspaceCommitUncertainError) {
-        return this.tasks.append(request.task.taskId, "task.commit_observed", {
-          stage: "commit",
-          reason: error.message,
-        }, null);
+        return this.tasks.appendBatch(request.task.taskId, [
+          {
+            type: "task.commit_observed",
+            payload: { stage: "commit", reason: error.message },
+            causationId: null,
+          },
+          {
+            type: "task.effect_uncertain",
+            payload: uncertainEffectPayload({
+              boundary: "commit",
+              operation: "reviewed Git commit",
+              reason: error.message,
+              requestedBy: "zentra-integration-controller",
+              workspace: { path: lease.path, branch: lease.branch },
+            }),
+            causationId: null,
+          },
+        ]);
       }
       const outcome = error instanceof ReviewerExecutionError ||
           error instanceof WorkspaceGitTerminationError ||
@@ -538,7 +630,7 @@ export class OpenCodeSingleFileTracerBullet {
       if (current.lifecycle === "integrating" && !(error instanceof IntegrationExecutionError)) {
         return this.observeIntegration(request.task.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
-        });
+        }, true, lease);
       }
       return this.terminate(request.task.taskId, outcome, current.lifecycle, errorMessage(error), {
         workspace: lease.path,
@@ -604,16 +696,51 @@ export class OpenCodeSingleFileTracerBullet {
     return current;
   }
 
-  private observeIntegration(taskId: string, payload: unknown): TaskView {
+  private observeIntegration(
+    taskId: string,
+    payload: unknown,
+    uncertain = false,
+    lease?: WorkspaceLease,
+  ): TaskView {
     const durable = typeof payload === "object" && payload !== null
       ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
       : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
-    return this.tasks.append(taskId, "task.integration_observed", durable, null);
+    if (!uncertain) return this.tasks.append(taskId, "task.integration_observed", durable, null);
+    return this.tasks.appendBatch(taskId, [
+      { type: "task.integration_observed", payload: durable, causationId: null },
+      {
+        type: "task.effect_uncertain",
+        payload: uncertainEffectPayload({
+          boundary: "integration",
+          operation: "integration candidate and branch update",
+          reason: payloadReason(payload),
+          requestedBy: "zentra-integration-controller",
+          workspace: lease === undefined ? null : { path: lease.path, branch: lease.branch },
+        }),
+        causationId: null,
+      },
+    ]);
   }
 
   private integrationCleanupFailures(taskId: string): readonly unknown[] {
     return this.integration?.integrations.getCleanupFailures()
       .filter((failure) => failure.taskId === taskId) ?? [];
+  }
+
+  private pauseForUncertainty(
+    taskId: string,
+    boundary: UncertainEffectBoundary,
+    operation: string,
+    reason: string,
+    workspace: { readonly path: string; readonly branch: string | null } | null,
+  ): TaskView {
+    return this.tasks.pauseForUncertainEffect(taskId, uncertainEffectPayload({
+      boundary,
+      operation,
+      reason,
+      requestedBy: "zentra-recovery-controller",
+      workspace,
+    }));
   }
 }
 
@@ -639,6 +766,19 @@ function errorMessage(error: unknown): string {
 
 function errorName(error: unknown): string {
   return error instanceof Error && error.name !== "" ? error.name : "Error";
+}
+
+function payloadReason(payload: unknown): string {
+  if (typeof payload === "object" && payload !== null) {
+    const reason = (payload as Readonly<Record<string, unknown>>)["reason"];
+    if (typeof reason === "string" && reason !== "") return reason;
+    const error = (payload as Readonly<Record<string, unknown>>)["error"];
+    if (typeof error === "object" && error !== null) {
+      const message = (error as Readonly<Record<string, unknown>>)["message"];
+      if (typeof message === "string" && message !== "") return message;
+    }
+  }
+  return "integration result requires explicit reconciliation";
 }
 
 function singleOwnedFile(task: PlannedTask): string {

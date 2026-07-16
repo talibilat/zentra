@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { artifactEvidenceSha256 } from "../../src/contracts/artifact.js";
 import type { StoredEvent } from "../../src/contracts/event.js";
+import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
 import { TaskService } from "../../src/tasks/task-service.js";
@@ -75,6 +76,9 @@ describe("projectTask", () => {
       terminalOutcome: null,
       streamVersion: 1,
       leaseOwner: null,
+      paused: false,
+      stopAndAsk: null,
+      uncertainEffect: null,
     });
   });
 
@@ -119,6 +123,49 @@ describe("projectTask", () => {
 
   it("projects task.validation_started into validating", () => {
     expect(projectTask(happyPath().slice(0, 4))?.lifecycle).toBe("validating");
+  });
+
+  it("pauses on uncertain effects without claiming a terminal outcome", () => {
+    const events = [
+      createdEvent(),
+      makeEvent("task.leased", 2, { leaseOwner: "worker-1" }),
+      makeEvent("task.started", 3),
+      makeEvent("task.effect_uncertain", 4, uncertainEffectPayload({
+        boundary: "worker",
+        operation: "worker invocation",
+        reason: "worker result is uncertain",
+        requestedBy: "zentra-worker-controller",
+        workspace: { path: "/work/task-1", branch: "ticket/task-1" },
+      })),
+    ];
+
+    expect(projectTask(events)).toMatchObject({
+      lifecycle: "running",
+      terminalOutcome: null,
+      paused: true,
+      stopAndAsk: { reason: "uncertain_effect" },
+      uncertainEffect: { boundary: "worker", retryPolicy: "never_automatic" },
+    });
+    expect(() => projectTask([
+      ...events,
+      makeEvent("task.validation_started", 5),
+    ])).toThrow(/paused.*reconciliation/i);
+    expect(() => projectTask([
+      ...events,
+      makeEvent("task.failed", 5),
+    ])).toThrow(/paused.*reconciliation/i);
+
+    expect(projectTask([
+      ...events,
+      makeEvent("task.effect_reconciled", 5, {
+        schemaVersion: 1,
+        boundary: "worker",
+        resolution: "abandoned",
+        reason: "operator abandoned the retained worker result",
+        decidedBy: "operator-1",
+        decisionId: "decision-1",
+      }),
+    ])).toMatchObject({ paused: false, stopAndAsk: null, uncertainEffect: null });
   });
 
   it("completes a focused writer task only after durable successful validation", () => {
@@ -525,6 +572,9 @@ describe("TaskService", () => {
       terminalOutcome: null,
       streamVersion: 1,
       leaseOwner: null,
+      paused: false,
+      stopAndAsk: null,
+      uncertainEffect: null,
     });
   });
 

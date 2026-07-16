@@ -312,6 +312,9 @@ describe("TracerBulletOrchestrator", () => {
       terminalOutcome: "completed",
       streamVersion: 21,
       leaseOwner: "worker-1",
+      paused: false,
+      stopAndAsk: null,
+      uncertainEffect: null,
     });
     expect(tasks.get("task-greeting")).toEqual(result);
     expect(
@@ -571,7 +574,7 @@ describe("TracerBulletOrchestrator", () => {
     });
   });
 
-  it("persists candidate cleanup failures in integration evidence while completing", async () => {
+  it("pauses when candidate cleanup is not proven complete", async () => {
     const fixture = await fixtureRepository();
     class CleanupFailingGitClient extends GitClient {
       override run(
@@ -605,7 +608,7 @@ describe("TracerBulletOrchestrator", () => {
       signal: runSignal(),
     });
 
-    expect(result.terminalOutcome).toBe("completed");
+    expect(result).toMatchObject({ paused: true, terminalOutcome: null });
     expect(journal.readStream(result.taskId).find((event) =>
       event.type === "task.integration_observed")?.payload).toMatchObject({
       cleanupFailures: [
@@ -614,6 +617,10 @@ describe("TracerBulletOrchestrator", () => {
           reason: expect.stringContaining("candidate cleanup"),
         },
       ],
+    });
+    expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
+      type: "task.effect_uncertain",
+      payload: { boundary: "cleanup", recoveryClassification: "await_reconciliation" },
     });
   });
 
@@ -709,10 +716,11 @@ describe("TracerBulletOrchestrator", () => {
       ...runInput,
       taskId: "task-restart-real-evidence",
       signal: runSignal(),
-    })).rejects.toThrow("simulated integration observation append crash");
-    expect(firstJournal.readStream("task-restart-real-evidence").at(-1)?.type).toBe(
-      "task.integration_prepared",
-    );
+    })).resolves.toMatchObject({ paused: true, terminalOutcome: null });
+    expect(firstJournal.readStream("task-restart-real-evidence").at(-1)).toMatchObject({
+      type: "task.effect_uncertain",
+      payload: { boundary: "integration" },
+    });
     firstJournal.close();
     journals.splice(journals.indexOf(firstJournal), 1);
 
@@ -726,19 +734,9 @@ describe("TracerBulletOrchestrator", () => {
       new GitClient(),
     );
     await expect(recovery.inspect("task-restart-real-evidence")).resolves.toMatchObject({
-      action: "record_completion",
+      action: "await_reconciliation",
     });
-    await expect(recovery.recordCompletion("task-restart-real-evidence")).resolves.toMatchObject({
-      lifecycle: "terminal",
-      terminalOutcome: "completed",
-    });
-    expect(existsSync(path.join(fixture.worktreeRoot, "task-restart-real-evidence"))).toBe(false);
-    const ticketRef = await new GitClient().run(fixture.repositoryPath, [
-      "show-ref",
-      "--verify",
-      "refs/heads/ticket/task-restart-real-evidence",
-    ]);
-    expect(ticketRef.exitCode).not.toBe(0);
+    expect(existsSync(path.join(fixture.worktreeRoot, "task-restart-real-evidence"))).toBe(true);
   });
 
   it("blocks prepared-only completion when candidate cleanup failed before observation crash", async () => {
@@ -795,7 +793,7 @@ describe("TracerBulletOrchestrator", () => {
       ...runInput,
       taskId: "task-retained-candidate",
       signal: runSignal(),
-    })).rejects.toThrow("observation crash");
+    })).resolves.toMatchObject({ paused: true, terminalOutcome: null });
     const prepared = journal.readStream("task-retained-candidate").find((event) =>
       event.type === "task.integration_prepared")?.payload as {
       receipt: { validation: { provenance: { canonicalCwd: string } } };
@@ -810,7 +808,7 @@ describe("TracerBulletOrchestrator", () => {
     );
     await expect(recovery.inspect("task-retained-candidate")).resolves.toMatchObject({
       action: "await_reconciliation",
-      reason: expect.stringMatching(/candidate.*registered|candidate.*present/i),
+      reason: expect.stringMatching(/candidate.*cleanup|cleanup.*retained/i),
     });
   });
 
@@ -901,9 +899,13 @@ describe("TracerBulletOrchestrator", () => {
     });
 
     expect(result).toMatchObject({ lifecycle: "integrating", terminalOutcome: null });
-    expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
-      type: "task.cleanup_observed",
+    expect(journal.readStream(result.taskId).find((event) =>
+      event.type === "task.cleanup_observed")).toMatchObject({
       payload: { phase: "worktree_removal", uncertain: true },
+    });
+    expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
+      type: "task.effect_uncertain",
+      payload: { boundary: "cleanup" },
     });
     expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(true);
     expect(await gitOk(fixture.repositoryPath, [
@@ -1199,7 +1201,6 @@ describe("TracerBulletOrchestrator", () => {
       "task.created",
       "task.worktree_creation_started",
       "task.leased",
-      "task.started",
       "task.failed",
     ]);
   });
@@ -1784,8 +1785,9 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
-    expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.integration_observed");
-    const observation = journal.readStream(result.taskId).at(-1)?.payload;
+    expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.effect_uncertain");
+    const observation = journal.readStream(result.taskId).findLast((event) =>
+      event.type === "task.integration_observed")?.payload;
     expect(observation).toMatchObject({
       verification: "failed",
       receipt: { outcome: "completed" },
@@ -1860,7 +1862,8 @@ describe("TracerBulletOrchestrator", () => {
     });
 
     expect(result.lifecycle).toBe("integrating");
-    expect(journal.readStream(result.taskId).at(-1)?.payload).toMatchObject({
+    expect(journal.readStream(result.taskId).findLast((event) =>
+      event.type === "task.integration_observed")?.payload).toMatchObject({
       verification: "failed",
       reason: expect.stringMatching(/replace/i),
     });
@@ -2118,7 +2121,12 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.lifecycle).toBe("integration_ready");
     expect(result.terminalOutcome).toBeNull();
-    expect(journal.readStream(result.taskId).at(-1)?.type).toBe("task.commit_observed");
+    expect(journal.readStream(result.taskId).find((event) =>
+      event.type === "task.commit_observed")).toBeDefined();
+    expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
+      type: "task.effect_uncertain",
+      payload: { boundary: "commit", retryPolicy: "never_automatic" },
+    });
     expect(integrationCalls).toBe(0);
   });
 
@@ -2220,7 +2228,8 @@ describe("TracerBulletOrchestrator", () => {
 
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
-    expect(journal.readStream(result.taskId).at(-1)?.payload).toEqual({
+    expect(journal.readStream(result.taskId).findLast((event) =>
+      event.type === "task.integration_observed")?.payload).toEqual({
       reason: "update-ref reconciliation unresolved",
       evidence: { mode: "competing-head", candidatePath: "/candidate" },
       cleanupFailures: [],
@@ -2364,7 +2373,11 @@ describe("TracerBulletOrchestrator", () => {
       expect(result.lifecycle).toBe("queued");
       expect(result.terminalOutcome).toBeNull();
       const types = journal.readStream("task-interrupt-before").map((event) => event.type);
-      expect(types).toEqual(["task.created", "task.worktree_creation_started"]);
+      expect(types).toEqual([
+        "task.created",
+        "task.worktree_creation_started",
+        "task.effect_uncertain",
+      ]);
       expect(existsSync(path.join(fixture.worktreeRoot, "task-interrupt-before"))).toBe(false);
       const branch = await new GitClient().run(fixture.repositoryPath, [
         "show-ref", "--verify", "refs/heads/ticket/task-interrupt-before",
@@ -2391,7 +2404,11 @@ describe("TracerBulletOrchestrator", () => {
       expect(result.lifecycle).toBe("queued");
       expect(result.terminalOutcome).toBeNull();
       const types = journal.readStream("task-interrupt-uncertain").map((event) => event.type);
-      expect(types).toEqual(["task.created", "task.worktree_creation_started"]);
+      expect(types).toEqual([
+        "task.created",
+        "task.worktree_creation_started",
+        "task.effect_uncertain",
+      ]);
 
       // Git actually ran to completion underneath the uncertain report, so
       // the branch and worktree are genuinely present on disk.
@@ -2414,7 +2431,7 @@ describe("TracerBulletOrchestrator", () => {
         new GitClient(),
       );
       await expect(recovery.inspect("task-interrupt-uncertain")).resolves.toMatchObject({
-        action: "resume_preparation",
+        action: "await_reconciliation",
       });
     });
 
@@ -2432,6 +2449,7 @@ describe("TracerBulletOrchestrator", () => {
       expect(journal.readStream(result.taskId).map((event) => event.type)).toEqual([
         "task.created",
         "task.worktree_creation_started",
+        "task.effect_uncertain",
       ]);
       expect(existsSync(path.join(fixture.worktreeRoot, result.taskId))).toBe(false);
       expect(await gitOk(fixture.repositoryPath, [

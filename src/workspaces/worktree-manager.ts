@@ -42,6 +42,14 @@ export class WorkspaceCreationUncertainError extends Error {
   }
 }
 
+export class IntegrationBranchCreationUncertainError extends Error {
+  override readonly name = "IntegrationBranchCreationUncertainError";
+
+  constructor(readonly branch: string, reason: string) {
+    super(`integration branch creation result is uncertain: ${reason}`);
+  }
+}
+
 export class WorkspaceGitTerminationError extends Error {
   override readonly name = "WorkspaceGitTerminationError";
 
@@ -95,10 +103,27 @@ export class WorktreeManager {
     if (existing.exitCode === 0) {
       return;
     }
-    await this.runOrThrow(project.repositoryPath, [
-      "branch",
-      project.integrationBranch,
-    ], options);
+    let created: CommandResult;
+    try {
+      created = await this.run(project.repositoryPath, [
+        "branch",
+        project.integrationBranch,
+      ], options);
+    } catch (error) {
+      throw new IntegrationBranchCreationUncertainError(
+        project.integrationBranch,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (created.termination !== null || created.truncated) {
+      throw new IntegrationBranchCreationUncertainError(
+        project.integrationBranch,
+        created.termination === null ? "Git output was truncated" : `Git was ${created.termination}`,
+      );
+    }
+    if (created.exitCode !== 0) {
+      throw new Error(`git branch failed with exit code ${created.exitCode}: ${created.stderr.trim()}`);
+    }
   }
 
   async create(

@@ -10,6 +10,12 @@ import type {
   TaskLifecycleState,
   TerminalOutcome,
 } from "../contracts/task.js";
+import {
+  EffectReconciliationPayloadSchema,
+  UncertainEffectPayloadSchema,
+  type UncertainEffectPayload,
+} from "../contracts/uncertain-effect.js";
+import type { StopAndAskState } from "../contracts/milestone.js";
 
 export interface TaskView {
   readonly taskId: string;
@@ -19,6 +25,9 @@ export interface TaskView {
   readonly terminalOutcome: TerminalOutcome | null;
   readonly streamVersion: number;
   readonly leaseOwner: string | null;
+  readonly paused: boolean;
+  readonly stopAndAsk: StopAndAskState | null;
+  readonly uncertainEffect: UncertainEffectPayload | null;
 }
 
 type TaskProjectionState = {
@@ -29,6 +38,9 @@ type TaskProjectionState = {
   terminalOutcome: TerminalOutcome | null;
   streamVersion: number;
   leaseOwner: string | null;
+  paused: boolean;
+  stopAndAsk: StopAndAskState | null;
+  uncertainEffect: UncertainEffectPayload | null;
 };
 
 const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
@@ -140,6 +152,9 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     terminalOutcome: null,
     streamVersion: firstEvent.streamVersion,
     leaseOwner: null,
+    paused: false,
+    stopAndAsk: null,
+    uncertainEffect: null,
   };
   const singleOccurrenceEvents = new Set<string>();
   let integrationPrepared = false;
@@ -163,11 +178,37 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     if (state.lifecycle === "terminal") {
       throw new Error("task is already terminal");
     }
+    if (
+      state.paused &&
+      event.type !== "task.effect_reconciled"
+    ) {
+      throw new Error("task is paused pending explicit reconciliation");
+    }
 
     if (
       isArtifactRecordedEventType(event.type) ||
       event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE
     ) {
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+
+    if (event.type === "task.effect_uncertain") {
+      const uncertain = UncertainEffectPayloadSchema.parse(event.payload);
+      state.paused = true;
+      state.stopAndAsk = uncertain.stopAndAsk;
+      state.uncertainEffect = uncertain;
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+    if (event.type === "task.effect_reconciled") {
+      const reconciliation = EffectReconciliationPayloadSchema.parse(event.payload);
+      if (state.uncertainEffect === null || reconciliation.boundary !== state.uncertainEffect.boundary) {
+        throw new Error("effect reconciliation boundary contradicts the paused uncertainty");
+      }
+      state.paused = false;
+      state.stopAndAsk = null;
+      state.uncertainEffect = null;
       state.streamVersion = event.streamVersion;
       continue;
     }

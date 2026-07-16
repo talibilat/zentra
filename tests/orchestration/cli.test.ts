@@ -1650,12 +1650,9 @@ local_preparation_only
     expect(existsSync(path.join(testFixture.baseDirectory, "worktrees"))).toBe(false);
   });
 
-  // A signal delivered this early lands while `git worktree add` is still
-  // running. Worktree creation is effectful: Git may have created the branch
-  // or worktree before the interruption, so the task must be left nonterminal
-  // (not "cancelled") for recovery to reconcile real Git state on restart,
-  // instead of a terminal outcome hiding an uncertain effect. See issue 002.
-  it("leaves an interrupted worktree creation nonterminal on SIGINT", async () => {
+  // This signal lands in the pre-effect integration-branch read. A bounded
+  // read cancellation is known and must not be mislabeled as an uncertain write.
+  it("records known pre-effect SIGINT cancellation", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
     const tracePath = path.join(testFixture.baseDirectory, "uncertain.jsonl");
@@ -1671,18 +1668,18 @@ local_preparation_only
     expect(result.stdout).toBe("");
     expect(result.json).toMatchObject({
       command: "task.run",
-      outcome: null,
-      task: { taskId: "task-signal", terminalOutcome: null },
+      outcome: "cancelled",
+      task: { taskId: "task-signal", terminalOutcome: "cancelled" },
     });
     const traceKinds = readFileSync(tracePath, "utf8").trimEnd().split("\n")
       .map((line) => (JSON.parse(line) as { kind: string }).kind);
     expect(traceKinds[0]).toBe("task.created");
-    expect(traceKinds).not.toContain("task.cancelled");
+    expect(traceKinds).toContain("task.cancelled");
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
-  it("leaves an interrupted worktree creation nonterminal on SIGTERM", async () => {
+  it("records known pre-effect SIGTERM cancellation", async () => {
     const testFixture = await fixture();
     const signals = new EventEmitter();
     const pending = invoke(runArguments(testFixture, "task-sigterm"), signals);
@@ -1694,8 +1691,8 @@ local_preparation_only
     expect(result.stdout).toBe("");
     expect(result.json).toMatchObject({
       command: "task.run",
-      outcome: null,
-      task: { taskId: "task-sigterm", terminalOutcome: null },
+      outcome: "cancelled",
+      task: { taskId: "task-sigterm", terminalOutcome: "cancelled" },
     });
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);

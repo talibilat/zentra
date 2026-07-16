@@ -133,6 +133,9 @@ function actorFor(event: StoredEvent): AgentTailActor {
     if (event.type === "milestone.plan_created") return { id: "zentra-planner", role: "planner" };
     return { id: "zentra-orchestrator", role: "orchestrator" };
   }
+  if (event.type === "task.effect_uncertain" || event.type === "task.effect_reconciled") {
+    return { id: "zentra-recovery-controller", role: "recovery" };
+  }
   if (event.type === "task.started" || event.type === "task.writer_completed") {
     return { id: payloadString(event.payload, "workerId") ?? "zentra-worker", role: "worker" };
   }
@@ -184,6 +187,9 @@ function operationName(event: StoredEvent): string {
   if (type.startsWith("capsule.")) return "capsule";
   if (type.startsWith("milestone.")) return "milestone";
   if (type.startsWith("artifact.")) return "artifact";
+  if (type === "task.effect_uncertain" || type === "task.effect_reconciled") {
+    return payloadString(event.payload, "boundary") ?? "reconciliation";
+  }
   if (
     type === "task.writer_completed" ||
     type === "task.started"
@@ -219,6 +225,15 @@ function operationStatus(event: StoredEvent): string {
   if (type === "milestone.cancelled") return "cancelled";
   if (type === "milestone.timed_out") return "timed_out";
   if (type === "milestone.denied") return "denied";
+  if (type === "task.effect_uncertain" || type === "task.commit_observed") return "waiting";
+  if (type === "task.effect_reconciled") return "completed";
+  if (
+    type === "task.integration_observed" &&
+    payloadString(event.payload, "verification") !== "verified"
+  ) return "waiting";
+  if (type === "task.cleanup_observed") {
+    return payloadBoolean(event.payload, "uncertain") ? "waiting" : "failed";
+  }
   if (type === "task.writer_completed" || type === "task.validation_completed") {
     return payloadString(event.payload, "outcome") ?? "failed";
   }
