@@ -1307,7 +1307,7 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   const commitObserved = events.find((event) => event.type === "task.commit_observed");
   if (commitObserved !== undefined) parseEvent(CommitObservedPayloadSchema, commitObserved);
   const integrationObserved = events.find((event) => event.type === "task.integration_observed");
-  const successfulIntegrationObserved = integrationObserved === undefined
+  const successfulObservation = integrationObserved === undefined
     ? null
     : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
   if (integrationObserved !== undefined) {
@@ -1374,9 +1374,6 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   ) {
     throw new Error("validation-start diff does not equal approved review diff");
   }
-  const successfulObservation = integrationObserved === undefined
-    ? null
-    : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
   if (successfulObservation?.success) {
     if (
       integrationStarted === null ||
@@ -1413,10 +1410,10 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   }
   if (cleanupStarted !== null) {
     if (
-      !successfulIntegrationObserved?.success ||
+      !successfulObservation?.success ||
       indexOf("task.cleanup_started") < indexOf("task.integration_observed") ||
-      cleanupStarted.sourceCommit !== successfulIntegrationObserved.data.receipt.sourceCommit ||
-      cleanupStarted.resultCommit !== successfulIntegrationObserved.data.receipt.resultCommit ||
+      cleanupStarted.sourceCommit !== successfulObservation.data.receipt.sourceCommit ||
+      cleanupStarted.resultCommit !== successfulObservation.data.receipt.resultCommit ||
       cleanupStarted.branch !== `ticket/${taskId}`
     ) {
       throw new Error("cleanup start contradicts verified integration evidence");
