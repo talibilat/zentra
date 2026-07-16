@@ -375,7 +375,7 @@ function createProgram(
       if (firstModel === undefined) throw new CliFailure("INVALID_MODEL_SHEET");
       const milestoneId = milestoneIdFor(project.projectId, options.task);
       const taskId = `${milestoneId}-task-1`;
-      const ownedPath = security.allowedFileScopes[0] ?? "src/**";
+      const ownedPath = security.allowedFileScopes[0]!;
       const plan = {
         milestoneId,
         projectId: project.projectId,
