@@ -268,7 +268,7 @@ export function projectArtifacts(
     ) {
       throw new Error("artifact replay encountered an event after task terminalization");
     }
-    if (event.type.startsWith("task.") && isTerminalEvent(event.type)) terminal = true;
+    if (isTerminalEvent(event.type)) terminal = true;
 
     if (event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE) {
       artifactMode = true;
