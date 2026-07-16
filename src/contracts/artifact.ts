@@ -403,20 +403,18 @@ function validateLifecycleArtifactReference(
   if (event.type === "task.review_requested" && !("validation" in payload)) {
     throw new Error("task.review_requested payload must carry validation evidence");
   }
-  if (event.type === "task.review_requested" || "validation" in payload) {
-    if ("validation" in payload) {
-      const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
-      if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory validation evidence");
+  if ("validation" in payload) {
+    const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
+    if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory validation evidence");
+    }
+    if (event.type === "task.review_requested") {
+      const report = ValidationEvidenceSchema.parse(payload.validation);
+      if (report.name !== "focused") {
+        throw new Error("task.review_requested requires successful focused validation evidence");
       }
-      if (event.type === "task.review_requested") {
-        const report = ValidationEvidenceSchema.parse(payload.validation);
-        if (report.name !== "focused") {
-          throw new Error("task.review_requested requires successful focused validation evidence");
-        }
-        if (report.outcome !== "completed" || report.exitCode !== 0) {
-          throw new Error("task.review_requested requires successful validation evidence");
-        }
+      if (report.outcome !== "completed" || report.exitCode !== 0) {
+        throw new Error("task.review_requested requires successful validation evidence");
       }
     }
   }
