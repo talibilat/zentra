@@ -286,18 +286,10 @@ function buildResult(
 
   switch (decision.kind) {
     case "timed_out":
+    case "cancelled":
       // Discard any output parsed after the kill decision; no stale worker events.
       return {
-        outcome: "timed_out",
-        exitCode: null,
-        events: [],
-        stdout: "",
-        rawStdout: "",
-        stderr: "",
-      };
-    case "cancelled":
-      return {
-        outcome: "cancelled",
+        outcome: decision.kind,
         exitCode: null,
         events: [],
         stdout: "",
