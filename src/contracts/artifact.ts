@@ -424,18 +424,16 @@ function validateLifecycleArtifactReference(
   ) {
     throw new Error(`${event.type} payload must carry review evidence`);
   }
-  if (event.type === "task.review_approved" || event.type === "task.integration_started" || "review" in payload) {
-    if ("review" in payload) {
-      const review = requireArtifact(byKind, "review_report", "lifecycle event");
-      if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory review evidence");
-      }
-      if (
-        (event.type === "task.review_approved" || event.type === "task.integration_started") &&
-        !ReviewEvidenceSchema.parse(payload.review).approved
-      ) {
-        throw new Error(`${event.type} requires approved review evidence`);
-      }
+  if ("review" in payload) {
+    const review = requireArtifact(byKind, "review_report", "lifecycle event");
+    if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory review evidence");
+    }
+    if (
+      (event.type === "task.review_approved" || event.type === "task.integration_started") &&
+      !ReviewEvidenceSchema.parse(payload.review).approved
+    ) {
+      throw new Error(`${event.type} requires approved review evidence`);
     }
   }
   if (event.type === "task.integration_prepared" && !("receipt" in payload)) {
