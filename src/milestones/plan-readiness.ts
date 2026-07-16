@@ -26,7 +26,11 @@ export function assessMilestonePlanReadiness(
 ): PlanReadinessDecision {
   const parsed = MilestonePlanSchema.safeParse(input.plan);
   if (!parsed.success) {
-    return blocked("plan_not_ready", "Milestone plan is not structurally ready.");
+    return Object.freeze({
+      status: "blocked",
+      reason: "plan_not_ready",
+      stopAndAsk: stopAndAsk("plan_not_ready", "Milestone plan is not structurally ready."),
+    });
   }
 
   const scopeDecision = assessFileScope(parsed.data, input.security);
@@ -92,14 +96,6 @@ function assessAuthority(
     }
   }
   return null;
-}
-
-function blocked(reason: StopAndAskReason, message: string): PlanReadinessDecision {
-  return Object.freeze({
-    status: "blocked",
-    reason,
-    stopAndAsk: stopAndAsk(reason, message),
-  });
 }
 
 function requiresApproval(reason: StopAndAskReason, message: string): PlanReadinessDecision {
