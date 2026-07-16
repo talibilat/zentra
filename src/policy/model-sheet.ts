@@ -293,7 +293,6 @@ function parseFallbackOrder(value: string | undefined): string[] {
   if (value === "none") return [];
   const fallbacks = value.split(",").map((token) => token.trim()).filter(Boolean);
   if (
-    fallbacks.length === 0 ||
     fallbacks.length !== value.split(",").length ||
     fallbacks.some((fallback) => !SAFE_ID.test(fallback)) ||
     new Set(fallbacks).size !== fallbacks.length
