@@ -631,7 +631,7 @@ function createProgram(
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
-          const taskView = await system.execution(workerFixture.path, reviewer.adapter).orchestrator.run({
+          const taskView = await system.execution(workerFixture.path, reviewer).orchestrator.run({
             taskId: options.taskId,
             projectId: projectConfig.projectId,
             title: options.title,
@@ -1050,16 +1050,12 @@ function attestedWorkerFixture(anchor?: string | URL): BundledFixture {
   }
 }
 
-async function configuredReviewer(): Promise<{
-  readonly adapter: ReviewerAdapter;
-}> {
+async function configuredReviewer(): Promise<ReviewerAdapter> {
   await assertApprovedValidationExecutableIdentity(APPROVED_VALIDATION_EXECUTABLE);
-  return {
-    adapter: new ProcessReviewerAdapter({
-      executable: APPROVED_VALIDATION_EXECUTABLE,
-      args: ["--input-type=module", "--eval", FIXED_REVIEWER_SOURCE],
-    }),
-  };
+  return new ProcessReviewerAdapter({
+    executable: APPROVED_VALIDATION_EXECUTABLE,
+    args: ["--input-type=module", "--eval", FIXED_REVIEWER_SOURCE],
+  });
 }
 
 function assertSafeRootFile(candidate: string): void {
