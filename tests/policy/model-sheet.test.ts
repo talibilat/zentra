@@ -87,8 +87,16 @@ describe("model sheet parser", () => {
       "MODEL_SHEET_INVALID_ROLE",
     );
     expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("planner,researcher", "")),
+      "MODEL_SHEET_INVALID_ROLE",
+    );
+    expectErrorCode(
       () => parseModelSheetMarkdown(validSheet.replace("planner,researcher", "planner,planner")),
       "MODEL_SHEET_INVALID_ROLE",
+    );
+    expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("planning,research", "")),
+      "MODEL_SHEET_INVALID_SPECIALTY",
     );
     expectErrorCode(
       () => parseModelSheetMarkdown(validSheet.replace("opencode |", "unknown |")),
@@ -131,6 +139,10 @@ describe("model sheet parser", () => {
     );
     expectErrorCode(
       () => parseModelSheetMarkdown(validSheet.replace("opencode-general | 8/10", "opencode-general, | 8/10")),
+      "MODEL_SHEET_INVALID_FALLBACK",
+    );
+    expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("opencode-general | 8/10", " | 8/10")),
       "MODEL_SHEET_INVALID_FALLBACK",
     );
   });

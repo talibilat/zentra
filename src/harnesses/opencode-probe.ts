@@ -1,5 +1,4 @@
 import { realpathSync, statSync } from "node:fs";
-import path from "node:path";
 
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
@@ -80,12 +79,11 @@ export class OpenCodeProbe {
       timeoutMs: request.timeoutMs,
     }, signal, "validation");
 
-    return reportFromWorkerResult(request, model, executable, canonicalCwd, result, startedAt);
+    return reportFromWorkerResult(model, executable, canonicalCwd, result, startedAt);
   }
 }
 
 function reportFromWorkerResult(
-  request: OpenCodeProbeRequest,
   model: ModelCapability,
   executable: string,
   cwd: string,
@@ -103,7 +101,7 @@ function reportFromWorkerResult(
       executable,
       argv: Object.freeze(["--version"]),
       cwd,
-      version: firstNonemptyLine(result.stdout),
+      version: result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? null,
       startedAt,
       finishedAt: new Date().toISOString(),
     });
@@ -150,7 +148,7 @@ function failure(
 function canonicalDirectory(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
-  if (!path.isAbsolute(candidate) || candidate !== canonical) {
+  if (candidate !== canonical) {
     throw new Error("OpenCode probe cwd must be a canonical absolute path");
   }
   if (!stat.isDirectory()) {
@@ -162,7 +160,7 @@ function canonicalDirectory(candidate: string): string {
 function canonicalExecutable(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
-  if (!path.isAbsolute(candidate) || candidate !== canonical) {
+  if (candidate !== canonical) {
     throw new Error("OpenCode probe executable must be a canonical absolute path");
   }
   if (!stat.isFile() || (stat.mode & 0o111) === 0) {
@@ -172,10 +170,5 @@ function canonicalExecutable(candidate: string): string {
 }
 
 function providerFromModel(model: string): string {
-  const [provider] = model.split("/", 1);
-  return provider ?? model;
-}
-
-function firstNonemptyLine(output: string): string | null {
-  return output.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? null;
+  return model.replace(/\/.*/, "");
 }

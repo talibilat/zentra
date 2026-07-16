@@ -428,7 +428,13 @@ export class WorktreeManager {
     ).stdout.trim();
     await this.runOrThrow(lease.path, ["add", "--", ...normalizedPaths], options);
     if (options.signal?.aborted) {
-      throw new WorkspaceGitTerminationError(signalOutcome(options.signal), "before final commit");
+      throw new WorkspaceGitTerminationError(
+        options.signal.reason instanceof DOMException &&
+            options.signal.reason.name === "TimeoutError"
+          ? "timed_out"
+          : "cancelled",
+        "before final commit",
+      );
     }
     const commitResult = await this.run(lease.path, [
       "-c",
@@ -957,10 +963,4 @@ export class WorktreeManager {
 
 function timeoutOnly(options: GitRunOptions): GitRunOptions {
   return options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs };
-}
-
-function signalOutcome(signal: AbortSignal): "cancelled" | "timed_out" {
-  return signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
-    ? "timed_out"
-    : "cancelled";
 }

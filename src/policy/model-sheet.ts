@@ -127,7 +127,7 @@ export function parseModelSheetMarkdown(markdown: string): ModelSheet {
   if (modelLines === undefined) throw new ModelSheetError("MODEL_SHEET_MISSING_SECTION");
   const models = parseModelsTable(modelLines);
   validateFallbacks(models);
-  return Object.freeze({ models: Object.freeze(models) });
+  return Object.freeze({ models });
 }
 
 export function publicModelSheetSummary(sheet: ModelSheet): PublicModelSheetSummary {
@@ -164,16 +164,12 @@ function parseSections(markdown: string): Map<string, readonly string[]> {
 }
 
 function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] {
-  if (lines.some((line) => !line.startsWith("|"))) {
-    throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
-  }
-  const table = [...lines];
-  if (table.length < 3) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
-  const header = splitRow(table[0]!);
+  if (lines.length < 3) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
+  const header = splitRow(lines[0]!);
   if (JSON.stringify(header) !== JSON.stringify(REQUIRED_COLUMNS)) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   }
-  const separator = splitRow(table[1]!);
+  const separator = splitRow(lines[1]!);
   if (
     separator.length !== REQUIRED_COLUMNS.length ||
     !separator.every((cell) => /^:?-{3,}:?$/.test(cell))
@@ -182,7 +178,7 @@ function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] 
   }
   const models: ModelCapability[] = [];
   const ids = new Set<string>();
-  for (const row of table.slice(2)) {
+  for (const row of lines.slice(2)) {
     const cells = splitRow(row);
     if (cells.length !== REQUIRED_COLUMNS.length) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
     const model = parseModelRow(cells);
@@ -190,7 +186,6 @@ function parseModelsTable(lines: readonly string[]): readonly ModelCapability[] 
     ids.add(model.id);
     models.push(model);
   }
-  if (models.length === 0) throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   return Object.freeze(models);
 }
 
@@ -252,9 +247,10 @@ function parseTokenList(
   allowed: ReadonlySet<string>,
   code: ModelSheetErrorCode,
 ): string[] {
-  if (value === undefined || value === "") throw new ModelSheetError(code);
-  const tokens = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (tokens.length === 0 || tokens.length !== value.split(",").length) {
+  if (value === undefined) throw new ModelSheetError(code);
+  const segments = value.split(",");
+  const tokens = segments.map((token) => token.trim()).filter(Boolean);
+  if (tokens.length !== segments.length) {
     throw new ModelSheetError(code);
   }
   const seen = new Set<string>();
@@ -267,9 +263,10 @@ function parseTokenList(
 }
 
 function parseSpecialties(value: string | undefined): string[] {
-  if (value === undefined || value === "") throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
-  const specialties = value.split(",").map((token) => token.trim()).filter(Boolean);
-  if (specialties.length === 0 || specialties.length !== value.split(",").length) {
+  if (value === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
+  const segments = value.split(",");
+  const specialties = segments.map((token) => token.trim()).filter(Boolean);
+  if (specialties.length !== segments.length) {
     throw new ModelSheetError("MODEL_SHEET_INVALID_SPECIALTY");
   }
   const seen = new Set<string>();
@@ -284,17 +281,17 @@ function parseSpecialties(value: string | undefined): string[] {
 function parsePositiveInteger(value: string | undefined, code: ModelSheetErrorCode): number {
   if (value === undefined || !/^[1-9][0-9]*$/.test(value)) throw new ModelSheetError(code);
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new ModelSheetError(code);
+  if (!Number.isSafeInteger(parsed)) throw new ModelSheetError(code);
   return parsed;
 }
 
 function parseFallbackOrder(value: string | undefined): string[] {
-  if (value === undefined || value === "") throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
+  if (value === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
   if (value === "none") return [];
-  const fallbacks = value.split(",").map((token) => token.trim()).filter(Boolean);
+  const segments = value.split(",");
+  const fallbacks = segments.map((token) => token.trim()).filter(Boolean);
   if (
-    fallbacks.length === 0 ||
-    fallbacks.length !== value.split(",").length ||
+    fallbacks.length !== segments.length ||
     fallbacks.some((fallback) => !SAFE_ID.test(fallback)) ||
     new Set(fallbacks).size !== fallbacks.length
   ) {
@@ -347,9 +344,7 @@ function assertNoFallbackCycles(
     if (visiting.has(model.id)) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
     visiting.add(model.id);
     for (const fallback of model.fallbackOrder) {
-      const fallbackModel = byId.get(fallback);
-      if (fallbackModel === undefined) throw new ModelSheetError("MODEL_SHEET_INVALID_FALLBACK");
-      visit(fallbackModel);
+      visit(byId.get(fallback)!);
     }
     visiting.delete(model.id);
     visited.add(model.id);

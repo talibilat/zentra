@@ -286,18 +286,10 @@ function buildResult(
 
   switch (decision.kind) {
     case "timed_out":
+    case "cancelled":
       // Discard any output parsed after the kill decision; no stale worker events.
       return {
-        outcome: "timed_out",
-        exitCode: null,
-        events: [],
-        stdout: "",
-        rawStdout: "",
-        stderr: "",
-      };
-    case "cancelled":
-      return {
-        outcome: "cancelled",
+        outcome: decision.kind,
         exitCode: null,
         events: [],
         stdout: "",
@@ -311,7 +303,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: output limit of ${maxOutputBytes} bytes exceeded\n`,
+        stderr: appendSupervisorError(stderr, `output limit of ${maxOutputBytes} bytes exceeded`),
       };
     case "spawn_error":
       return {
@@ -320,7 +312,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: ${decision.message}\n`,
+        stderr: appendSupervisorError(stderr, decision.message),
       };
     case "descendant_survived":
       return {
@@ -329,7 +321,7 @@ function buildResult(
         events: [],
         stdout: rawStdout,
         rawStdout,
-        stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}process supervisor: process group survived bounded termination\n`,
+        stderr: appendSupervisorError(stderr, "process group survived bounded termination"),
       };
     case "exit": {
       if (decision.code === 0) {
@@ -397,7 +389,7 @@ function validateProtocolOutput(
     case "validation":
       return undefined;
     case "reviewer":
-      return isReviewDecision(events)
+      return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success
         ? undefined
         : `reviewer protocol requires exactly one valid review decision, received ${events.length}`;
     case "worker":
@@ -420,10 +412,6 @@ function isArtifactReady(events: readonly unknown[]): boolean {
     typeof event["sha256"] === "string" &&
     /^[a-f0-9]{64}$/.test(event["sha256"])
   );
-}
-
-function isReviewDecision(events: readonly unknown[]): boolean {
-  return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

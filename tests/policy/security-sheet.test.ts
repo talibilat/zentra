@@ -141,6 +141,14 @@ describe("security sheet parser", () => {
       "SECURITY_SHEET_INVALID_PATH_SCOPE",
     );
     expectErrorCode(
+      () => parseSecuritySheetMarkdown(sheet.replace("src/**", "/**")),
+      "SECURITY_SHEET_INVALID_PATH_SCOPE",
+    );
+    expectErrorCode(
+      () => parseSecuritySheetMarkdown(sheet.replace("src/**", "")),
+      "SECURITY_SHEET_INVALID_PATH_SCOPE",
+    );
+    expectErrorCode(
       () => parseSecuritySheetMarkdown(sheet.replace(repository, `${repository}/..`)),
       "SECURITY_SHEET_INVALID_REPOSITORY",
     );

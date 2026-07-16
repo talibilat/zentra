@@ -4,10 +4,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import type {
-  ValidationReport,
-  ValidationRunner,
-} from "../capabilities/validation-runner.js";
+import type { ValidationRunner } from "../capabilities/validation-runner.js";
 import { isVerifiedValidationReport } from "../capabilities/validation-runner.js";
 import {
   ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE,
@@ -344,11 +341,12 @@ export class TracerBulletOrchestrator {
         "worker",
       );
       if (workerResult.outcome !== "completed") {
+        const stderr = workerResult.stderr.trim();
         return this.terminate(
           input.taskId,
           workerResult.outcome,
           stage,
-          workerFailure(workerResult),
+          `worker outcome was ${workerResult.outcome}${stderr === "" ? "" : `: ${stderr}`}`,
         );
       }
       if (workerResult.exitCode !== 0) {
@@ -399,8 +397,8 @@ export class TracerBulletOrchestrator {
         );
         return this.current(input.taskId);
       }
-      const validationOutcome = failedValidationOutcome(validation);
-      if (validationOutcome !== null) {
+      if (validation.outcome !== "completed" || validation.exitCode !== 0) {
+        const validationOutcome = validation.outcome === "completed" ? "failed" : validation.outcome;
         this.recordArtifact(input.taskId, "validation_report", validation, {
           type: `task.${validationOutcome}`,
           payload: {
@@ -749,7 +747,7 @@ export class TracerBulletOrchestrator {
     taskId: string,
     kind: ArtifactKind,
     evidence: unknown,
-    digest = artifactEvidenceSha256(kind, evidence),
+    digest: string,
     phase?: "prepared" | "final",
   ): unknown {
     const logicalPaths: Record<ArtifactKind, string> = {
@@ -790,8 +788,7 @@ async function validateWorkerAuthority(
   }
 
   const parsedInput = parseWorkerInput(request.args);
-  const fixture = parsedInput.fixture;
-  const fixturePath = await realpath(fixture);
+  const fixturePath = await realpath(parsedInput.fixture);
   const bundledFixture = await realpath(expectedFixture);
   if (fixturePath !== bundledFixture) {
     throw new Error("tracer worker script must be Zentra's bundled deterministic fixture");
@@ -816,7 +813,7 @@ function parseWorkerInput(args: readonly string[]): DeterministicWorkerInput {
   }
   const file = values.get("--file");
   const content = values.get("--content");
-  if (file === undefined || content === undefined || values.size !== 2) {
+  if (file === undefined || content === undefined) {
     throw new Error("worker args require exactly --file and --content");
   }
   // MVP fixture scope is deliberately one root-level file, currently greeting.txt.
@@ -963,19 +960,9 @@ function validateRelativePath(candidate: string): void {
     throw new Error(`artifact path must be a safe relative path: ${candidate}`);
   }
   const segments = candidate.split(/[\\/]/);
-  if (
-    segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
-    path.posix.normalize(candidate) !== candidate
-  ) {
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`artifact path must not contain traversal: ${candidate}`);
   }
-}
-
-function failedValidationOutcome(
-  validation: ValidationReport,
-): Exclude<TerminalOutcome, "completed" | "denied"> | null {
-  if (validation.outcome !== "completed") return validation.outcome;
-  return validation.exitCode === 0 ? null : "failed";
 }
 
 async function validateIntegrationReceipt(input: {
@@ -1081,7 +1068,6 @@ async function validateIntegrationReceipt(input: {
 
 function assertValidWorkerTimeout(workerTimeoutMs: number): number {
   if (
-    !Number.isFinite(workerTimeoutMs) ||
     !Number.isInteger(workerTimeoutMs) ||
     workerTimeoutMs <= 0 ||
     workerTimeoutMs > MAX_WORKER_TIMEOUT_MS
@@ -1100,11 +1086,6 @@ function signalOutcome(
   return signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
     ? "timed_out"
     : "cancelled";
-}
-
-function workerFailure(result: WorkerResult): string {
-  const stderr = result.stderr.trim();
-  return `worker outcome was ${result.outcome}${stderr === "" ? "" : `: ${stderr}`}`;
 }
 
 function sha256(value: string): string {

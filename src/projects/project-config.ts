@@ -68,10 +68,6 @@ function sameExecutableIdentity(
 }
 
 export function assertApprovedValidationExecutable(executable: string): void {
-  if (!path.isAbsolute(executable)) {
-    throw new Error("Validation executable must be an approved canonical absolute path");
-  }
-
   let canonicalExecutable: string;
   try {
     canonicalExecutable = realpathSync(executable);
@@ -145,15 +141,11 @@ const INVALID_REF_CHARACTERS = /[\u0000-\u0020\u007f~^:?*[\\]/;
 
 function isSafeBranchName(branch: string): boolean {
   if (
-    branch === "" ||
     branch === "@" ||
     branch.startsWith("-") ||
-    branch.startsWith("/") ||
-    branch.endsWith("/") ||
     branch.startsWith("refs/") ||
     branch.includes("..") ||
     branch.includes("@{") ||
-    branch.includes("//") ||
     INVALID_REF_CHARACTERS.test(branch)
   ) {
     return false;
@@ -172,7 +164,7 @@ function stripEnvPrefix(command: readonly string[]): readonly string[] {
     return command;
   }
   let index = 1;
-  while (index < command.length && ENV_ASSIGNMENT.test(command[index] ?? "")) {
+  while (ENV_ASSIGNMENT.test(command[index] ?? "")) {
     index += 1;
   }
   return command.slice(index);

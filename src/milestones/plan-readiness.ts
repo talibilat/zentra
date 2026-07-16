@@ -2,7 +2,6 @@ import {
   MilestonePlanSchema,
   StopAndAskStateSchema,
   type MilestonePlan,
-  type PlannedTask,
   type StopAndAskReason,
   type StopAndAskState,
 } from "../contracts/milestone.js";
@@ -26,7 +25,11 @@ export function assessMilestonePlanReadiness(
 ): PlanReadinessDecision {
   const parsed = MilestonePlanSchema.safeParse(input.plan);
   if (!parsed.success) {
-    return blocked("plan_not_ready", "Milestone plan is not structurally ready.");
+    return Object.freeze({
+      status: "blocked",
+      reason: "plan_not_ready",
+      stopAndAsk: stopAndAsk("plan_not_ready", "Milestone plan is not structurally ready."),
+    });
   }
 
   const scopeDecision = assessFileScope(parsed.data, input.security);
@@ -44,13 +47,13 @@ function assessFileScope(
 ): PlanReadinessDecision | null {
   for (const task of plan.tasks) {
     for (const ownedPath of task.ownedPaths) {
-      if (!isAllowedPath(ownedPath, security.allowedFileScopes)) {
+      if (!security.allowedFileScopes.some((scope) => pathMatchesScope(ownedPath, scope))) {
         return requiresApproval(
           "forbidden_file_scope",
           `Planned task ${task.taskId} owns ${ownedPath}, which is outside allowed file scope.`,
         );
       }
-      if (isForbiddenPath(ownedPath, security.forbiddenPaths)) {
+      if (security.forbiddenPaths.some((scope) => pathMatchesScope(ownedPath, scope))) {
         return requiresApproval(
           "forbidden_file_scope",
           `Planned task ${task.taskId} owns ${ownedPath}, which overlaps forbidden file scope.`,
@@ -94,14 +97,6 @@ function assessAuthority(
   return null;
 }
 
-function blocked(reason: StopAndAskReason, message: string): PlanReadinessDecision {
-  return Object.freeze({
-    status: "blocked",
-    reason,
-    stopAndAsk: stopAndAsk(reason, message),
-  });
-}
-
 function requiresApproval(reason: StopAndAskReason, message: string): PlanReadinessDecision {
   return Object.freeze({
     status: "requires_approval",
@@ -119,32 +114,10 @@ function stopAndAsk(reason: StopAndAskReason, message: string): StopAndAskState 
   });
 }
 
-function isAllowedPath(path: string, allowedScopes: readonly string[]): boolean {
-  return allowedScopes.some((scope) => pathMatchesScope(path, scope));
-}
-
-function isForbiddenPath(path: string, forbiddenScopes: readonly string[]): boolean {
-  return forbiddenScopes.some((scope) => pathMatchesScope(path, scope));
-}
-
 function pathMatchesScope(candidate: string, scope: string): boolean {
   if (scope.endsWith("/**")) {
     const prefix = scope.slice(0, -3);
     return candidate === prefix || candidate.startsWith(`${prefix}/`);
   }
   return candidate === scope;
-}
-
-export function assertMilestonePlanReady(input: PlanReadinessInput): MilestonePlan {
-  const parsed = MilestonePlanSchema.safeParse(input.plan);
-  if (!parsed.success) throw new Error("Milestone plan is not structurally ready");
-  const decision = assessMilestonePlanReadiness(input);
-  if (decision.status !== "executable") {
-    throw new Error(`Milestone plan is not executable: ${decision.reason}`);
-  }
-  return parsed.data;
-}
-
-export function plannedTaskRequiresReview(task: PlannedTask): boolean {
-  return task.risk.requiresReview;
 }

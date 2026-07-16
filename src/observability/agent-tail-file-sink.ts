@@ -17,7 +17,7 @@ import {
 } from "./agent-tail.js";
 
 export class AgentTailJsonlFileSink {
-  private readonly eventIds = new Set<string>();
+  private eventIds = new Set<string>();
   private lastGlobalPosition = -1;
   private closed = false;
   private liveStreamFailed = false;
@@ -40,7 +40,11 @@ export class AgentTailJsonlFileSink {
         0o600,
       );
     } catch (error) {
-      if (isFileExistsError(error)) {
+      if (
+        error instanceof Error && "code" in error &&
+        ((error as NodeJS.ErrnoException).code === "EEXIST" ||
+          (error as NodeJS.ErrnoException).code === "ELOOP")
+      ) {
         throw new Error("Agent Tail trace path must not already exist");
       }
       throw error;
@@ -83,8 +87,7 @@ export class AgentTailJsonlFileSink {
 
     for (const line of lines) writeAll(this.descriptor, line);
     if (lines.length > 0) fsyncSync(this.descriptor);
-    this.eventIds.clear();
-    for (const eventId of pendingIds) this.eventIds.add(eventId);
+    this.eventIds = pendingIds;
     this.lastGlobalPosition = pendingPosition;
 
     if (this.liveWriter !== undefined && !this.liveStreamFailed) {
@@ -117,7 +120,7 @@ export function assertSafeAgentTailJsonlPath(trustedRoot: string, tracePath: str
     throw new Error("Agent Tail trace path contains forbidden characters");
   }
 
-  assertSafeDirectory(trustedRoot, trustedRoot);
+  assertSafeDirectory(trustedRoot);
   const relative = path.relative(trustedRoot, tracePath);
   if (
     relative.length === 0 ||
@@ -134,13 +137,15 @@ export function assertSafeAgentTailJsonlPath(trustedRoot: string, tracePath: str
   try {
     lstatSync(tracePath);
   } catch (error) {
-    if (isMissingFileError(error)) return;
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
     throw error;
   }
   throw new Error("Agent Tail trace path must not already exist");
 }
 
-function assertSafeDirectory(directory: string, trustedRoot: string): void {
+function assertSafeDirectory(directory: string): void {
   let stat;
   try {
     stat = lstatSync(directory);
@@ -157,19 +162,6 @@ function assertSafeDirectory(directory: string, trustedRoot: string): void {
   if (canonical !== directory) {
     throw new Error("Agent Tail trace path must not contain symbolic links");
   }
-  const relative = path.relative(trustedRoot, canonical);
-  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
-    throw new Error("Agent Tail trace path must remain inside the trusted root");
-  }
-}
-
-function isFileExistsError(error: unknown): boolean {
-  return error instanceof Error && "code" in error &&
-    ((error as NodeJS.ErrnoException).code === "EEXIST" || (error as NodeJS.ErrnoException).code === "ELOOP");
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function writeAll(descriptor: number, bytes: Buffer): void {

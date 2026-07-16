@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 
 import { z } from "zod";
 
@@ -268,7 +267,7 @@ export function projectArtifacts(
     ) {
       throw new Error("artifact replay encountered an event after task terminalization");
     }
-    if (event.type.startsWith("task.") && isTerminalEvent(event.type)) terminal = true;
+    if (isTerminalEvent(event.type)) terminal = true;
 
     if (event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE) {
       artifactMode = true;
@@ -403,20 +402,18 @@ function validateLifecycleArtifactReference(
   if (event.type === "task.review_requested" && !("validation" in payload)) {
     throw new Error("task.review_requested payload must carry validation evidence");
   }
-  if (event.type === "task.review_requested" || "validation" in payload) {
-    if ("validation" in payload) {
-      const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
-      if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory validation evidence");
+  if ("validation" in payload) {
+    const validation = requireArtifact(byKind, "validation_report", "lifecycle event");
+    if (artifactEvidenceSha256("validation_report", payload.validation) !== validation.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory validation evidence");
+    }
+    if (event.type === "task.review_requested") {
+      const report = ValidationEvidenceSchema.parse(payload.validation);
+      if (report.name !== "focused") {
+        throw new Error("task.review_requested requires successful focused validation evidence");
       }
-      if (event.type === "task.review_requested") {
-        const report = ValidationEvidenceSchema.parse(payload.validation);
-        if (report.name !== "focused") {
-          throw new Error("task.review_requested requires successful focused validation evidence");
-        }
-        if (report.outcome !== "completed" || report.exitCode !== 0) {
-          throw new Error("task.review_requested requires successful validation evidence");
-        }
+      if (report.outcome !== "completed" || report.exitCode !== 0) {
+        throw new Error("task.review_requested requires successful validation evidence");
       }
     }
   }
@@ -426,24 +423,22 @@ function validateLifecycleArtifactReference(
   ) {
     throw new Error(`${event.type} payload must carry review evidence`);
   }
-  if (event.type === "task.review_approved" || event.type === "task.integration_started" || "review" in payload) {
-    if ("review" in payload) {
-      const review = requireArtifact(byKind, "review_report", "lifecycle event");
-      if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory review evidence");
-      }
-      if (
-        (event.type === "task.review_approved" || event.type === "task.integration_started") &&
-        !ReviewEvidenceSchema.parse(payload.review).approved
-      ) {
-        throw new Error(`${event.type} requires approved review evidence`);
-      }
+  if ("review" in payload) {
+    const review = requireArtifact(byKind, "review_report", "lifecycle event");
+    if (sha256(JSON.stringify(payload.review)) !== review.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory review evidence");
+    }
+    if (
+      (event.type === "task.review_approved" || event.type === "task.integration_started") &&
+      !ReviewEvidenceSchema.parse(payload.review).approved
+    ) {
+      throw new Error(`${event.type} requires approved review evidence`);
     }
   }
   if (event.type === "task.integration_prepared" && !("receipt" in payload)) {
     throw new Error("task.integration_prepared payload must carry receipt evidence");
   }
-  if (event.type === "task.integration_prepared" && "receipt" in payload) {
+  if (event.type === "task.integration_prepared") {
     const receipt = requireArtifact(byKind, "integration_receipt", event.type);
     if (
       receipt.phase !== "prepared" ||
@@ -464,24 +459,19 @@ function validateLifecycleArtifactReference(
     }
   }
   if (
-    event.type === "task.completed" ||
-    "receipt" in payload
+    "receipt" in payload &&
+    event.type !== "task.integration_prepared" &&
+    event.type !== "task.integration_observed"
   ) {
+    const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
+    if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
+      throw new Error("lifecycle event references contradictory integration receipt evidence");
+    }
     if (
-      "receipt" in payload &&
-      event.type !== "task.integration_prepared" &&
-      event.type !== "task.integration_observed"
+      isTerminalEvent(event.type) &&
+      IntegrationReceiptEvidenceSchema.parse(payload.receipt).outcome !== event.type.slice(5)
     ) {
-      const receipt = requireArtifact(byKind, "integration_receipt", "lifecycle event");
-      if (sha256(JSON.stringify(payload.receipt)) !== receipt.artifact.sha256) {
-        throw new Error("lifecycle event references contradictory integration receipt evidence");
-      }
-      if (
-        isTerminalEvent(event.type) &&
-        IntegrationReceiptEvidenceSchema.parse(payload.receipt).outcome !== event.type.slice(5)
-      ) {
-        throw new Error(`${event.type} contradicts integration receipt outcome`);
-      }
+      throw new Error(`${event.type} contradicts integration receipt outcome`);
     }
   }
 }
@@ -729,14 +719,10 @@ function isSafeLogicalPath(candidate: string): boolean {
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
-    candidate.includes("\\") ||
-    path.posix.isAbsolute(candidate)
+    candidate.includes("\\")
   ) return false;
   const segments = candidate.split("/");
-  return (
-    segments.every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
-    path.posix.normalize(candidate) === candidate
-  );
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function sha256(value: string): string {

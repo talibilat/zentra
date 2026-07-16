@@ -1,5 +1,4 @@
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
-import path from "node:path";
 
 const MAX_SECURITY_SHEET_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 4096;
@@ -149,7 +148,10 @@ export function parseSecuritySheetMarkdown(markdown: string): SecuritySheet {
     allowedFileScopes: Object.freeze(allowedFileScopes),
     forbiddenPaths: Object.freeze(forbiddenPaths),
     network: Object.freeze(parseNetwork(sections.get("Network") ?? [])),
-    secretHandling: Object.freeze(parseSecretHandling(required(sections, "Secret Handling"))),
+    secretHandling: Object.freeze(unique(bulletValues(
+      required(sections, "Secret Handling"),
+      "SECURITY_SHEET_MISSING_SECTION",
+    ))),
     approvalRequiredOperations: Object.freeze(parseEnumList(
       required(sections, "Approval Required Operations"),
       APPROVAL_OPERATIONS,
@@ -233,8 +235,6 @@ function parseAllowedRepositories(lines: readonly string[]): string[] {
       throw new SecuritySheetError("SECURITY_SHEET_INVALID_REPOSITORY");
     }
     if (
-      !path.isAbsolute(repository) ||
-      path.normalize(repository) !== repository ||
       repository !== canonicalRepository ||
       repository.includes("\0") ||
       repository.includes("\n")
@@ -250,10 +250,6 @@ function parsePathScopes(lines: readonly string[]): string[] {
     if (!isSafeLogicalGlob(scope)) throw new SecuritySheetError("SECURITY_SHEET_INVALID_PATH_SCOPE");
     return scope;
   }));
-}
-
-function parseSecretHandling(lines: readonly string[]): string[] {
-  return unique(bulletValues(lines, "SECURITY_SHEET_MISSING_SECTION"));
 }
 
 function parseEnumList(
@@ -277,7 +273,6 @@ function parseReleaseBoundary(lines: readonly string[]): string {
 }
 
 function parseNetwork(lines: readonly string[]): NetworkPolicy {
-  if (lines.length === 0) return { default: "denied", allowedDestinations: [] };
   let defaultPolicy: string | null = null;
   let readingDestinations = false;
   const destinations: string[] = [];
@@ -341,27 +336,23 @@ function scopesOverlap(first: string, second: string): boolean {
 }
 
 function scopeBase(scope: string): string {
-  return scope.replace(/\/\*\*$/, "").replace(/\/\*$/, "");
+  return scope.replace(/\/\*\*$/, "");
 }
 
 function isSafeLogicalGlob(candidate: string): boolean {
   if (
-    candidate === "" ||
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
-    candidate.includes("\\") ||
-    path.posix.isAbsolute(candidate)
+    candidate.includes("\\")
   ) return false;
   if (candidate.includes("*")) {
     if (!candidate.endsWith("/**") || candidate.slice(0, -3).includes("*")) return false;
-    if (candidate.slice(0, -3) === "") return false;
   }
   const withoutTrailingGlob = candidate.endsWith("/**") ? candidate.slice(0, -3) : candidate;
-  if (/[*?\[\]{}()!+@]/.test(withoutTrailingGlob)) return false;
+  if (/[?\[\]{}()!+@]/.test(withoutTrailingGlob)) return false;
   const segments = candidate.split("/");
-  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
-    path.posix.normalize(candidate) === candidate;
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function unique(values: readonly string[]): string[] {

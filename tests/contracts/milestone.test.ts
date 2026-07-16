@@ -103,12 +103,12 @@ describe("Milestone contracts", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects unsafe ownership paths", () => {
+  it.each(["../outside", "/absolute/path"])("rejects unsafe ownership path %j", (ownedPath) => {
     const result = MilestonePlanSchema.safeParse({
       milestoneId: "milestone-unsafe-ownership",
       projectId: "zentra",
       goal: "Reject unsafe ownership.",
-      tasks: [{ ...baseTask, ownedPaths: ["../outside"] }],
+      tasks: [{ ...baseTask, ownedPaths: [ownedPath] }],
     });
 
     expect(result.success).toBe(false);

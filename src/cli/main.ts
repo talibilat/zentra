@@ -320,20 +320,8 @@ function createProgram(
     .requiredOption("--model-sheet <path>", "Markdown model sheet")
     .requiredOption("--security-sheet <path>", "Markdown security sheet")
     .action((options: PolicyPreviewOptions) => {
-      let model;
-      try {
-        model = loadModelSheet(options.modelSheet);
-      } catch (error) {
-        if (error instanceof ModelSheetError) throw new CliFailure("INVALID_MODEL_SHEET");
-        throw error;
-      }
-      let security;
-      try {
-        security = loadSecuritySheet(options.securitySheet);
-      } catch (error) {
-        if (error instanceof SecuritySheetError) throw new CliFailure("INVALID_SECURITY_SHEET");
-        throw error;
-      }
+      const model = loadModelSheetForCli(options.modelSheet);
+      const security = loadSecuritySheetForCli(options.securitySheet);
       setResult({
         exitCode: 0,
         value: {
@@ -373,9 +361,9 @@ function createProgram(
       }
       const firstModel = model.models.find((candidate) => candidate.roles.includes("planner"));
       if (firstModel === undefined) throw new CliFailure("INVALID_MODEL_SHEET");
-      const milestoneId = milestoneIdFor(project.projectId, options.task);
+      const milestoneId = `milestone-${createHash("sha256").update(`${project.projectId}\0${options.task}`, "utf8").digest("hex").slice(0, 12)}`;
       const taskId = `${milestoneId}-task-1`;
-      const ownedPath = security.allowedFileScopes[0] ?? "src/**";
+      const ownedPath = security.allowedFileScopes[0]!;
       const plan = {
         milestoneId,
         projectId: project.projectId,
@@ -447,7 +435,9 @@ function createProgram(
         tracePath: options.agentTailJsonl,
         stopAndAskBoundaries: security.stopAndAskConditions,
       } satisfies Record<string, unknown>;
-      assertOperationalJsonFits(previewValue);
+      if (Buffer.byteLength(serializeJson(previewValue), "utf8") > MAX_OPERATIONAL_JSON_BYTES) {
+        throw new CliFailure("OUTPUT_TOO_LARGE");
+      }
       const trace = prepareAgentTailTrace(
         options.database,
         options.agentTailJsonl,
@@ -573,7 +563,7 @@ function createProgram(
     .requiredOption("--source-commit <oid>", "exact source commit")
     .requiredOption("--expected-old-oid <oid>", "exact expected old remote commit")
     .requiredOption("--source-repository <path>", "canonical source repository path")
-    .action(async (options: GitHubPushOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.push({ ...options, sourceRepositoryPath: options.sourceRepository, force: false, signal })));
+    .action(async (options: GitHubPushOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.push({ ...options, sourceRepositoryPath: options.sourceRepository, force: false, signal })));
   addGitHubBase(github.command("create-pr").description("Dispatch one exact pull request; completion requires later reconciliation."))
     .requiredOption("--push-grant-id <id>", "completed prerequisite push grant identity")
     .requiredOption("--repository <owner/name>", "exact GitHub repository")
@@ -583,11 +573,11 @@ function createProgram(
     .requiredOption("--title <title>", "pull request title")
     .requiredOption("--body <body>", "pull request body")
     .option("--draft", "create an exact draft pull request", false)
-    .action(async (options: GitHubPrOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.createPullRequest({ ...options, title: options.title!, body: options.body!, draft: options.draft === true, signal })));
+    .action(async (options: GitHubPrOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.createPullRequest({ ...options, title: options.title!, body: options.body!, draft: options.draft === true, signal })));
   addGitHubBase(github.command("reconcile-push").description("Read the exact remote ref for an uncertain push."))
-    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
   addGitHubBase(github.command("reconcile-pr").description("Read exact pull-request state for an uncertain creation."))
-    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, signal, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
+    .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
 
   const task = program.command("task").description("Run and inspect deterministic tasks.");
   task
@@ -613,7 +603,9 @@ function createProgram(
       assertSafeTaskId(options.taskId);
       assertSafeTitle(options.title);
       assertSafeRootFile(options.file);
-      assertSafeContent(options.content);
+      if (Buffer.byteLength(options.content, "utf8") > MAX_CONTENT_BYTES) {
+        throw new CliFailure("INVALID_CONTENT");
+      }
       const reviewPolicyTask = reviewPolicyTaskFromOptions(options);
       const configs = loadProjects(options.config);
       if (configs.length !== 1) {
@@ -627,10 +619,7 @@ function createProgram(
       });
       const reviewer = await configuredReviewer();
       const reviewPolicySecurity = loadSecuritySheetForCli(options.securitySheet);
-      if (
-        reviewPolicySecurity !== undefined &&
-        !reviewPolicySecurity.allowedRepositories.includes(realpathSync.native(projectConfig.repositoryPath))
-      ) {
+      if (!reviewPolicySecurity.allowedRepositories.includes(realpathSync.native(projectConfig.repositoryPath))) {
         throw new CliFailure("INVALID_SECURITY_SHEET");
       }
       if (options.agentTailStream === true && options.agentTailJsonl === undefined) {
@@ -646,7 +635,7 @@ function createProgram(
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
         const result = await withSystem(options.database, configs, "read-write", async (system) => {
-          const taskView = await system.execution(workerFixture.path, reviewer.adapter).orchestrator.run({
+          const taskView = await system.execution(workerFixture.path, reviewer).orchestrator.run({
             taskId: options.taskId,
             projectId: projectConfig.projectId,
             title: options.title,
@@ -719,7 +708,6 @@ function createProgram(
 
 async function runGitHubBrokerCli(
   options: GitHubBaseOptions,
-  signal: AbortSignal,
   setResult: (result: CommandResult) => void,
   operation: (broker: GitHubEffectBroker) => Promise<{
     readonly outcome: string;
@@ -896,10 +884,6 @@ function loadSecuritySheetForCli(sheetPath: string) {
   }
 }
 
-function milestoneIdFor(projectId: string, task: string): string {
-  return `milestone-${createHash("sha256").update(`${projectId}\0${task}`, "utf8").digest("hex").slice(0, 12)}`;
-}
-
 interface AgentTailTraceDestination {
   readonly trustedRoot: string;
   readonly canonicalPath: string;
@@ -971,7 +955,7 @@ class LiveStdoutOutput {
     let completion: Promise<void>;
     completion = new Promise((resolve) => {
       process.stdout.write(value, (error) => {
-        if (error !== null && error !== undefined) this.failed = true;
+        if (error != null) this.failed = true;
         this.pendingBytes -= bytes;
         this.pending.delete(completion);
         resolve();
@@ -1020,12 +1004,6 @@ async function waitForPending(
   return completed;
 }
 
-function assertOperationalJsonFits(value: Record<string, unknown>): void {
-  if (Buffer.byteLength(serializeJson(value), "utf8") > MAX_OPERATIONAL_JSON_BYTES) {
-    throw new CliFailure("OUTPUT_TOO_LARGE");
-  }
-}
-
 function deniedCapabilities(security: ReturnType<typeof loadSecuritySheet>): readonly string[] {
   const denied = ["general_shell", "raw_parent_secrets"];
   if (security.network.default === "denied") denied.push("network_by_default");
@@ -1066,16 +1044,12 @@ function attestedWorkerFixture(anchor?: string | URL): BundledFixture {
   }
 }
 
-async function configuredReviewer(): Promise<{
-  readonly adapter: ReviewerAdapter;
-}> {
+async function configuredReviewer(): Promise<ReviewerAdapter> {
   await assertApprovedValidationExecutableIdentity(APPROVED_VALIDATION_EXECUTABLE);
-  return {
-    adapter: new ProcessReviewerAdapter({
-      executable: APPROVED_VALIDATION_EXECUTABLE,
-      args: ["--input-type=module", "--eval", FIXED_REVIEWER_SOURCE],
-    }),
-  };
+  return new ProcessReviewerAdapter({
+    executable: APPROVED_VALIDATION_EXECUTABLE,
+    args: ["--input-type=module", "--eval", FIXED_REVIEWER_SOURCE],
+  });
 }
 
 function assertSafeRootFile(candidate: string): void {
@@ -1086,8 +1060,6 @@ function assertSafeRootFile(candidate: string): void {
     candidate === ".." ||
     candidate.includes("/") ||
     candidate.includes("\\") ||
-    path.isAbsolute(candidate) ||
-    path.win32.isAbsolute(candidate) ||
     /[\u0000-\u001f\u007f]/.test(candidate)
   ) {
     throw new CliFailure("INVALID_FILE");
@@ -1097,12 +1069,6 @@ function assertSafeRootFile(candidate: string): void {
 function assertSafeTitle(title: string): void {
   if (title.length === 0 || Buffer.byteLength(title, "utf8") > MAX_TITLE_BYTES) {
     throw new CliFailure("INVALID_TITLE");
-  }
-}
-
-function assertSafeContent(content: string): void {
-  if (Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES) {
-    throw new CliFailure("INVALID_CONTENT");
   }
 }
 

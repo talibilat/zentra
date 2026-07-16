@@ -399,13 +399,14 @@ async function discover(
     }
     const inspected = firstInspect<DockerContainerInspect & DockerNetworkInspect & DockerImageInspect>(result);
     const labels = kind === "network" ? inspected.Labels : inspected.Config?.Labels;
+    const id = inspected.Id ?? "";
     const validId = kind === "image"
-      ? /^sha256:[a-f0-9]{64}$/.test(inspected.Id ?? "")
-      : /^[a-f0-9]{64}$/.test(inspected.Id ?? "");
+      ? /^sha256:[a-f0-9]{64}$/.test(id)
+      : /^[a-f0-9]{64}$/.test(id);
     if (!validId || labels?.["org.zentra.capsule-id"] !== capsuleId) {
       return { id: null, certain: false };
     }
-    return { id: inspected.Id ?? null, certain: true };
+    return { id, certain: true };
   } catch {
     return { id: null, certain: false };
   }

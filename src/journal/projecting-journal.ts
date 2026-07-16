@@ -7,7 +7,7 @@ export interface StoredEventSink {
 }
 
 export class ProjectingEventJournal implements EventJournal {
-  private failure: unknown = null;
+  private failed = false;
 
   constructor(
     private readonly inner: EventJournal,
@@ -20,18 +20,18 @@ export class ProjectingEventJournal implements EventJournal {
     events: readonly NewEvent<string, unknown>[],
   ): readonly StoredEvent[] {
     const stored = this.inner.append(streamId, expectedVersion, events);
-    if (this.failure === null) {
+    if (!this.failed) {
       try {
         this.sink.append(stored);
-      } catch (error) {
-        this.failure = error;
+      } catch {
+        this.failed = true;
       }
     }
     return stored;
   }
 
   get projectionFailed(): boolean {
-    return this.failure !== null;
+    return this.failed;
   }
 
   readStream(streamId: StreamId, afterVersion = 0): readonly StoredEvent[] {

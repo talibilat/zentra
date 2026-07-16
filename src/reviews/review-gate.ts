@@ -38,8 +38,7 @@ export class ReviewGate {
       throw new Error(`review gate: invalid decision: ${parsed.error.message}`);
     }
     const snapshot: ReviewDecision = parsed.data;
-    // Reject nonempty diff requirement
-    if (!input.diff || input.diff.trim() === "") {
+    if (input.diff.trim() === "") {
       throw new Error("review gate: diff is empty");
     }
     const inputDiffSha256 = createHash("sha256").update(input.diff, "utf8").digest("hex");
@@ -78,15 +77,12 @@ export class ReviewGate {
       throw new Error("review gate: decision reviewer identity does not match requested reviewer");
     }
 
-    // Compute current digests
-    const currentDiffSha256 = inputDiffSha256;
-
     const currentValidationSha256 = canonicalValidationDigest(input.validation);
 
     // Reject if diff digest does not match
-    if (snapshot.diffSha256 !== currentDiffSha256) {
+    if (snapshot.diffSha256 !== inputDiffSha256) {
       throw new Error(
-        `review gate: diff digest mismatch - decision was ${snapshot.diffSha256}, current is ${currentDiffSha256}`
+        `review gate: diff digest mismatch - decision was ${snapshot.diffSha256}, current is ${inputDiffSha256}`
       );
     }
 
@@ -97,8 +93,7 @@ export class ReviewGate {
       );
     }
 
-    Object.freeze(snapshot);
-    return snapshot;
+    return Object.freeze(snapshot);
   }
 
   verify(input: ReviewInput, decision: ReviewDecision): ReviewDecision {

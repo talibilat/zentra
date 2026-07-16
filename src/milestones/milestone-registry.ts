@@ -55,7 +55,13 @@ export class MilestoneRegistry {
         correlationId: input.correlationId,
       });
     }
-    projectMilestone(events.map((event, index) => prospectiveEvent(event, index + 1)));
+    projectMilestone(events.map((event, index) => ({
+      ...event,
+      eventId: "",
+      streamVersion: index + 1,
+      globalPosition: 0,
+      recordedAt: "2026-01-01T00:00:00.000Z",
+    })));
     const stored = this.journal.append(input.milestoneId, 0, events);
     const view = projectMilestone(stored);
     if (view === null) throw new Error("projection should not be null after milestone registration");
@@ -102,16 +108,6 @@ function withTrace(view: MilestoneView, events: readonly StoredEvent[]): Milesto
     traceId: events[0]!.correlationId,
     tracePath: tracePathFrom(events[0]!),
   });
-}
-
-function prospectiveEvent(event: NewEvent<string, unknown>, streamVersion: number): StoredEvent {
-  return {
-    ...event,
-    eventId: "",
-    streamVersion,
-    globalPosition: 0,
-    recordedAt: "2026-01-01T00:00:00.000Z",
-  };
 }
 
 function tracePathFrom(event: StoredEvent): string | null {

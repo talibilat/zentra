@@ -26,6 +26,11 @@ const PolicySummarySchema = z.object({
   tlsInspectionRequired: z.literal(true),
   globalWrites: z.literal("denied"),
 }).strict();
+const GitHubActionFields = { requestId: RequestIdSchema, grantId: RequestIdSchema, policyDigest: HexDigestSchema, actionDigest: HexDigestSchema, repository: RepositorySchema };
+const GitHubActionSchema = z.discriminatedUnion("operation", [
+  z.object({ ...GitHubActionFields, operation: z.literal("push"), targetRef: GitRefSchema, sourceCommit: ObjectIdSchema, expectedOldOid: ObjectIdSchema, force: z.literal(false) }).strict(),
+  z.object({ ...GitHubActionFields, operation: z.literal("create_pull_request"), pushGrantId: RequestIdSchema, headRef: BranchSchema, headCommit: ObjectIdSchema, base: BranchSchema, titleSha256: HexDigestSchema, bodySha256: HexDigestSchema, draft: z.boolean() }).strict(),
+]);
 
 const schemas = {
   "capsule.started": z.object({
@@ -60,11 +65,11 @@ const schemas = {
     grantId: RequestIdSchema, audience: z.literal("zentra.github-broker"), expiresAt: z.string().datetime({ offset: true }),
     requestId: RequestIdSchema, policyDigest: HexDigestSchema, actionDigest: HexDigestSchema,
   }).strict(),
-  "capsule.github_broker_accepted": githubActionSchema(),
-  "capsule.github_broker_denied": githubActionSchema(),
+  "capsule.github_broker_accepted": GitHubActionSchema,
+  "capsule.github_broker_denied": GitHubActionSchema,
   "capsule.github_broker_observed": z.object({
     requestId: RequestIdSchema, grantId: RequestIdSchema, actionDigest: HexDigestSchema,
-    operation: z.enum(["push", "create_pull_request"]), repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    operation: z.enum(["push", "create_pull_request"]), repository: RepositorySchema,
     target: z.string().min(1).max(255), outcome: z.enum(["denied", "uncertain"]),
   }).strict(),
   "capsule.github_broker_reconciled": z.discriminatedUnion("operation", [
@@ -80,14 +85,6 @@ const schemas = {
 } as const;
 
 export type CapsuleEventType = keyof typeof schemas;
-
-function githubActionSchema() {
-  const common = { requestId: RequestIdSchema, grantId: RequestIdSchema, policyDigest: HexDigestSchema, actionDigest: HexDigestSchema, repository: RepositorySchema };
-  return z.discriminatedUnion("operation", [
-    z.object({ ...common, operation: z.literal("push"), targetRef: GitRefSchema, sourceCommit: ObjectIdSchema, expectedOldOid: ObjectIdSchema, force: z.literal(false) }).strict(),
-    z.object({ ...common, operation: z.literal("create_pull_request"), pushGrantId: RequestIdSchema, headRef: BranchSchema, headCommit: ObjectIdSchema, base: BranchSchema, titleSha256: HexDigestSchema, bodySha256: HexDigestSchema, draft: z.boolean() }).strict(),
-  ]);
-}
 
 export function parseCapsuleEventPayload(type: string, payload: unknown): unknown {
   const schema = schemas[type as CapsuleEventType];

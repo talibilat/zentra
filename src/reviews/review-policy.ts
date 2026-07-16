@@ -5,7 +5,6 @@ import {
 } from "../contracts/milestone.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 
-export type ReviewPolicyStatus = "ready_for_review" | "paused";
 export type ReviewPolicyReason =
   | "review_required"
   | "missing_review_policy"
@@ -21,7 +20,7 @@ export interface ReviewPolicyInput {
 }
 
 export interface ReviewPolicyDecision {
-  readonly status: ReviewPolicyStatus;
+  readonly status: "ready_for_review" | "paused";
   readonly reason: ReviewPolicyReason;
   readonly minimumReviewers: number;
   readonly requiredReviewerRoles: readonly string[];
@@ -29,8 +28,11 @@ export interface ReviewPolicyDecision {
 }
 
 export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecision {
-  const minimumReviewers = minimumReviewersFor(input.task);
-  const requiredReviewerRoles = requiredRolesFor(input.task);
+  const heightenedReview = requiresHeightenedReview(input.task);
+  const minimumReviewers = heightenedReview ? 2 : 1;
+  const requiredReviewerRoles = heightenedReview
+    ? Object.freeze(["reviewer", "security_reviewer"])
+    : Object.freeze(["reviewer"]);
   const outsideAllowedScope = input.task.ownedPaths.find((ownedPath) =>
     !input.security.allowedFileScopes.some((allowedPath) => pathMatchesScope(ownedPath, allowedPath))
   );
@@ -58,7 +60,7 @@ export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecisi
   }
 
   const uniqueReviewerIds = [...new Set(input.reviewerIds)];
-  if (uniqueReviewerIds.length === 0 || uniqueReviewerIds.length < minimumReviewers) {
+  if (uniqueReviewerIds.length < minimumReviewers) {
     return paused(
       "missing_review_policy",
       minimumReviewers,
@@ -90,7 +92,7 @@ export function assessReviewPolicy(input: ReviewPolicyInput): ReviewPolicyDecisi
     status: "ready_for_review",
     reason: "review_required",
     minimumReviewers,
-    requiredReviewerRoles: Object.freeze(requiredReviewerRoles),
+    requiredReviewerRoles,
     stopAndAsk: null,
   });
 }
@@ -106,16 +108,6 @@ function reviewerRolesSatisfy(
     for (const role of reviewerRoles[reviewerId] ?? []) assigned.add(role);
   }
   return requiredRoles.every((role) => assigned.has(role));
-}
-
-function minimumReviewersFor(task: PlannedTask): number {
-  return requiresHeightenedReview(task) ? 2 : 1;
-}
-
-function requiredRolesFor(task: PlannedTask): readonly string[] {
-  return requiresHeightenedReview(task)
-    ? Object.freeze(["reviewer", "security_reviewer"])
-    : Object.freeze(["reviewer"]);
 }
 
 function requiresHeightenedReview(task: PlannedTask): boolean {
@@ -143,19 +135,12 @@ function paused(
     reason,
     minimumReviewers,
     requiredReviewerRoles: Object.freeze([...requiredReviewerRoles]),
-    stopAndAsk: stopAndAsk(stopReason, message),
-  });
-}
-
-function stopAndAsk(
-  reason: "missing_authority" | "forbidden_file_scope",
-  message: string,
-): StopAndAskState {
-  return StopAndAskStateSchema.parse({
-    reason,
-    message,
-    requestedBy: "zentra-review-policy",
-    requiredDecision: "Assign an independent reviewer or revise the plan before integration.",
+    stopAndAsk: StopAndAskStateSchema.parse({
+      reason: stopReason,
+      message,
+      requestedBy: "zentra-review-policy",
+      requiredDecision: "Assign an independent reviewer or revise the plan before integration.",
+    }),
   });
 }
 

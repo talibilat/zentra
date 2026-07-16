@@ -62,7 +62,10 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     timestamp: event.recordedAt,
     kind: event.type,
     actor: Object.freeze(actorFor(event)),
-    operation: Object.freeze(operationFor(event)),
+    operation: Object.freeze({
+      name: operationName(event.type),
+      status: operationStatus(event),
+    }),
     attributes: Object.freeze({
       zentra: Object.freeze({
         event_id: event.eventId,
@@ -100,15 +103,11 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
   if (!Number.isInteger(event.streamVersion) || event.streamVersion < 1) {
     throw new Error("Agent Tail stream version must be a positive integer");
   }
-  assertTimestamp(event.recordedAt);
-}
-
-function assertTimestamp(timestamp: string): void {
-  if (timestamp.length < 11 || timestamp[10] !== "T") {
+  if (event.recordedAt.length < 11 || event.recordedAt[10] !== "T") {
     throw new Error("Agent Tail timestamp must be ISO-like");
   }
-  const parsed = Date.parse(timestamp);
-  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) {
+  const parsed = Date.parse(event.recordedAt);
+  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(event.recordedAt)) {
     throw new Error("Agent Tail timestamp must include a timezone");
   }
 }
@@ -116,11 +115,7 @@ function assertTimestamp(timestamp: string): void {
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
   if (event.type.startsWith("capsule.")) return `capsule:${event.streamId}`;
-  return taskSpanId(event.streamId);
-}
-
-function taskSpanId(streamId: string): string {
-  return `task:${streamId}`;
+  return `task:${event.streamId}`;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
@@ -181,13 +176,6 @@ function actorFor(event: StoredEvent): AgentTailActor {
   return { id: "zentra-orchestrator", role: "orchestrator" };
 }
 
-function operationFor(event: StoredEvent): AgentTailOperation {
-  return {
-    name: operationName(event.type),
-    status: operationStatus(event),
-  };
-}
-
 function operationName(type: string): string {
   if (type === "capsule.proxy_interaction_observed") return "network_policy";
   if (type.startsWith("capsule.github_broker_") || type === "capsule.github_grant_consumed") return "github_effect";
@@ -233,7 +221,6 @@ function operationStatus(event: StoredEvent): string {
   if (type.endsWith("_recorded") || type.endsWith("_prepared") || type.endsWith("_completed")) {
     return "completed";
   }
-  if (type === "task.completed") return "completed";
   if (type === "task.cancelled") return "cancelled";
   if (type === "task.timed_out") return "timed_out";
   if (type === "task.denied") return "denied";

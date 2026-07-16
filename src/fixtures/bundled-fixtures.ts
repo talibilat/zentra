@@ -26,7 +26,6 @@ export interface BundledFixture {
   readonly path: string;
   cleanup(): void;
 }
-export type BundledFixturePaths = Readonly<Record<BundledFixtureName, BundledFixture>>;
 
 const SOURCE_TAIL = ["src", "fixtures", "bundled-fixtures.ts"] as const;
 const BUILT_TAIL = ["dist", "src", "fixtures", "bundled-fixtures.js"] as const;
@@ -58,7 +57,7 @@ export function resolveBundledFixture(
   } catch {
     throw new Error(`bundled fixture is unavailable or not a regular file: ${name}`);
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
+  if (!stat.isFile()) {
     throw new Error(`bundled fixture must be a regular non-symlink file: ${name}`);
   }
 
@@ -132,14 +131,6 @@ export function resolveBundledFixture(
     });
     throw error;
   }
-}
-
-export function resolveBundledFixtures(
-  anchor: string | URL = import.meta.url,
-): BundledFixturePaths {
-  return Object.freeze({
-    "deterministic-worker.mjs": resolveBundledFixture("deterministic-worker.mjs", anchor),
-  });
 }
 
 function hasExactTail(

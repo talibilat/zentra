@@ -1148,11 +1148,11 @@ export class RecoveryService {
   }
 
   private async assertSafeGitConfiguration(cwd: string): Promise<void> {
-    const result = await this.readAllowingExitOne(cwd, [
+    const result = await this.readResult(cwd, [
       "config",
       "--get-regexp",
       EXTERNAL_PROGRAM_CONFIG,
-    ]);
+    ], true);
     if (result.exitCode === 0 && result.stdout.trim() !== "") {
       throw new Error("configured external Git programs are not allowed during recovery");
     }
@@ -1160,10 +1160,6 @@ export class RecoveryService {
 
   private read(cwd: string, args: readonly string[]): Promise<CommandResult> {
     return this.readResult(cwd, args, false);
-  }
-
-  private readAllowingExitOne(cwd: string, args: readonly string[]): Promise<CommandResult> {
-    return this.readResult(cwd, args, true);
   }
 
   private async readResult(
@@ -1311,7 +1307,7 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   const commitObserved = events.find((event) => event.type === "task.commit_observed");
   if (commitObserved !== undefined) parseEvent(CommitObservedPayloadSchema, commitObserved);
   const integrationObserved = events.find((event) => event.type === "task.integration_observed");
-  const successfulIntegrationObserved = integrationObserved === undefined
+  const successfulObservation = integrationObserved === undefined
     ? null
     : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
   if (integrationObserved !== undefined) {
@@ -1378,9 +1374,6 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   ) {
     throw new Error("validation-start diff does not equal approved review diff");
   }
-  const successfulObservation = integrationObserved === undefined
-    ? null
-    : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
   if (successfulObservation?.success) {
     if (
       integrationStarted === null ||
@@ -1417,17 +1410,16 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   }
   if (cleanupStarted !== null) {
     if (
-      !successfulIntegrationObserved?.success ||
+      !successfulObservation?.success ||
       indexOf("task.cleanup_started") < indexOf("task.integration_observed") ||
-      cleanupStarted.sourceCommit !== successfulIntegrationObserved.data.receipt.sourceCommit ||
-      cleanupStarted.resultCommit !== successfulIntegrationObserved.data.receipt.resultCommit ||
+      cleanupStarted.sourceCommit !== successfulObservation.data.receipt.sourceCommit ||
+      cleanupStarted.resultCommit !== successfulObservation.data.receipt.resultCommit ||
       cleanupStarted.branch !== `ticket/${taskId}`
     ) {
       throw new Error("cleanup start contradicts verified integration evidence");
     }
   }
   if (cleanupCompleted !== null || cleanupObserved !== null) {
-    const cleanupEnd = cleanupCompleted ?? cleanupObserved;
     if (
       cleanupStarted === null ||
       indexOf(cleanupCompleted !== null ? "task.cleanup_completed" : "task.cleanup_observed") <
@@ -1441,7 +1433,6 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     ) {
       throw new Error("cleanup completion contradicts cleanup start");
     }
-    void cleanupEnd;
   }
   if (cleanupCompleted !== null && cleanupObserved !== null) {
     throw new Error("cleanup cannot be both completed and observed as uncertain");

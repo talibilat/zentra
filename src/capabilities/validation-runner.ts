@@ -177,12 +177,12 @@ export class ValidationRunner {
       const outputSha256 = createHash("sha256")
         .update(outputContent, "utf8")
         .digest("hex");
-      const provenance: DurableValidationProvenance = Object.freeze({
+      const provenance: DurableValidationProvenance = {
         invocationId,
         canonicalCwd,
         subjectSha256: context?.subjectSha256 ?? null,
         timeoutMs,
-      });
+      };
 
       const parsed = ValidationReportSchema.parse({
         name,

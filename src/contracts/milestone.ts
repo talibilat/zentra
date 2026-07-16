@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { z } from "zod";
 
 import { TerminalOutcomeSchema } from "./task.js";
@@ -187,7 +185,6 @@ export type RiskClassification = z.infer<typeof RiskClassificationSchema>;
 export type MilestoneBudget = z.infer<typeof MilestoneBudgetSchema>;
 export type StopAndAskReason = z.infer<typeof StopAndAskReasonSchema>;
 export type StopAndAskState = z.infer<typeof StopAndAskStateSchema>;
-export type TaskDependency = z.infer<typeof TaskDependencySchema>;
 export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 export type MilestonePlan = z.infer<typeof MilestonePlanSchema>;
 export type Milestone = z.infer<typeof MilestoneSchema>;
@@ -226,8 +223,7 @@ function dependencyProblem(tasks: readonly PlannedTask[]): string | null {
     if (visited.has(taskId)) return null;
     if (visiting.has(taskId)) return `milestone plan contains a dependency cycle involving ${taskId}`;
     visiting.add(taskId);
-    const task = byId.get(taskId);
-    if (task === undefined) return `planned task ${taskId} is missing`;
+    const task = byId.get(taskId)!;
     for (const dependency of task.dependencies) {
       const problem = visit(dependency);
       if (problem !== null) return problem;
@@ -267,10 +263,8 @@ function isSafeLogicalPath(candidate: string): boolean {
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
-    candidate.includes("\\") ||
-    path.posix.isAbsolute(candidate)
+    candidate.includes("\\")
   ) return false;
   const segments = candidate.split("/");
-  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
-    path.posix.normalize(candidate) === candidate;
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }

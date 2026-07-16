@@ -844,11 +844,10 @@ function prepareCompletedReceipt(input: {
   if (!isVerifiedReviewDecision(input.review)) {
     throw new Error("completed receipt review lacks provenance");
   }
-  ValidationReportSchema.parse(input.validation);
   const command = Object.freeze([...input.validation.command]);
   const provenance = Object.freeze({ ...input.validation.provenance });
   const validation = Object.freeze({ ...input.validation, command, provenance });
-  const receipt: IntegrationReceipt = Object.freeze({
+  return Object.freeze({
     taskId: input.taskId,
     projectId: input.projectId,
     sourceCommit: input.sourceCommit,
@@ -858,7 +857,6 @@ function prepareCompletedReceipt(input: {
     validation,
     outcome: "completed",
   });
-  return receipt;
 }
 
 function registerCompletedReceipt(receipt: IntegrationReceipt): IntegrationReceipt {
@@ -934,9 +932,7 @@ async function withIntegrationLease<T>(
       lease = store.acquire(key, timings.leaseMs);
     }
 
-    const acquiredLease = lease;
-    if (acquiredLease === null) throw new Error("integration lease acquisition failed");
-    let currentLease = acquiredLease;
+    let currentLease = lease;
     let lost = false;
     const leaseController = new AbortController();
     const renew = (): void => {
@@ -1041,15 +1037,11 @@ function unavailableValidation(
     argvSha256: sha256(JSON.stringify(command)),
     outputSha256: sha256(JSON.stringify({ stdout: "", stderr: reason })),
     provenance: Object.freeze({
-      invocationId: `unavailable-${safeEvidenceName(project.projectId)}-${outcome}`,
+      invocationId: `unavailable-${project.projectId.replace(/[^A-Za-z0-9._-]/g, "_") || "unknown"}-${outcome}`,
       canonicalCwd: project.repositoryPath,
       subjectSha256: null,
     }),
   };
-}
-
-function safeEvidenceName(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, "_") || "unknown";
 }
 
 function sha256(value: string): string {

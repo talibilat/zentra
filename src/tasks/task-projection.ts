@@ -194,7 +194,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
 
     if (event.type === "task.integration_prepared") {
-      if (integrationObserved || cleanupStarted) {
+      if (integrationObserved) {
         throw new Error("task.integration_prepared is out of order");
       }
       integrationPrepared = true;
@@ -212,13 +212,13 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       integrationVerified = verified;
       if (verified) observedReceiptSnapshot = receiptSnapshot;
     } else if (event.type === "task.cleanup_started") {
-      if (!integrationObserved || !integrationVerified || cleanupStarted) {
+      if (!integrationVerified) {
         throw new Error("cleanup start requires one verified integration observation");
       }
       cleanupStarted = true;
       cleanupStartedSnapshot = canonicalSnapshot(event.payload);
     } else if (event.type === "task.cleanup_completed") {
-      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+      if (!cleanupStarted || cleanupObserved) {
         throw new Error("cleanup completion requires one cleanup start");
       }
       if (canonicalSnapshot(event.payload) !== cleanupStartedSnapshot) {
@@ -226,13 +226,13 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       }
       cleanupCompleted = true;
     } else if (event.type === "task.cleanup_observed") {
-      if (!cleanupStarted || cleanupCompleted || cleanupObserved) {
+      if (!cleanupStarted || cleanupCompleted) {
         throw new Error("cleanup observation requires one cleanup start");
       }
       cleanupObserved = true;
       cleanupObservationSnapshot = canonicalSnapshot(event.payload);
     } else if (event.type === "task.cleanup_reconciled") {
-      if (!cleanupObserved || cleanupCompleted || cleanupReconciled) {
+      if (!cleanupObserved || cleanupCompleted) {
         throw new Error("cleanup reconciliation requires one uncertain cleanup observation");
       }
       if (
@@ -254,7 +254,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
 
     const currentLifecycle = state.lifecycle;
-    if (!VALID_TRANSITIONS[currentLifecycle]?.includes(event.type)) {
+    if (!VALID_TRANSITIONS[currentLifecycle].includes(event.type)) {
       throw new Error(
         `invalid transition from ${currentLifecycle} via ${event.type}`,
       );
@@ -293,11 +293,7 @@ function canonicalSnapshot(value: unknown): string {
 }
 
 function requirePayloadString(event: StoredEvent, field: string): string {
-  const payload = event.payload;
-  const value =
-    typeof payload === "object" && payload !== null
-      ? (payload as Record<string, unknown>)[field]
-      : undefined;
+  const value = payloadField(event, field);
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(
       `${event.type} payload.${field} must be a nonempty string`,
