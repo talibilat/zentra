@@ -221,7 +221,6 @@ function operationStatus(event: StoredEvent): string {
   if (type.endsWith("_recorded") || type.endsWith("_prepared") || type.endsWith("_completed")) {
     return "completed";
   }
-  if (type === "task.completed") return "completed";
   if (type === "task.cancelled") return "cancelled";
   if (type === "task.timed_out") return "timed_out";
   if (type === "task.denied") return "denied";
