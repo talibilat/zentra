@@ -80,12 +80,11 @@ export class OpenCodeProbe {
       timeoutMs: request.timeoutMs,
     }, signal, "validation");
 
-    return reportFromWorkerResult(request, model, executable, canonicalCwd, result, startedAt);
+    return reportFromWorkerResult(model, executable, canonicalCwd, result, startedAt);
   }
 }
 
 function reportFromWorkerResult(
-  request: OpenCodeProbeRequest,
   model: ModelCapability,
   executable: string,
   cwd: string,
