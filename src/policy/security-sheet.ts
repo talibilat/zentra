@@ -345,7 +345,6 @@ function scopeBase(scope: string): string {
 
 function isSafeLogicalGlob(candidate: string): boolean {
   if (
-    candidate === "" ||
     candidate.includes("\0") ||
     candidate.includes("\n") ||
     candidate.includes("\r") ||
