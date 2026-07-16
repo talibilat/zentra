@@ -95,6 +95,10 @@ describe("model sheet parser", () => {
       "MODEL_SHEET_INVALID_ROLE",
     );
     expectErrorCode(
+      () => parseModelSheetMarkdown(validSheet.replace("planning,research", "")),
+      "MODEL_SHEET_INVALID_SPECIALTY",
+    );
+    expectErrorCode(
       () => parseModelSheetMarkdown(validSheet.replace("opencode |", "unknown |")),
       "MODEL_SHEET_INVALID_HARNESS",
     );
