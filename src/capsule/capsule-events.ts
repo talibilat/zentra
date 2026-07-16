@@ -64,7 +64,7 @@ const schemas = {
   "capsule.github_broker_denied": githubActionSchema(),
   "capsule.github_broker_observed": z.object({
     requestId: RequestIdSchema, grantId: RequestIdSchema, actionDigest: HexDigestSchema,
-    operation: z.enum(["push", "create_pull_request"]), repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    operation: z.enum(["push", "create_pull_request"]), repository: RepositorySchema,
     target: z.string().min(1).max(255), outcome: z.enum(["denied", "uncertain"]),
   }).strict(),
   "capsule.github_broker_reconciled": z.discriminatedUnion("operation", [
