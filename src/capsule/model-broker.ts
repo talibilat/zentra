@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const ModelIdentitySchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
+export const ModelToolCallIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 
 export const ModelBrokerRequestSchema = z.strictObject({
   modelId: ModelIdentitySchema,
@@ -15,7 +16,7 @@ const AssistantResponseSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("tool_calls"),
     calls: z.array(z.strictObject({
-      id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+      id: ModelToolCallIdSchema,
       name: z.enum(["read", "glob", "grep"]),
       arguments: z.string().min(2).max(64 * 1024),
     })).min(1).max(16),

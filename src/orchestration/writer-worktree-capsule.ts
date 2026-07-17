@@ -38,6 +38,7 @@ export interface WriterCapsuleRequest {
   readonly security: SecuritySheet;
   readonly executable: string;
   readonly executableSha256?: string;
+  readonly openCodeHome?: string;
   readonly signal: AbortSignal;
   readonly observer?: WriterCapsuleObserver;
 }
@@ -90,6 +91,7 @@ export class WriterWorktreeCapsule {
       ...(request.executableSha256 === undefined
         ? {}
         : { expectedExecutableSha256: request.executableSha256 }),
+      ...(request.openCodeHome === undefined ? {} : { home: request.openCodeHome }),
     }, request.signal);
     await request.observer?.onWriterCompleted?.(writer);
 
