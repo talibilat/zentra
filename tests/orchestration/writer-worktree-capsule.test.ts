@@ -92,6 +92,42 @@ describe("WriterWorktreeCapsule", () => {
     expect(readFileSync(path.join(result.lease!.path, "src/greeting.ts"), "utf8")).toContain("OpenCode");
   });
 
+  it("allows the integration ref to advance while an isolated writer runs", async () => {
+    const fixture = await projectFixture();
+    const executable = fakeOpenCode(fixture.root, `
+      import { writeFileSync } from "node:fs";
+      import path from "node:path";
+      const args = process.argv.slice(2);
+      writeFileSync(path.join(args[9], "src/greeting.ts"), "export const greeting = 'new';\\n");
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+    `);
+    let advancedFrom: string | null = null;
+
+    const result = await capsule().run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable,
+      signal: AbortSignal.timeout(10_000),
+      observer: {
+        onWriterStarted: async () => {
+          const original = (await gitOutput(fixture.repository, ["rev-parse", "refs/heads/zentra/integration"])).trim();
+          advancedFrom = original;
+          const tree = (await gitOutput(fixture.repository, ["rev-parse", `${original}^{tree}`])).trim();
+          const advanced = (await gitOutput(fixture.repository, ["commit-tree", tree, "-p", original, "-m", "concurrent integration"])).trim();
+          const update = await git.run(fixture.repository, ["update-ref", "refs/heads/zentra/integration", advanced, original]);
+          expect(update.exitCode).toBe(0);
+        },
+      },
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(advancedFrom).not.toBeNull();
+    expect((await gitOutput(fixture.repository, ["rev-parse", "refs/heads/zentra/integration"])).trim()).not.toBe(advancedFrom);
+    expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
+  });
+
   it("rejects writes outside ownership and preserves the worktree evidence", async () => {
     const fixture = await projectFixture();
     const executable = fakeOpenCode(fixture.root, `

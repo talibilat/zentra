@@ -17,6 +17,11 @@ import {
   assertTwoAgentExecutionBinding,
   type TwoAgentExecution,
 } from "./two-agent-milestone.js";
+import {
+  WriterResourceGovernor,
+  type WriterResourcePermit,
+  type WriterResourceRequest,
+} from "./writer-resource-governor.js";
 
 export interface ScheduledWriterTask {
   readonly writerTaskId: string;
@@ -38,7 +43,12 @@ export class MultiWriterOwnershipScheduler {
   constructor(
     private readonly milestones: MilestoneRegistry,
     private readonly execution: TwoAgentExecution,
+    private readonly governor?: WriterResourceGovernor,
   ) {}
+
+  usesGovernor(governor: WriterResourceGovernor): boolean {
+    return this.governor === governor;
+  }
 
   async run(request: MultiWriterScheduleRequest): Promise<MilestoneRecord> {
     if (!Number.isSafeInteger(request.maxConcurrentWriters) || request.maxConcurrentWriters <= 0) {
@@ -46,6 +56,10 @@ export class MultiWriterOwnershipScheduler {
     }
     const pending = new Map(request.tasks.map((task) => [task.writerTaskId, task] as const));
     if (pending.size !== request.tasks.length) throw new Error("scheduled writer task identities must be unique");
+    const governor = this.governor ?? new WriterResourceGovernor(request.maxConcurrentWriters);
+    if (request.maxConcurrentWriters > governor.maxConcurrentWriters) {
+      throw new Error("milestone writer capacity exceeds shared global writer capacity");
+    }
 
     while (pending.size > 0) {
       let milestone = this.requireMilestone(request.milestoneId);
@@ -58,6 +72,7 @@ export class MultiWriterOwnershipScheduler {
         const ownership = milestone.writerOwnership[scheduled.writerTaskId];
         if (ownership?.status === "integrated" || ownership?.status === "released") {
           assertClaimBinding(scheduled, milestone, request.modelSheet, ownership);
+          governor.release(resourceRequest(request, milestone, scheduled));
           pending.delete(scheduled.writerTaskId);
           reconciled = true;
           continue;
@@ -66,12 +81,20 @@ export class MultiWriterOwnershipScheduler {
         assertClaimBinding(scheduled, milestone, request.modelSheet, ownership);
         const linked = this.milestones.inspectWriterTask(request.milestoneId, scheduled.writerTaskId);
         if (linked?.terminalOutcome === "completed") {
-          this.reconcileCompletedWriter(request, scheduled, milestone);
+          try {
+            this.reconcileCompletedWriter(request, scheduled, milestone);
+          } finally {
+            governor.release(resourceRequest(request, milestone, scheduled));
+          }
           pending.delete(scheduled.writerTaskId);
           milestone = this.requireMilestone(request.milestoneId);
           reconciled = true;
         } else if (linked?.terminalOutcome !== null && linked?.terminalOutcome !== undefined) {
-          this.milestones.releaseTerminalWriter(request.milestoneId, scheduled.writerTaskId);
+          try {
+            this.milestones.releaseTerminalWriter(request.milestoneId, scheduled.writerTaskId);
+          } finally {
+            governor.release(resourceRequest(request, milestone, scheduled));
+          }
           pending.delete(scheduled.writerTaskId);
           milestone = this.requireMilestone(request.milestoneId);
           reconciled = true;
@@ -94,56 +117,87 @@ export class MultiWriterOwnershipScheduler {
           milestone.tasks[scheduled.writerTaskId]?.status === "ready");
       if (wave.length === 0) return milestone;
 
-      const admitted = wave.map((scheduled) => {
-        const writer = plannedTask(milestone, scheduled.writerTaskId, "implementer");
-        const reviewer = plannedTask(milestone, scheduled.reviewerTaskId, "reviewer");
-        const model = exactModel(request.modelSheet, writer.roleAssignment.agentId);
-        assertSelectedModelCapability(scheduled.execution.model, model, scheduled.writerAdmission);
-        const reviewerModel = exactModel(request.modelSheet, reviewer.roleAssignment.agentId);
-        assertAdmissionCapability(scheduled.reviewerAdmission, reviewerModel);
-        const admission = this.milestones.admitTask(
-          request.milestoneId,
-          writer.taskId,
-          request.security,
-          scheduled.writerAdmission,
-          request.modelSheet,
-        );
-        if (admission.status !== "admitted") return null;
-        assertTwoAgentExecutionBinding(
-          { ...scheduled, milestoneId: request.milestoneId, security: request.security, modelSheet: request.modelSheet } as never,
-          milestone,
-          writer,
-          reviewer,
-          admission.admission.packet,
-        );
-        return { scheduled, writer, reviewer, model };
-      });
-      if (admitted.some((item) => item === null)) return this.requireMilestone(request.milestoneId);
-      const runnable = admitted as readonly NonNullable<(typeof admitted)[number]>[];
-      if (resumeBatchId === null) {
-        const batchId = randomUUID();
-        this.milestones.startWriterBatch(request.milestoneId, {
-          batchId,
-          maxConcurrentWriters: request.maxConcurrentWriters,
-          writers: runnable.map(({ writer, reviewer, model }) => ({
-            writerTaskId: writer.taskId,
-            reviewerTaskId: reviewer.taskId,
-            actorId: writer.roleAssignment.agentId,
-            capabilityId: model.id,
-            transportModelId: model.model,
-            harness: model.harness as "opencode" | "claude_code" | "codex" | "deterministic",
-            roles: model.roles as ("planner" | "researcher" | "implementer" | "validator" | "reviewer" | "integrator" | "verifier")[],
-            toolPermissions: [...model.toolPermissions],
-            network: model.network,
-            contextTokens: model.contextTokens,
-            modelCapabilityDigest: digestCanonical(model),
-            ownedPaths: writer.ownedPaths,
-            modelMaxConcurrency: model.maxConcurrency,
-          })),
-        });
+      const resources = wave.map((scheduled) => resourceRequest(request, milestone, scheduled));
+      const waveSignal = AbortSignal.any(wave.map((scheduled) => scheduled.execution.signal));
+      const permit = resumeBatchId === null
+        ? await governor.acquire(resources, waveSignal)
+        : governor.recoverIfActive(resources) ?? await governor.acquire(resources, waveSignal);
+
+      if (waveSignal.aborted) {
+        releaseWave(permit, request.milestoneId, wave);
+        throw new DOMException("writer wave was aborted before effects", "AbortError");
       }
-      for (const { writer } of runnable) {
-        this.milestones.startTask(request.milestoneId, writer.taskId, writer.roleAssignment.agentId, "implementer");
+
+      milestone = this.requireMilestone(request.milestoneId);
+      if (!wave.every((scheduled) => isStillRunnable(milestone, scheduled, resumeBatchId))) {
+        releaseWave(permit, request.milestoneId, wave);
+        return milestone;
+      }
+
+      let admitted;
+      try {
+        admitted = wave.map((scheduled) => {
+          const writer = plannedTask(milestone, scheduled.writerTaskId, "implementer");
+          const reviewer = plannedTask(milestone, scheduled.reviewerTaskId, "reviewer");
+          const model = exactModel(request.modelSheet, writer.roleAssignment.agentId);
+          assertSelectedModelCapability(scheduled.execution.model, model, scheduled.writerAdmission);
+          const reviewerModel = exactModel(request.modelSheet, reviewer.roleAssignment.agentId);
+          assertAdmissionCapability(scheduled.reviewerAdmission, reviewerModel);
+          const admission = this.milestones.admitTask(
+            request.milestoneId,
+            writer.taskId,
+            request.security,
+            scheduled.writerAdmission,
+            request.modelSheet,
+          );
+          if (admission.status !== "admitted") return null;
+          assertTwoAgentExecutionBinding(
+            { ...scheduled, milestoneId: request.milestoneId, security: request.security, modelSheet: request.modelSheet } as never,
+            milestone,
+            writer,
+            reviewer,
+            admission.admission.packet,
+          );
+          return { scheduled, writer, reviewer, model };
+        });
+      } catch (error) {
+        releaseWave(permit, request.milestoneId, wave);
+        throw error;
+      }
+      if (admitted.some((item) => item === null)) {
+        releaseWave(permit, request.milestoneId, wave);
+        return this.requireMilestone(request.milestoneId);
+      }
+      const runnable = admitted as readonly NonNullable<(typeof admitted)[number]>[];
+      try {
+        if (resumeBatchId === null) {
+          const batchId = randomUUID();
+          this.milestones.startWriterBatch(request.milestoneId, {
+            batchId,
+            maxConcurrentWriters: request.maxConcurrentWriters,
+            writers: runnable.map(({ writer, reviewer, model }) => ({
+              writerTaskId: writer.taskId,
+              reviewerTaskId: reviewer.taskId,
+              actorId: writer.roleAssignment.agentId,
+              capabilityId: model.id,
+              transportModelId: model.model,
+              harness: model.harness as "opencode" | "claude_code" | "codex" | "deterministic",
+              roles: model.roles as ("planner" | "researcher" | "implementer" | "validator" | "reviewer" | "integrator" | "verifier")[],
+              toolPermissions: [...model.toolPermissions],
+              network: model.network,
+              contextTokens: model.contextTokens,
+              modelCapabilityDigest: digestCanonical(model),
+              ownedPaths: writer.ownedPaths,
+              modelMaxConcurrency: model.maxConcurrency,
+            })),
+          });
+        }
+        for (const { writer } of runnable) {
+          this.milestones.startTask(request.milestoneId, writer.taskId, writer.roleAssignment.agentId, "implementer");
+        }
+      } catch (error) {
+        releaseWave(permit, request.milestoneId, wave);
+        throw error;
       }
 
       const barrier = new WaveBarrier(runnable.length);
@@ -157,6 +211,7 @@ export class MultiWriterOwnershipScheduler {
             if (handoff.taskStreamId !== writer.taskId) throw new Error("validated handoff contradicts its writer claim");
             this.milestones.completeTask(request.milestoneId, writer.taskId, "completed", { ...handoff });
             writerCompleted = true;
+            permit.release(resourceWriterId(request.milestoneId, writer.taskId));
             const reviewAdmission = this.milestones.admitTask(
               request.milestoneId,
               reviewer.taskId,
@@ -183,16 +238,40 @@ export class MultiWriterOwnershipScheduler {
         if (!writerCompleted && result.terminalOutcome !== null) {
           this.milestones.completeTask(request.milestoneId, writer.taskId, result.terminalOutcome, { taskStreamId: result.taskId });
           this.milestones.releaseTerminalWriter(request.milestoneId, writer.taskId);
+          permit.release(resourceWriterId(request.milestoneId, writer.taskId));
         } else if (reviewerStarted && result.terminalOutcome !== null) {
           this.milestones.completeTask(request.milestoneId, reviewer.taskId, result.terminalOutcome, { taskStreamId: result.taskId });
           this.milestones.releaseTerminalWriter(request.milestoneId, writer.taskId);
         }
       }));
-      const afterWave = this.requireMilestone(request.milestoneId);
+      for (let index = 0; index < settled.length; index += 1) {
+        const rejected = settled[index];
+        if (rejected?.status !== "rejected") continue;
+        const writer = runnable[index]!.writer;
+        const scheduled = runnable[index]!.scheduled;
+        const linked = this.milestones.inspectWriterTask(request.milestoneId, writer.taskId);
+        if (linked?.terminalOutcome === "completed") {
+          try {
+            this.reconcileCompletedWriter(request, scheduled, this.requireMilestone(request.milestoneId));
+          } finally {
+            permit.release(resourceWriterId(request.milestoneId, writer.taskId));
+          }
+        } else if (linked?.terminalOutcome !== null && linked?.terminalOutcome !== undefined) {
+          try {
+            this.milestones.completeTask(request.milestoneId, writer.taskId, linked.terminalOutcome, {
+              taskStreamId: linked.taskId,
+            });
+            this.milestones.releaseTerminalWriter(request.milestoneId, writer.taskId);
+          } finally {
+            permit.release(resourceWriterId(request.milestoneId, writer.taskId));
+          }
+        }
+      }
+      const reconciledWave = this.requireMilestone(request.milestoneId);
       if (
         settled.some((result) => result.status === "rejected") ||
-        runnable.some(({ writer }) => afterWave.writerOwnership[writer.taskId]?.status === "claimed")
-      ) return afterWave;
+        runnable.some(({ writer }) => reconciledWave.writerOwnership[writer.taskId]?.status === "claimed")
+      ) return reconciledWave;
       for (const { writer } of runnable) pending.delete(writer.taskId);
     }
     return this.requireMilestone(request.milestoneId);
@@ -241,6 +320,49 @@ export class MultiWriterOwnershipScheduler {
     }
     this.milestones.completeWriterIntegration(request.milestoneId, writer.taskId);
   }
+}
+
+function isStillRunnable(
+  milestone: MilestoneRecord,
+  scheduled: ScheduledWriterTask,
+  resumeBatchId: string | null,
+): boolean {
+  const state = milestone.tasks[scheduled.writerTaskId];
+  if (resumeBatchId === null) {
+    return milestone.writerOwnership[scheduled.writerTaskId] === undefined &&
+      (state?.status === "planned" || state?.status === "ready") &&
+      plannedTask(milestone, scheduled.writerTaskId, "implementer").dependencies.every((dependency) =>
+        milestone.tasks[dependency]?.terminalOutcome === "completed");
+  }
+  const ownership = milestone.writerOwnership[scheduled.writerTaskId];
+  return ownership?.status === "claimed" && ownership.batchId === resumeBatchId && state?.status === "ready";
+}
+
+function resourceWriterId(milestoneId: string, writerTaskId: string): string {
+  return `${milestoneId}\u0000${writerTaskId}`;
+}
+
+function resourceRequest(
+  request: MultiWriterScheduleRequest,
+  milestone: MilestoneRecord,
+  scheduled: ScheduledWriterTask,
+): WriterResourceRequest {
+  const writer = plannedTask(milestone, scheduled.writerTaskId, "implementer");
+  const model = exactModel(request.modelSheet, writer.roleAssignment.agentId);
+  return {
+    writerId: resourceWriterId(request.milestoneId, writer.taskId),
+    capabilityId: model.id,
+    capabilityDigest: digestCanonical(model),
+    maxConcurrency: model.maxConcurrency,
+  };
+}
+
+function releaseWave(
+  permit: WriterResourcePermit,
+  milestoneId: string,
+  wave: readonly ScheduledWriterTask[],
+): void {
+  for (const scheduled of wave) permit.release(resourceWriterId(milestoneId, scheduled.writerTaskId));
 }
 
 function selectWave(

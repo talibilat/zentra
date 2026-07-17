@@ -71,11 +71,6 @@ export class WriterWorktreeCapsule {
     );
     const packet = writerPacket(request.task, request.security);
     const baseCommit = await this.gitRead(lease.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
-    const integrationHead = await this.gitRead(request.project.repositoryPath, [
-      "rev-parse",
-      "--verify",
-      `refs/heads/${request.project.integrationBranch}^{commit}`,
-    ]);
     if (await this.symbolicRef(
       request.project.repositoryPath,
       `refs/heads/${request.project.integrationBranch}`,
@@ -102,7 +97,6 @@ export class WriterWorktreeCapsule {
       request.project,
       primaryHead,
       primaryHeadRef,
-      integrationHead,
     );
     const ownership = await this.ownership.inspect(
       lease,
@@ -137,7 +131,6 @@ export class WriterWorktreeCapsule {
     project: ProjectConfig,
     expectedHead: string,
     expectedHeadRef: string | null,
-    expectedIntegrationHead: string,
   ): Promise<void> {
     await this.assertPrimaryClean(project.repositoryPath);
     if (await this.gitRead(project.repositoryPath, ["rev-parse", "HEAD"]) !== expectedHead) {
@@ -151,14 +144,6 @@ export class WriterWorktreeCapsule {
       `refs/heads/${project.integrationBranch}`,
     ) !== null) {
       throw new Error("integration branch became symbolic during writer assignment");
-    }
-    const integrationHead = await this.gitRead(project.repositoryPath, [
-      "rev-parse",
-      "--verify",
-      `refs/heads/${project.integrationBranch}^{commit}`,
-    ]);
-    if (integrationHead !== expectedIntegrationHead) {
-      throw new Error("integration branch changed during writer assignment");
     }
   }
 
