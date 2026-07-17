@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Command, CommanderError } from "commander";
+import { isSafeWorktreeTaskIdentity } from "../contracts/task-identity.js";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
 import { DockerCapsuleConformance } from "../capsule/docker-capsule.js";
@@ -80,7 +81,6 @@ const MAX_PENDING_LIVE_OUTPUT_BYTES = 8 * 1_048_576;
 const LIVE_OUTPUT_FLUSH_TIMEOUT_MS = 5_000;
 const LIVE_OUTPUT_DESTROY_TIMEOUT_MS = 1_000;
 let forceDirectExit = false;
-const MAX_TASK_ID_LENGTH = 128;
 const MAX_PROJECT_ID_BYTES = 128;
 const MAX_TITLE_BYTES = 512;
 const MAX_FILE_BYTES = 255;
@@ -1154,14 +1154,7 @@ function reviewPolicyTaskFromOptions(options: RunOptions): PlannedTask {
 }
 
 function assertSafeTaskId(taskId: string): void {
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ||
-    taskId.length > MAX_TASK_ID_LENGTH ||
-    taskId.includes("..") ||
-    taskId.includes("@{") ||
-    taskId.endsWith(".") ||
-    taskId.toLowerCase().endsWith(".lock")
-  ) {
+  if (!isSafeWorktreeTaskIdentity(taskId)) {
     throw new CliFailure("INVALID_TASK_ID");
   }
 }

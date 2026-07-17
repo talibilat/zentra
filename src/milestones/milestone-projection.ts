@@ -2,11 +2,15 @@ import type { StoredEvent } from "../contracts/event.js";
 import {
   MilestonePlanSchema,
   MilestoneCompletedPayloadSchema,
+  WriterBatchStartedPayloadSchema,
+  WriterIntegrationCompletedPayloadSchema,
+  WriterTerminalReleasedPayloadSchema,
   StopAndAskStateSchema,
   type MilestoneLifecycleState,
   type MilestonePlan,
   type StopAndAskState,
 } from "../contracts/milestone.js";
+import { logicalPathSetsOverlap } from "./path-ownership.js";
 import {
   digestCanonical,
   MilestonePausedPayloadSchema,
@@ -71,6 +75,28 @@ export interface MilestoneView {
   readonly replanningResolutions: readonly ReplanningResolutionPayload[];
   readonly replanningPolicy: ReplanningPolicyBinding | null;
   readonly replanningPauseOccurrence: { readonly eventId: string; readonly streamVersion: number } | null;
+  readonly writerOwnership: Readonly<Record<string, WriterOwnershipView>>;
+  readonly maxConcurrentWriters: number | null;
+}
+
+export interface WriterOwnershipView {
+  readonly batchId: string;
+  readonly writerTaskId: string;
+  readonly reviewerTaskId: string;
+  readonly actorId: string;
+  readonly capabilityId: string;
+  readonly transportModelId: string;
+  readonly harness: string;
+  readonly roles: readonly string[];
+  readonly toolPermissions: readonly string[];
+  readonly network: string;
+  readonly contextTokens: number;
+  readonly modelCapabilityDigest: string;
+  readonly modelMaxConcurrency: number;
+  readonly ownedPaths: readonly string[];
+  readonly status: "claimed" | "integrated" | "released";
+  readonly terminalOutcome: TerminalOutcome | null;
+  readonly releasePhase: "pre_review_writer" | "post_handoff_reviewer" | null;
 }
 
 interface MilestoneState {
@@ -98,6 +124,10 @@ interface MilestoneState {
   resources: Map<string, { taskId: string; intent: Record<string, unknown>; prepared: Record<string, unknown> | null; cleanup: Record<string, unknown> | null }>;
   tracedTasks: Set<string>;
   startedTasks: Set<string>;
+  writerOwnership: Map<string, WriterOwnershipView>;
+  maxConcurrentWriters: number | null;
+  writerModelLimits: Map<string, number>;
+  writerBatchIds: Set<string>;
 }
 
 const TERMINAL_EVENTS = new Map<string, TerminalOutcome>([
@@ -139,6 +169,10 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     resources: new Map(),
     tracedTasks: new Set(),
     startedTasks: new Set(),
+    writerOwnership: new Map(),
+    maxConcurrentWriters: null,
+    writerModelLimits: new Map(),
+    writerBatchIds: new Set(),
   };
 
   for (const event of events.slice(1)) {
@@ -190,6 +224,15 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
         observeOpenCodeCompleted(state, event);
         updateTask(state, event, "completed");
         break;
+      case "milestone.writer_batch_started":
+        applyWriterBatchStarted(state, event);
+        break;
+      case "milestone.writer_integration_completed":
+        applyWriterIntegrationCompleted(state, event);
+        break;
+      case "milestone.writer_terminal_released":
+        applyWriterTerminalReleased(state, event);
+        break;
       case "milestone.paused":
         applyPaused(state, event);
         break;
@@ -221,6 +264,135 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
   }
 
   return freezeView(state);
+}
+
+function applyWriterBatchStarted(state: MilestoneState, event: StoredEvent): void {
+  if (state.plan === null) throw new Error("writer batch requires a plan");
+  const payload = WriterBatchStartedPayloadSchema.parse(objectPayload(event));
+  if (state.writerBatchIds.has(payload.batchId)) throw new Error("duplicate writer batch identity");
+  if (state.maxConcurrentWriters !== null && state.maxConcurrentWriters !== payload.maxConcurrentWriters) {
+    throw new Error("writer batch changes configured global writer capacity");
+  }
+  if (payload.writers.length > payload.maxConcurrentWriters) {
+    throw new Error("writer batch exceeds global writer capacity");
+  }
+  const taskIds = new Set<string>();
+  const modelCounts = new Map<string, number>();
+  const active = [...state.writerOwnership.values()].filter((claim) => claim.status === "claimed");
+  for (const claim of active) {
+    modelCounts.set(claim.capabilityId, (modelCounts.get(claim.capabilityId) ?? 0) + 1);
+  }
+  for (const claim of payload.writers) {
+    if (state.writerOwnership.has(claim.writerTaskId)) throw new Error(`writer ${claim.writerTaskId} is already claimed`);
+    if (taskIds.has(claim.writerTaskId) || taskIds.has(claim.reviewerTaskId)) {
+      throw new Error("writer batch contains duplicate task identity");
+    }
+    taskIds.add(claim.writerTaskId);
+    taskIds.add(claim.reviewerTaskId);
+    const writer = state.plan.tasks.find((task) => task.taskId === claim.writerTaskId);
+    const reviewer = state.plan.tasks.find((task) => task.taskId === claim.reviewerTaskId);
+    if (writer?.roleAssignment.role !== "implementer" || reviewer?.roleAssignment.role !== "reviewer" ||
+      !reviewer.dependencies.includes(claim.writerTaskId)) {
+      throw new Error("writer batch requires paired implementer and reviewer tasks");
+    }
+    if (state.tasks.get(claim.writerTaskId)?.status !== "ready" || state.tasks.get(claim.reviewerTaskId)?.status !== "planned") {
+      throw new Error(`planned writer ${claim.writerTaskId} is not dependency-ready`);
+    }
+    if (writer.roleAssignment.agentId !== claim.actorId || claim.capabilityId !== claim.actorId ||
+      JSON.stringify(writer.ownedPaths) !== JSON.stringify(claim.ownedPaths)) {
+      throw new Error(`writer ${claim.writerTaskId} claim contradicts its plan`);
+    }
+    for (const dependency of writer.dependencies) {
+      if (state.tasks.get(dependency)?.terminalOutcome !== "completed") {
+        throw new Error(`planned writer ${claim.writerTaskId} dependency ${dependency} is not completed successfully`);
+      }
+    }
+    if ([...active, ...payload.writers.filter((candidate) => candidate.writerTaskId !== claim.writerTaskId)]
+      .some((candidate) => logicalPathSetsOverlap(claim.ownedPaths, candidate.ownedPaths))) {
+      throw new Error("writer ownership overlap");
+    }
+    const modelCount = (modelCounts.get(claim.capabilityId) ?? 0) + 1;
+    modelCounts.set(claim.capabilityId, modelCount);
+    const configuredModelLimit = state.writerModelLimits.get(claim.capabilityId);
+    if (configuredModelLimit !== undefined && configuredModelLimit !== claim.modelMaxConcurrency) {
+      throw new Error("writer batch changes configured model writer capacity");
+    }
+    if (modelCount > claim.modelMaxConcurrency) throw new Error("writer batch exceeds model writer capacity");
+  }
+  if (active.length + payload.writers.length > payload.maxConcurrentWriters) {
+    throw new Error("writer batch exceeds global writer capacity");
+  }
+  state.maxConcurrentWriters = payload.maxConcurrentWriters;
+  state.writerBatchIds.add(payload.batchId);
+  for (const claim of payload.writers) {
+    state.writerModelLimits.set(claim.capabilityId, claim.modelMaxConcurrency);
+    state.writerOwnership.set(claim.writerTaskId, Object.freeze({
+      batchId: payload.batchId,
+      writerTaskId: claim.writerTaskId,
+      reviewerTaskId: claim.reviewerTaskId,
+      actorId: claim.actorId,
+      capabilityId: claim.capabilityId,
+      transportModelId: claim.transportModelId,
+      harness: claim.harness,
+      roles: Object.freeze([...claim.roles]),
+      toolPermissions: Object.freeze([...claim.toolPermissions]),
+      network: claim.network,
+      contextTokens: claim.contextTokens,
+      modelCapabilityDigest: claim.modelCapabilityDigest,
+      modelMaxConcurrency: claim.modelMaxConcurrency,
+      ownedPaths: Object.freeze([...claim.ownedPaths]),
+      status: "claimed",
+      terminalOutcome: null,
+      releasePhase: null,
+    }));
+  }
+}
+
+function applyWriterIntegrationCompleted(state: MilestoneState, event: StoredEvent): void {
+  const payload = WriterIntegrationCompletedPayloadSchema.parse(objectPayload(event));
+  const ownership = state.writerOwnership.get(payload.writerTaskId);
+  if (ownership === undefined || ownership.status !== "claimed" || ownership.batchId !== payload.batchId ||
+    ownership.reviewerTaskId !== payload.reviewerTaskId || payload.evidence.taskStreamId !== payload.writerTaskId) {
+    throw new Error("writer integration completion contradicts its ownership claim");
+  }
+  if (state.tasks.get(payload.writerTaskId)?.terminalOutcome !== "completed" ||
+    state.tasks.get(payload.reviewerTaskId)?.terminalOutcome !== "completed") {
+    throw new Error("writer integration completion requires completed writer and reviewer tasks");
+  }
+  state.writerOwnership.set(payload.writerTaskId, Object.freeze({
+    ...ownership,
+    status: "integrated",
+    terminalOutcome: "completed",
+    releasePhase: null,
+  }));
+}
+
+function applyWriterTerminalReleased(state: MilestoneState, event: StoredEvent): void {
+  const payload = WriterTerminalReleasedPayloadSchema.parse(objectPayload(event));
+  const ownership = state.writerOwnership.get(payload.writerTaskId);
+  if (
+    ownership === undefined || ownership.status !== "claimed" || ownership.batchId !== payload.batchId ||
+    ownership.reviewerTaskId !== payload.reviewerTaskId
+  ) throw new Error("writer terminal release contradicts its ownership claim");
+  const writer = state.tasks.get(payload.writerTaskId);
+  const reviewer = state.tasks.get(payload.reviewerTaskId);
+  if (payload.phase === "pre_review_writer") {
+    if (payload.milestoneTerminalTaskId !== payload.writerTaskId || writer?.terminalOutcome !== payload.outcome ||
+      reviewer?.status !== "planned") {
+      throw new Error("pre-review writer release contradicts milestone task outcomes");
+    }
+  } else if (
+    payload.milestoneTerminalTaskId !== payload.reviewerTaskId || writer?.terminalOutcome !== "completed" ||
+    reviewer?.terminalOutcome !== payload.outcome
+  ) {
+    throw new Error("post-handoff reviewer release contradicts milestone task outcomes");
+  }
+  state.writerOwnership.set(payload.writerTaskId, Object.freeze({
+    ...ownership,
+    status: "released",
+    terminalOutcome: payload.outcome,
+    releasePhase: payload.phase,
+  }));
 }
 
 function observeOpenCodeRunning(state: MilestoneState, event: StoredEvent): void {
@@ -675,6 +847,8 @@ function freezeView(state: MilestoneState): MilestoneView {
     replanningResolutions: Object.freeze([...state.replanningResolutions]),
     replanningPolicy: state.replanningPolicy,
     replanningPauseOccurrence: state.replanningPauseOccurrence === null ? null : Object.freeze({ ...state.replanningPauseOccurrence }),
+    writerOwnership: Object.freeze(Object.fromEntries(state.writerOwnership)),
+    maxConcurrentWriters: state.maxConcurrentWriters,
   });
 }
 

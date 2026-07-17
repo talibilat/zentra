@@ -18,6 +18,7 @@ import { projectMilestone, type MilestoneView } from "./milestone-projection.js"
 import { assessMilestonePlanReadiness } from "./plan-readiness.js";
 import {
   capabilitySupportsAdmission,
+  capabilitySnapshot,
   createMilestoneAuthorityEnvelope,
   createReplanningPolicyBinding,
   createReplanningAttention,
@@ -32,13 +33,21 @@ import {
 import {
   MilestoneCompletedPayloadSchema,
   MilestonePlanSchema,
+  WriterBatchStartedPayloadSchema,
+  WriterIntegrationCompletedPayloadSchema,
+  WriterTerminalReleasedPayloadSchema,
   type MilestonePlan,
   type MilestoneRole,
   type VerifiedMilestoneIntegrationEvidence,
+  type WriterBatchClaim,
 } from "../contracts/milestone.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import { modelSheetSha256 } from "../routing/model-router.js";
 import { projectTask } from "../tasks/task-projection.js";
+import { ReviewDecisionSchema } from "../reviews/reviewer-adapter.js";
+import { canonicalValidationDigest } from "../reviews/reviewer-adapter.js";
+import { ValidationReportSchema } from "../capabilities/validation-runner.js";
+import { artifactEvidenceSha256, projectArtifacts } from "../contracts/artifact.js";
 
 export interface RegisterMilestoneInput {
   readonly milestoneId: string;
@@ -68,6 +77,12 @@ export interface MilestoneSummary {
 export interface MilestoneRecord extends MilestoneView {
   readonly traceId: string;
   readonly tracePath: string | null;
+}
+
+export interface StartWriterBatchInput {
+  readonly batchId: string;
+  readonly maxConcurrentWriters: number;
+  readonly writers: readonly WriterBatchClaim[];
 }
 
 export type TaskAdmissionResult =
@@ -197,6 +212,7 @@ export class MilestoneRegistry {
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${streamId} has no view`);
       verifyStoredCompletion(this.journal, events, view);
+      assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
       return Object.freeze({
         milestoneId: view.milestoneId,
         projectId: view.projectId,
@@ -530,15 +546,47 @@ export class MilestoneRegistry {
   }
 
   startTask(milestoneId: string, taskId: string, actorId: string, role: MilestoneRole): MilestoneRecord {
-    const view = this.requireMilestone(milestoneId);
-    const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
-    if (task === undefined || view.tasks[taskId]?.status !== "ready") {
-      throw new Error(`planned task ${taskId} is not ready`);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const view = projectMilestone(events);
+      if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
+      if (task === undefined || task.roleAssignment.agentId !== actorId || task.roleAssignment.role !== role) {
+        throw new Error(`planned task ${taskId} actor contradicts its assignment`);
+      }
+      const current = view.tasks[taskId];
+      if (current?.status === "running" || current?.status === "completed") return withTrace(view, events);
+      if (current?.status !== "ready") throw new Error(`planned task ${taskId} is not ready`);
+      const appended = this.tryAppendTransition(events, view, "milestone.task_running", { taskId, actorId, role });
+      if (appended !== null) return appended;
     }
-    if (task.roleAssignment.agentId !== actorId || task.roleAssignment.role !== role) {
-      throw new Error(`planned task ${taskId} actor contradicts its assignment`);
+    throw new Error("task start did not converge");
+  }
+
+  startWriterBatch(milestoneId: string, input: StartWriterBatchInput): MilestoneRecord {
+    const payload = WriterBatchStartedPayloadSchema.parse({ schemaVersion: 1, ...input });
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const view = projectMilestone(events);
+      if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      assertWriterClaimProvenance(view, payload.writers);
+      const nextEvent: NewEvent<string, unknown> = {
+        streamId: milestoneId,
+        type: "milestone.writer_batch_started",
+        payload: canonicalPayload(payload),
+        causationId: null,
+        correlationId: events[0]!.correlationId,
+      };
+      try {
+        projectMilestone([...events, candidateStoredEvent(nextEvent, view.streamVersion + 1)]);
+        const stored = this.journal.append(milestoneId, view.streamVersion, [nextEvent]);
+        const updatedEvents = [...events, ...stored];
+        return withTrace(projectMilestone(updatedEvents)!, updatedEvents);
+      } catch (error) {
+        if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      }
     }
-    return this.appendTransition(milestoneId, "milestone.task_running", { taskId, actorId, role });
+    throw new Error("writer batch claim did not converge");
   }
 
   completeTask(
@@ -547,18 +595,28 @@ export class MilestoneRegistry {
     outcome: TerminalOutcome,
     evidence: Readonly<Record<string, unknown>> = {},
   ): MilestoneRecord {
-    const view = this.requireMilestone(milestoneId);
-    const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
-    if (task === undefined || view.tasks[taskId]?.status !== "running") {
-      throw new Error(`planned task ${taskId} is not running`);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const view = projectMilestone(events);
+      if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
+      if (task === undefined) throw new Error(`unknown planned task: ${taskId}`);
+      const current = view.tasks[taskId];
+      if (current?.status === "completed") {
+        if (current.terminalOutcome !== outcome) throw new Error(`planned task ${taskId} completed with another outcome`);
+        return withTrace(view, events);
+      }
+      if (current?.status !== "running") throw new Error(`planned task ${taskId} is not running`);
+      const appended = this.tryAppendTransition(events, view, "milestone.task_completed", {
+        taskId,
+        actorId: task.roleAssignment.agentId,
+        role: task.roleAssignment.role,
+        outcome,
+        evidence,
+      });
+      if (appended !== null) return appended;
     }
-    return this.appendTransition(milestoneId, "milestone.task_completed", {
-      taskId,
-      actorId: task.roleAssignment.agentId,
-      role: task.roleAssignment.role,
-      outcome,
-      evidence,
-    });
+    throw new Error("task completion did not converge");
   }
 
   finish(
@@ -574,7 +632,20 @@ export class MilestoneRegistry {
     const milestoneEvents = this.journal.readStream(milestoneId);
     let milestone = projectMilestone(milestoneEvents);
     if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
-    const evidence = verifiedIntegrationEvidence(this.journal, milestoneEvents, milestone, taskStreamId);
+    const singletonWriter = milestone.plan?.tasks.find((planned) => planned.taskId === taskStreamId);
+    const pairedReviewer = milestone.plan?.tasks.find((planned) =>
+      planned.roleAssignment.role === "reviewer" && planned.dependencies.includes(taskStreamId));
+    if (singletonWriter === undefined || pairedReviewer === undefined) {
+      throw new Error("integration evidence requires one planned writer-reviewer pair");
+    }
+    const evidence = verifiedIntegrationEvidence(
+      this.journal,
+      milestoneEvents,
+      milestone,
+      taskStreamId,
+      true,
+      pairedReviewer.roleAssignment.agentId,
+    );
     const runningReviewer = milestone.plan?.tasks.find((planned) =>
       planned.roleAssignment.role === "reviewer" && milestone!.tasks[planned.taskId]?.status === "running");
     if (runningReviewer !== undefined) {
@@ -590,11 +661,181 @@ export class MilestoneRegistry {
     });
   }
 
+  completeWriterIntegration(milestoneId: string, writerTaskId: string): MilestoneRecord {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const milestone = projectMilestone(events);
+      if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      const ownership = milestone.writerOwnership[writerTaskId];
+      if (ownership === undefined) throw new Error(`writer ${writerTaskId} has no ownership claim`);
+      if (ownership.status === "integrated") {
+        verifyStoredWriterIntegrations(this.journal, events, milestone);
+        return withTrace(milestone, events);
+      }
+      const reviewer = milestone.plan?.tasks.find((task) => task.taskId === ownership.reviewerTaskId);
+      const reviewerState = reviewer === undefined ? undefined : milestone.tasks[reviewer.taskId];
+      if (reviewer === undefined || (reviewerState?.status !== "running" && reviewerState?.status !== "completed")) {
+        throw new Error(`paired reviewer ${ownership.reviewerTaskId} is not running or completed`);
+      }
+      if (reviewerState.terminalOutcome !== null && reviewerState.terminalOutcome !== "completed") {
+        throw new Error(`paired reviewer ${ownership.reviewerTaskId} did not complete successfully`);
+      }
+      const evidence = verifiedIntegrationEvidence(
+        this.journal,
+        events,
+        milestone,
+        writerTaskId,
+        false,
+        reviewer.roleAssignment.agentId,
+      );
+      const next: NewEvent<string, unknown>[] = [];
+      if (reviewerState.status === "running") {
+        next.push(this.newMilestoneEvent(events, milestoneId, "milestone.task_completed", {
+          taskId: reviewer.taskId,
+          actorId: reviewer.roleAssignment.agentId,
+          role: reviewer.roleAssignment.role,
+          outcome: "completed",
+          evidence,
+        }));
+      }
+      next.push(this.newMilestoneEvent(events, milestoneId, "milestone.writer_integration_completed",
+        WriterIntegrationCompletedPayloadSchema.parse({
+          schemaVersion: 1,
+          batchId: ownership.batchId,
+          writerTaskId,
+          reviewerTaskId: reviewer.taskId,
+          evidence,
+        })));
+      const candidates = next.map((event, index) =>
+        candidateStoredEvent(event, milestone.streamVersion + index + 1));
+      projectMilestone([...events, ...candidates]);
+      try {
+        const stored = this.journal.append(milestoneId, milestone.streamVersion, next);
+        const updatedEvents = [...events, ...stored];
+        return withTrace(projectMilestone(updatedEvents)!, updatedEvents);
+      } catch (error) {
+        if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      }
+    }
+    throw new Error("writer integration evidence did not converge");
+  }
+
+  releaseTerminalWriter(milestoneId: string, writerTaskId: string): MilestoneRecord {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const milestone = projectMilestone(events);
+      if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      const ownership = milestone.writerOwnership[writerTaskId];
+      if (ownership === undefined) throw new Error(`writer ${writerTaskId} has no ownership claim`);
+      if (ownership.status === "released") {
+        verifyStoredWriterReleases(this.journal, events, milestone);
+        return withTrace(milestone, events);
+      }
+      if (ownership.status !== "claimed") throw new Error(`writer ${writerTaskId} ownership is not releasable`);
+      const taskEvents = this.journal.readStream(writerTaskId);
+      if (taskEvents.length === 0 || taskEvents.some((event) =>
+        event.streamId !== writerTaskId || event.correlationId !== events[0]!.correlationId)) {
+        throw new Error("terminal writer stream is not bound to the milestone trace");
+      }
+      const task = projectTask(taskEvents);
+      if (task === null || task.terminalOutcome === null || task.terminalOutcome === "completed") {
+        throw new Error("writer ownership release requires a non-success terminal task stream");
+      }
+      const outcome = task.terminalOutcome;
+      const terminalEvent = taskEvents.at(-1)!;
+      if (terminalEvent.type !== `task.${outcome}`) throw new Error("writer terminal event is not canonical");
+      const writerState = milestone.tasks[writerTaskId];
+      if (writerState?.status !== "running" && writerState?.status !== "completed") {
+        throw new Error(`planned writer ${writerTaskId} is not running or completed`);
+      }
+      const reviewerState = milestone.tasks[ownership.reviewerTaskId];
+      const phase = writerState.status === "running" || writerState.terminalOutcome === outcome
+        ? "pre_review_writer" as const
+        : writerState.terminalOutcome === "completed"
+        ? "post_handoff_reviewer" as const
+        : null;
+      if (phase === null) throw new Error("terminal task stream contradicts milestone writer outcome");
+      if (phase === "pre_review_writer" && reviewerState?.status !== "planned") {
+        throw new Error("pre-review writer release requires an unstarted reviewer");
+      }
+      if (phase === "post_handoff_reviewer" &&
+        reviewerState?.status !== "running" && reviewerState?.status !== "completed") {
+        throw new Error("post-handoff release requires a running or completed paired reviewer");
+      }
+      if (phase === "post_handoff_reviewer" && reviewerState?.terminalOutcome !== null &&
+        reviewerState?.terminalOutcome !== outcome) {
+        throw new Error("terminal task stream contradicts paired reviewer outcome");
+      }
+      const next: NewEvent<string, unknown>[] = [];
+      if (phase === "pre_review_writer" && writerState.status === "running") {
+        const planned = milestone.plan?.tasks.find((candidate) => candidate.taskId === writerTaskId)!;
+        next.push(this.newMilestoneEvent(events, milestoneId, "milestone.task_completed", {
+          taskId: writerTaskId,
+          actorId: planned.roleAssignment.agentId,
+          role: planned.roleAssignment.role,
+          outcome,
+          evidence: { taskStreamId: writerTaskId, reconciliation: "terminal_task_stream" },
+        }));
+      }
+      if (phase === "post_handoff_reviewer" && reviewerState?.status === "running") {
+        const reviewer = milestone.plan?.tasks.find((candidate) => candidate.taskId === ownership.reviewerTaskId)!;
+        next.push(this.newMilestoneEvent(events, milestoneId, "milestone.task_completed", {
+          taskId: reviewer.taskId,
+          actorId: reviewer.roleAssignment.agentId,
+          role: reviewer.roleAssignment.role,
+          outcome,
+          evidence: { taskStreamId: writerTaskId, reconciliation: "terminal_paired_task_stream" },
+        }));
+      }
+      next.push(this.newMilestoneEvent(events, milestoneId, "milestone.writer_terminal_released",
+        WriterTerminalReleasedPayloadSchema.parse({
+          schemaVersion: 1,
+          batchId: ownership.batchId,
+          writerTaskId,
+          reviewerTaskId: ownership.reviewerTaskId,
+          phase,
+          milestoneTerminalTaskId: phase === "pre_review_writer" ? writerTaskId : ownership.reviewerTaskId,
+          outcome,
+          terminalEvidence: {
+            streamId: writerTaskId,
+            eventId: terminalEvent.eventId,
+            streamVersion: terminalEvent.streamVersion,
+            payloadDigest: digestCanonical(terminalEvent.payload),
+            correlationId: terminalEvent.correlationId,
+          },
+        })));
+      const candidates = next.map((event, index) => candidateStoredEvent(event, milestone.streamVersion + index + 1));
+      projectMilestone([...events, ...candidates]);
+      try {
+        const stored = this.journal.append(milestoneId, milestone.streamVersion, next);
+        const updatedEvents = [...events, ...stored];
+        return withTrace(projectMilestone(updatedEvents)!, updatedEvents);
+      } catch (error) {
+        if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      }
+    }
+    throw new Error("writer terminal release did not converge");
+  }
+
+  inspectWriterTask(milestoneId: string, writerTaskId: string): ReturnType<typeof projectTask> {
+    const milestoneEvents = this.journal.readStream(milestoneId);
+    if (milestoneEvents.length === 0) throw new Error(`milestone ${milestoneId} does not exist`);
+    const taskEvents = this.journal.readStream(writerTaskId);
+    if (taskEvents.length === 0) return null;
+    if (taskEvents.some((event) => event.correlationId !== milestoneEvents[0]!.correlationId)) {
+      throw new Error("writer task stream is not bound to the milestone trace");
+    }
+    return projectTask(taskEvents);
+  }
+
   inspect(milestoneId: string): MilestoneRecord | null {
     const events = this.journal.readStream(milestoneId);
     const view = projectMilestone(events);
     if (view === null) return null;
     verifyStoredCompletion(this.journal, events, view);
+    assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
+    verifyStoredWriterIntegrations(this.journal, events, view);
+    verifyStoredWriterReleases(this.journal, events, view);
     return withTrace(view, events);
   }
 
@@ -622,6 +863,39 @@ export class MilestoneRegistry {
     projectMilestone([...events, candidateStoredEvent(nextEvent, view.streamVersion + 1)]);
     const stored = this.journal.append(milestoneId, view.streamVersion, [nextEvent]);
     return withTrace(projectMilestone([...events, ...stored])!, [...events, ...stored]);
+  }
+
+  private tryAppendTransition(
+    events: readonly StoredEvent[],
+    view: MilestoneView,
+    type: string,
+    payload: unknown,
+  ): MilestoneRecord | null {
+    const nextEvent = this.newMilestoneEvent(events, view.milestoneId, type, payload);
+    projectMilestone([...events, candidateStoredEvent(nextEvent, view.streamVersion + 1)]);
+    try {
+      const stored = this.journal.append(view.milestoneId, view.streamVersion, [nextEvent]);
+      const updatedEvents = [...events, ...stored];
+      return withTrace(projectMilestone(updatedEvents)!, updatedEvents);
+    } catch (error) {
+      if (error instanceof Error && /^expected version \d+, actual \d+$/.test(error.message)) return null;
+      throw error;
+    }
+  }
+
+  private newMilestoneEvent(
+    events: readonly StoredEvent[],
+    milestoneId: string,
+    type: string,
+    payload: unknown,
+  ): NewEvent<string, unknown> {
+    return {
+      streamId: milestoneId,
+      type,
+      payload: canonicalPayload(payload),
+      causationId: null,
+      correlationId: events[0]!.correlationId,
+    };
   }
 }
 
@@ -790,14 +1064,58 @@ function recordValue(
     : null;
 }
 
+function assertWriterClaimProvenance(
+  milestone: MilestoneView,
+  claims: readonly {
+    readonly actorId: string;
+    readonly capabilityId: string;
+    readonly transportModelId: string;
+    readonly harness: string;
+    readonly roles: readonly string[];
+    readonly toolPermissions: readonly string[];
+    readonly network: string;
+    readonly contextTokens: number;
+    readonly modelCapabilityDigest: string;
+    readonly modelMaxConcurrency: number;
+  }[],
+): void {
+  if (claims.length === 0) return;
+  const envelope = milestone.authorityEnvelope;
+  const modelSheet = milestone.replanningPolicy?.modelSheet ?? null;
+  if (envelope === null && modelSheet === null) return;
+  if (envelope === null || modelSheet === null || envelope.modelSheetDigest === null ||
+    milestone.replanningPolicy?.modelSheetDigest !== envelope.modelSheetDigest) {
+    throw new Error("writer batch model provenance is not pinned by durable authority");
+  }
+  for (const claim of claims) {
+    const model = modelSheet.models.find((candidate) => candidate.id === claim.capabilityId);
+    const pinnedCapability = envelope.capabilities.find((candidate) => candidate.capabilityId === claim.capabilityId);
+    if (model === undefined || pinnedCapability === undefined) {
+      throw new Error("writer batch model provenance is not in the pinned model sheet");
+    }
+    const snapshot = capabilitySnapshot({ models: [model] })[0]!;
+    if (
+      claim.actorId !== model.id || claim.transportModelId !== model.model ||
+      claim.harness !== model.harness || claim.network !== model.network ||
+      claim.contextTokens !== model.contextTokens || claim.modelMaxConcurrency !== model.maxConcurrency ||
+      claim.modelCapabilityDigest !== digestCanonical(model) ||
+      digestCanonical([...claim.roles].sort()) !== digestCanonical([...model.roles].sort()) ||
+      digestCanonical([...claim.toolPermissions].sort()) !== digestCanonical([...model.toolPermissions].sort()) ||
+      digestCanonical(snapshot) !== digestCanonical(pinnedCapability)
+    ) throw new Error("writer batch claim contradicts pinned model provenance");
+  }
+}
+
 function verifiedIntegrationEvidence(
   journal: EventJournal,
   milestoneEvents: readonly StoredEvent[],
   milestone: MilestoneView,
   taskStreamId: string,
+  requireSingleton: boolean,
+  expectedReviewerId: string,
 ): VerifiedMilestoneIntegrationEvidence {
   const implementers = milestone.plan?.tasks.filter((task) => task.roleAssignment.role === "implementer") ?? [];
-  if (implementers.length !== 1 || implementers[0]!.taskId !== taskStreamId) {
+  if ((requireSingleton && implementers.length !== 1) || !implementers.some((task) => task.taskId === taskStreamId)) {
     throw new Error("integration evidence must belong to the planned implementer task");
   }
   const taskEvents = journal.readStream(taskStreamId);
@@ -815,6 +1133,7 @@ function verifiedIntegrationEvidence(
     event.type === "task.cleanup_completed" || event.type === "task.cleanup_reconciled");
   const integrationPayload = eventPayload(integration);
   const receipt = recordValue(integrationPayload, "receipt");
+  assertPairedReviewEvidence(taskEvents, expectedReviewerId, receipt);
   const resultCommit = receipt?.["resultCommit"];
   if (
     integration === undefined || completion === undefined || cleanup === undefined ||
@@ -835,6 +1154,56 @@ function verifiedIntegrationEvidence(
   };
 }
 
+function assertPairedReviewEvidence(
+  taskEvents: readonly StoredEvent[],
+  expectedReviewerId: string,
+  receipt: Readonly<Record<string, unknown>> | null,
+): void {
+  const artifacts = projectArtifacts(taskEvents);
+  const byKind = (kind: "patch" | "validation_report" | "review_report") => {
+    const matching = artifacts.artifacts.filter((artifact) => artifact.kind === kind);
+    if (matching.length !== 1) throw new Error(`task stream lacks exact ${kind} artifact evidence`);
+    const artifact = matching[0]!;
+    return { artifact, evidence: artifacts.evidenceByArtifactId[artifact.artifactId] };
+  };
+  const patch = byKind("patch");
+  const validationArtifact = byKind("validation_report");
+  const reviewArtifact = byKind("review_report");
+  const patchEvidence = patch.evidence as Readonly<Record<string, unknown>>;
+  const patchDiffSha256 = patchEvidence?.["diffSha256"];
+  const validation = ValidationReportSchema.safeParse(validationArtifact.evidence);
+  const requested = taskEvents.filter((event) => event.type === "task.review_requested");
+  const approved = taskEvents.filter((event) => event.type === "task.review_approved");
+  const validationCompleted = taskEvents.filter((event) => event.type === "task.validation_completed");
+  if (requested.length !== 1 || approved.length !== 1 || validationCompleted.length !== 1) {
+    throw new Error("task stream lacks exact paired review evidence");
+  }
+  const validationPayload = eventPayload(validationCompleted[0]);
+  const requestPayload = eventPayload(requested[0]);
+  const approvalPayload = eventPayload(approved[0]);
+  const parsed = ReviewDecisionSchema.safeParse(approvalPayload?.["review"]);
+  const receiptReview = receipt?.["review"];
+  if (
+    typeof patchDiffSha256 !== "string" || patchDiffSha256 !== patch.artifact.sha256 ||
+    artifactEvidenceSha256("patch", patch.evidence) !== patch.artifact.sha256 ||
+    !validation.success || validation.data.name !== "focused" || validation.data.outcome !== "completed" ||
+    validation.data.exitCode !== 0 || validation.data.provenance.subjectSha256 !== patchDiffSha256 ||
+    artifactEvidenceSha256("validation_report", validation.data) !== validationArtifact.artifact.sha256 ||
+    validationPayload?.["outcome"] !== "completed" || validationPayload["diffSha256"] !== patchDiffSha256 ||
+    validationPayload["validation"] === undefined ||
+    digestCanonical(validationPayload["validation"]) !== digestCanonical(validation.data) ||
+    requestPayload?.["reviewerId"] !== expectedReviewerId ||
+    requestPayload["validation"] === undefined ||
+    digestCanonical(requestPayload["validation"]) !== digestCanonical(validation.data) ||
+    !parsed.success || !parsed.data.approved || parsed.data.reviewerId !== expectedReviewerId ||
+    parsed.data.diffSha256 !== patchDiffSha256 ||
+    parsed.data.validationSha256 !== canonicalValidationDigest(validation.data) ||
+    artifactEvidenceSha256("review_report", parsed.data) !== reviewArtifact.artifact.sha256 ||
+    digestCanonical(reviewArtifact.evidence) !== digestCanonical(parsed.data) ||
+    receiptReview === undefined || digestCanonical(receiptReview) !== digestCanonical(parsed.data)
+  ) throw new Error("task stream lacks exact paired review evidence");
+}
+
 function verifyStoredCompletion(
   journal: EventJournal,
   milestoneEvents: readonly StoredEvent[],
@@ -847,8 +1216,80 @@ function verifyStoredCompletion(
   const completion = milestoneEvents.at(-1);
   if (completion?.type !== "milestone.completed") throw new Error("completed milestone lacks a terminal event");
   const retained = MilestoneCompletedPayloadSchema.parse(completion.payload).evidence;
-  const verified = verifiedIntegrationEvidence(journal, milestoneEvents, milestone, retained.taskStreamId);
+  const reviewer = milestone.plan.tasks.find((task) =>
+    task.roleAssignment.role === "reviewer" && task.dependencies.includes(retained.taskStreamId));
+  if (reviewer === undefined) throw new Error("completed milestone lacks a paired reviewer");
+  const verified = verifiedIntegrationEvidence(
+    journal,
+    milestoneEvents,
+    milestone,
+    retained.taskStreamId,
+    true,
+    reviewer.roleAssignment.agentId,
+  );
   if (digestCanonical(retained) !== digestCanonical(verified)) {
     throw new Error("milestone completion evidence contradicts the retained task stream");
+  }
+}
+
+function verifyStoredWriterIntegrations(
+  journal: EventJournal,
+  milestoneEvents: readonly StoredEvent[],
+  milestone: MilestoneView,
+): void {
+  for (const ownership of Object.values(milestone.writerOwnership)) {
+    if (ownership.status !== "integrated") continue;
+    const event = milestoneEvents.findLast((candidate) =>
+      candidate.type === "milestone.writer_integration_completed" &&
+      eventPayload(candidate)?.["writerTaskId"] === ownership.writerTaskId);
+    if (event === undefined) throw new Error("integrated writer lacks retained milestone evidence");
+    const retained = WriterIntegrationCompletedPayloadSchema.parse(event.payload).evidence;
+    const reviewer = milestone.plan?.tasks.find((task) => task.taskId === ownership.reviewerTaskId);
+    if (reviewer === undefined) throw new Error("integrated writer lacks its paired reviewer");
+    const verified = verifiedIntegrationEvidence(
+      journal,
+      milestoneEvents,
+      milestone,
+      ownership.writerTaskId,
+      false,
+      reviewer.roleAssignment.agentId,
+    );
+    if (digestCanonical(retained) !== digestCanonical(verified)) {
+      throw new Error("writer integration evidence contradicts the retained task stream");
+    }
+  }
+}
+
+function verifyStoredWriterReleases(
+  journal: EventJournal,
+  milestoneEvents: readonly StoredEvent[],
+  milestone: MilestoneView,
+): void {
+  for (const ownership of Object.values(milestone.writerOwnership)) {
+    if (ownership.status !== "released") continue;
+    const releaseEvent = milestoneEvents.findLast((candidate) =>
+      candidate.type === "milestone.writer_terminal_released" &&
+      eventPayload(candidate)?.["writerTaskId"] === ownership.writerTaskId);
+    if (releaseEvent === undefined) throw new Error("released writer lacks retained milestone evidence");
+    const retained = WriterTerminalReleasedPayloadSchema.parse(releaseEvent.payload);
+    const taskEvents = journal.readStream(ownership.writerTaskId);
+    const terminal = taskEvents.at(-1);
+    const task = projectTask(taskEvents);
+    const expectedMilestoneTaskId = retained.phase === "pre_review_writer"
+      ? ownership.writerTaskId
+      : ownership.reviewerTaskId;
+    if (
+      taskEvents.length === 0 || taskEvents.some((event) =>
+        event.streamId !== ownership.writerTaskId || event.correlationId !== milestoneEvents[0]!.correlationId) ||
+      terminal === undefined || task?.terminalOutcome !== retained.outcome ||
+      retained.outcome !== ownership.terminalOutcome || retained.phase !== ownership.releasePhase ||
+      retained.milestoneTerminalTaskId !== expectedMilestoneTaskId ||
+      retained.terminalEvidence.streamId !== ownership.writerTaskId ||
+      terminal.eventId !== retained.terminalEvidence.eventId ||
+      terminal.streamVersion !== retained.terminalEvidence.streamVersion ||
+      terminal.correlationId !== retained.terminalEvidence.correlationId ||
+      retained.terminalEvidence.correlationId !== milestoneEvents[0]!.correlationId ||
+      digestCanonical(terminal.payload) !== retained.terminalEvidence.payloadDigest
+    ) throw new Error("writer terminal release contradicts the retained task stream");
   }
 }

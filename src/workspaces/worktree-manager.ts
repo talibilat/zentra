@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, lstatSync } from "node:fs";
 import path from "node:path";
+import { assertSafeWorktreeTaskIdentity } from "../contracts/task-identity.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import {
   GitClient,
@@ -83,11 +84,31 @@ export class WorkspaceCleanupError extends Error {
 }
 
 export class WorktreeManager {
+  private readonly integrationBranchPreparations = new Map<string, Promise<void>>();
+
   constructor(private readonly git = new GitClient()) {}
 
   async ensureIntegrationBranch(
     project: ProjectConfig,
     options: GitRunOptions = {},
+  ): Promise<void> {
+    const key = `${project.repositoryPath}\0${project.integrationBranch}`;
+    const active = this.integrationBranchPreparations.get(key);
+    if (active !== undefined) return active;
+    const preparation = this.ensureIntegrationBranchOnce(project, options);
+    this.integrationBranchPreparations.set(key, preparation);
+    try {
+      await preparation;
+    } finally {
+      if (this.integrationBranchPreparations.get(key) === preparation) {
+        this.integrationBranchPreparations.delete(key);
+      }
+    }
+  }
+
+  private async ensureIntegrationBranchOnce(
+    project: ProjectConfig,
+    options: GitRunOptions,
   ): Promise<void> {
     await this.assertSafeGitConfiguration(project.repositoryPath, options);
     const existing = await this.run(project.repositoryPath, [
@@ -132,6 +153,7 @@ export class WorktreeManager {
     options: GitRunOptions = {},
     onPrepared?: (intent: WorkspaceCreationIntent) => void | Promise<void>,
   ): Promise<WorkspaceLease> {
+    assertSafeWorktreeTaskIdentity(taskId);
     await this.assertSafeGitConfiguration(project.repositoryPath, options);
     const branch = `ticket/${taskId}`;
     const worktreePath = path.join(project.worktreeRoot, taskId);

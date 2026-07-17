@@ -77,7 +77,7 @@ export class TwoAgentMilestoneCoordinator {
       request.modelSheet,
     );
     if (writerAdmission.status !== "admitted") return writerAdmission.milestone;
-    assertExecutionBinding(request, milestone, writer, reviewer, writerAdmission.admission.packet);
+    assertTwoAgentExecutionBinding(request, milestone, writer, reviewer, writerAdmission.admission.packet);
     this.milestones.startTask(
       request.milestoneId,
       writer.taskId,
@@ -136,7 +136,7 @@ export class TwoAgentMilestoneCoordinator {
   }
 }
 
-function assertExecutionBinding(
+export function assertTwoAgentExecutionBinding(
   request: TwoAgentMilestoneRequest,
   milestone: MilestoneRecord,
   writer: NonNullable<MilestoneRecord["plan"]>["tasks"][number],

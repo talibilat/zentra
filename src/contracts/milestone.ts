@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import { TerminalOutcomeSchema } from "./task.js";
+import { logicalPathScopesOverlap } from "../milestones/path-ownership.js";
+import { canonicalDarwinTaskIdentity, WorktreeTaskIdentitySchema } from "./task-identity.js";
 
 const MAX_ID_LENGTH = 256;
 const MAX_TEXT_LENGTH = 4_096;
@@ -103,7 +105,7 @@ export const StopAndAskStateSchema = z.strictObject({
 export const TaskDependencySchema = IdentitySchema;
 
 export const PlannedTaskSchema = z.strictObject({
-  taskId: IdentitySchema,
+  taskId: WorktreeTaskIdentitySchema,
   title: BoundedTextSchema,
   description: BoundedTextSchema,
   dependencies: z.array(TaskDependencySchema).max(128),
@@ -191,6 +193,54 @@ export const MilestoneCompletedPayloadSchema = z.strictObject({
   evidence: VerifiedMilestoneIntegrationEvidenceSchema,
 });
 
+export const WriterBatchClaimSchema = z.strictObject({
+  writerTaskId: IdentitySchema,
+  reviewerTaskId: IdentitySchema,
+  actorId: IdentitySchema,
+  capabilityId: IdentitySchema,
+  transportModelId: IdentitySchema,
+  harness: HarnessSchema,
+  roles: z.array(MilestoneRoleSchema).min(1).max(32),
+  toolPermissions: z.array(IdentitySchema).max(64),
+  network: IdentitySchema,
+  contextTokens: z.number().int().positive(),
+  modelCapabilityDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  ownedPaths: z.array(SafeLogicalPathSchema).min(1).max(256),
+  modelMaxConcurrency: z.number().int().positive(),
+});
+
+export const WriterBatchStartedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  batchId: IdentitySchema,
+  maxConcurrentWriters: z.number().int().positive(),
+  writers: z.array(WriterBatchClaimSchema).min(1).max(64),
+});
+
+export const WriterIntegrationCompletedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  batchId: IdentitySchema,
+  writerTaskId: IdentitySchema,
+  reviewerTaskId: IdentitySchema,
+  evidence: VerifiedMilestoneIntegrationEvidenceSchema,
+});
+
+export const WriterTerminalReleasedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  batchId: IdentitySchema,
+  writerTaskId: IdentitySchema,
+  reviewerTaskId: IdentitySchema,
+  phase: z.enum(["pre_review_writer", "post_handoff_reviewer"]),
+  milestoneTerminalTaskId: IdentitySchema,
+  outcome: z.enum(["cancelled", "denied", "timed_out", "failed"]),
+  terminalEvidence: z.strictObject({
+    streamId: IdentitySchema,
+    eventId: IdentitySchema,
+    streamVersion: z.number().int().positive(),
+    payloadDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    correlationId: IdentitySchema,
+  }),
+});
+
 export type MilestoneLifecycleState = z.infer<typeof MilestoneLifecycleStateSchema>;
 export type MilestoneRole = z.infer<typeof MilestoneRoleSchema>;
 export type Harness = z.infer<typeof HarnessSchema>;
@@ -205,6 +255,8 @@ export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 export type MilestonePlan = z.infer<typeof MilestonePlanSchema>;
 export type Milestone = z.infer<typeof MilestoneSchema>;
 export type VerifiedMilestoneIntegrationEvidence = z.infer<typeof VerifiedMilestoneIntegrationEvidenceSchema>;
+export type WriterBatchClaim = z.infer<typeof WriterBatchClaimSchema>;
+export type WriterBatchStartedPayload = z.infer<typeof WriterBatchStartedPayloadSchema>;
 
 export function assertAcyclicMilestonePlan<TPlan extends MilestonePlan>(plan: TPlan): TPlan {
   const problem = dependencyProblem(plan.tasks);
@@ -214,9 +266,13 @@ export function assertAcyclicMilestonePlan<TPlan extends MilestonePlan>(plan: TP
 
 function dependencyProblem(tasks: readonly PlannedTask[]): string | null {
   const taskIds = new Set<string>();
+  const canonicalTaskIds = new Set<string>();
   for (const task of tasks) {
     if (taskIds.has(task.taskId)) return `duplicate planned task: ${task.taskId}`;
+    const canonicalTaskId = canonicalDarwinTaskIdentity(task.taskId);
+    if (canonicalTaskIds.has(canonicalTaskId)) return `Darwin-equivalent planned task: ${task.taskId}`;
     taskIds.add(task.taskId);
+    canonicalTaskIds.add(canonicalTaskId);
   }
 
   for (const task of tasks) {
@@ -263,16 +319,12 @@ function contradictoryPathScope(
 ): string | null {
   for (const ownedPath of ownedPaths) {
     for (const forbiddenPath of forbiddenPaths) {
-      if (pathsOverlap(ownedPath, forbiddenPath)) {
+      if (logicalPathScopesOverlap(ownedPath, forbiddenPath)) {
         return `owned path ${ownedPath} overlaps forbidden path ${forbiddenPath}`;
       }
     }
   }
   return null;
-}
-
-function pathsOverlap(first: string, second: string): boolean {
-  return first === second || first.startsWith(`${second}/`) || second.startsWith(`${first}/`);
 }
 
 function isSafeLogicalPath(candidate: string): boolean {
