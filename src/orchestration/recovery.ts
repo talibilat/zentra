@@ -3,6 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod";
+import { isSafeWorktreeTaskIdentity } from "../contracts/task-identity.js";
 
 import { ValidationReportSchema } from "../capabilities/validation-runner.js";
 import type { StoredEvent } from "../contracts/event.js";
@@ -1641,13 +1642,7 @@ function parseEvent<T extends z.ZodType>(schema: T, event: StoredEvent): z.infer
 }
 
 function isSafeTaskId(taskId: string): boolean {
-  return (
-    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) &&
-    !taskId.includes("..") &&
-    !taskId.includes("@{") &&
-    !taskId.endsWith(".") &&
-    !taskId.toLowerCase().endsWith(".lock")
-  );
+  return isSafeWorktreeTaskIdentity(taskId);
 }
 
 function parseWorktrees(output: string): Array<{ path: string; branch: string | null }> {

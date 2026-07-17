@@ -103,6 +103,24 @@ describe("Milestone contracts", () => {
     expect(result.success).toBe(false);
   });
 
+  it.each(["task.lock", "task..next", "task@{1}"])("rejects worktree-unsafe planned task identity %j", (taskId) => {
+    expect(MilestonePlanSchema.safeParse({
+      milestoneId: "milestone-unsafe-task-id",
+      projectId: "zentra",
+      goal: "Reject unsafe worktree identities.",
+      tasks: [{ ...baseTask, taskId }],
+    }).success).toBe(false);
+  });
+
+  it("rejects Darwin-equivalent planned task identities", () => {
+    expect(MilestonePlanSchema.safeParse({
+      milestoneId: "milestone-colliding-task-ids",
+      projectId: "zentra",
+      goal: "Reject colliding worktree identities.",
+      tasks: [baseTask, { ...baseTask, taskId: "TASK-RESEARCH" }],
+    }).success).toBe(false);
+  });
+
   it.each(["../outside", "/absolute/path"])("rejects unsafe ownership path %j", (ownedPath) => {
     const result = MilestonePlanSchema.safeParse({
       milestoneId: "milestone-unsafe-ownership",

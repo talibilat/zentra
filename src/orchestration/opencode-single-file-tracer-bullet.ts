@@ -87,6 +87,12 @@ export interface OpenCodeIntegratedSingleFileTracerRequest
 }
 
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
+const schedulerAuthorizedRequests = new WeakSet<object>();
+
+export function authorizeScheduledTracerRequest<T extends OpenCodeIntegratedSingleFileTracerRequest>(request: T): T {
+  schedulerAuthorizedRequests.add(request);
+  return request;
+}
 
 export class OpenCodeIntegratedSingleFileTracer {
   private readonly tracer: OpenCodeSingleFileTracerBullet;
@@ -122,7 +128,7 @@ export class OpenCodeSingleFileTracerBullet {
   ) {}
 
   async run(request: OpenCodeSingleFileTracerRequest): Promise<TaskView> {
-    const changedPath = singleOwnedFile(request.task);
+    const changedPath = singleOwnedFile(request.task, schedulerAuthorizedRequests.has(request));
     if (!isVerifiedOpenCodeProbeReport(request.probe, {
       modelId: request.model.id,
       model: request.model.model,
@@ -805,15 +811,15 @@ function payloadReason(payload: unknown): string {
   return "integration result requires explicit reconciliation";
 }
 
-function singleOwnedFile(task: PlannedTask): string {
+function singleOwnedFile(task: PlannedTask, schedulerAdmitted: boolean): string {
   const parsed = PlannedTaskSchema.parse(task);
   if (
-    parsed.dependencies.length !== 0 ||
+    (!schedulerAdmitted && parsed.dependencies.length !== 0) ||
     parsed.ownedPaths.length !== 1 ||
     parsed.ownedPaths[0]!.endsWith("/**") ||
     parsed.budget.maxRetries !== 0
   ) {
-    throw new Error("OpenCode single-file tracer requires one concrete independent owned file and no retries");
+    throw new Error("OpenCode single-file tracer requires one concrete owned file, scheduler admission for dependencies, and no retries");
   }
   return parsed.ownedPaths[0]!;
 }
