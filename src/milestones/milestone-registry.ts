@@ -6,6 +6,8 @@ import {
   createAuthorityAttention,
   createOpenCodeAdmissionPacket,
   digestCanonical,
+  authorityAttentionId,
+  AuthorityAttentionSchema,
   OpenCodeTaskAdmissionContextSchema,
   PlanReplacementPayloadSchema,
   type OpenCodeAdmissionPacket,
@@ -53,6 +55,7 @@ import {
   buildMilestoneTerminalResult,
   verifyMilestoneTerminalResult,
 } from "./milestone-result.js";
+import { ReleaseOperationBoundPayloadSchema, type ReleaseOperationBoundPayload } from "../release/release-events.js";
 
 export interface RegisterMilestoneInput {
   readonly milestoneId: string;
@@ -628,6 +631,52 @@ export class MilestoneRegistry {
       if (appended !== null) return appended;
     }
     throw new Error("task completion did not converge");
+  }
+
+  bindReleaseOperation(milestoneId: string, input: ReleaseOperationBoundPayload): MilestoneRecord {
+    const payload = ReleaseOperationBoundPayloadSchema.parse(input);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const view = projectMilestone(events);
+      if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      if (view.releaseOperation !== null) {
+        if (digestCanonical(view.releaseOperation) !== digestCanonical(payload)) {
+          throw new Error(`milestone release operation is already bound to ${view.releaseOperation.releaseId}`);
+        }
+        return withTrace(view, events);
+      }
+      const appended = this.tryAppendTransition(events, view, "milestone.release_operation_bound", payload);
+      if (appended !== null) return appended;
+    }
+    throw new Error("release operation binding did not converge");
+  }
+
+  pauseForReleaseBoundary(
+    milestoneId: string,
+    taskId: string,
+    security: SecuritySheet,
+    admissionDigest: string,
+  ): MilestoneRecord {
+    const events = this.journal.readStream(milestoneId);
+    const view = projectMilestone(events);
+    if (view === null || view.plan === null) throw new Error(`milestone ${milestoneId} requires an accepted plan`);
+    const task = view.plan.tasks.find((candidate) => candidate.taskId === taskId);
+    if (task?.roleAssignment.role !== "verifier" || task.risk.authority !== "local_release_preparation") {
+      throw new Error("release boundary requires the exact local release verifier task");
+    }
+    if (view.lifecycle === "paused" && view.attention?.reason === "release_boundary") return withTrace(view, events);
+    const identity = {
+      milestoneId, taskId, planDigest: digestCanonical(view.plan), policyDigest: digestCanonical(security),
+      admissionDigest, configuredStopCondition: security.stopAndAskConditions.includes("release_boundary"),
+      reason: "release_boundary" as const, classification: "hard_stop" as const,
+    };
+    const attention = AuthorityAttentionSchema.parse({
+      schemaVersion: 1, attentionId: authorityAttentionId(identity), ...identity,
+      requestedBy: "zentra-authority-gate",
+      message: "The task crosses the configured release boundary.",
+      requiredDecision: "Replace the plan before any task starts, or create a new milestone after execution; remain within the configured release boundary.",
+    });
+    return this.appendTransition(milestoneId, "milestone.paused", { attention });
   }
 
   finish(

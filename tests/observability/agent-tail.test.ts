@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
-import { createAuthorityAttention, createOpenCodeAdmissionPacket } from "../../src/contracts/authority-attention.js";
+import { createAuthorityAttention, createOpenCodeAdmissionPacket, digestCanonical } from "../../src/contracts/authority-attention.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import {
   agentTailEventToJsonLine,
@@ -26,6 +26,93 @@ function storedEvent(input: Partial<StoredEvent> & Pick<StoredEvent, "type">): S
 }
 
 describe("Agent Tail event envelope export", () => {
+  it("strictly parses and redacts local release command output", () => {
+    const mapped = storedEventToAgentTailEvent(storedEvent({
+      type: "release.step_observed",
+      payload: {
+        schemaVersion: 1, name: "build", argvSha256: "a".repeat(64), outcome: "failed",
+        exitCode: 1, stdout: "private output", stderr: "secret detail", outputSha256: "b".repeat(64),
+      },
+    }));
+
+    expect(mapped.operation).toEqual({ name: "release_preparation", status: "failed" });
+    expect(JSON.stringify(mapped.payload)).not.toContain("private output");
+    expect(JSON.stringify(mapped.payload)).not.toContain("secret detail");
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "release.step_observed", payload: { name: "build", stdout: "untyped" },
+    }))).toThrow();
+  });
+  it("redacts release packet argv and filesystem paths while retaining binding digests", () => {
+    const packet = {
+      schemaVersion: 1, releaseId: "release-1", milestoneId: "milestone-1", taskId: "verifier", projectId: "project-1",
+      repositoryPath: "/private/repository", worktreeRoot: "/private/worktrees", worktreePath: "/private/worktrees/release-1",
+      resultCommit: "a".repeat(40), integrationRef: "refs/heads/zentra/integration",
+      securityDigest: "b".repeat(64), authorityDigest: "c".repeat(64), verifierAdmissionDigest: "d".repeat(64),
+      commands: {
+        build: { argv: [process.execPath, "private-build-argument"], timeoutMs: 1_000 },
+        package: { argv: [process.execPath, "package.mjs"], timeoutMs: 1_000 },
+        verify: { argv: [process.execPath, "verify.mjs"], timeoutMs: 1_000 },
+      },
+      artifacts: ["private/artifact.tgz"],
+    };
+    const packetDigest = digestCanonical(packet);
+
+    const mapped = storedEventToAgentTailEvent(storedEvent({
+      type: "release.created", payload: { schemaVersion: 1, packet, packetDigest },
+    }));
+    const serialized = JSON.stringify(mapped.payload);
+
+    expect(serialized).toContain(packetDigest);
+    expect(serialized).not.toContain("private-build-argument");
+    expect(serialized).not.toContain("/private/repository");
+    expect(serialized).not.toContain("private/artifact.tgz");
+  });
+  it("removes a nested artifact path canary from the complete release JSONL trace", () => {
+    const canary = "private/nested/CANARY-release-artifact.tgz";
+    const packet = {
+      schemaVersion: 1, releaseId: "release-1", milestoneId: "milestone-1", taskId: "verifier", projectId: "project-1",
+      repositoryPath: `/repository/${canary}`, worktreeRoot: `/worktrees/${canary}`, worktreePath: `/worktrees/${canary}/release-1`,
+      resultCommit: "a".repeat(40), integrationRef: "refs/heads/zentra/integration",
+      securityDigest: "b".repeat(64), authorityDigest: "c".repeat(64), verifierAdmissionDigest: "d".repeat(64),
+      commands: {
+        build: { argv: [process.execPath, canary], timeoutMs: 1_000 },
+        package: { argv: [process.execPath, "package.mjs"], timeoutMs: 1_000 },
+        verify: { argv: [process.execPath, "verify.mjs"], timeoutMs: 1_000 },
+      }, artifacts: [canary],
+    };
+    const packetDigest = digestCanonical(packet);
+    const releaseReference = {
+      streamId: "release:release-1", eventId: "release-created", eventType: "release.created",
+      streamVersion: 1, payloadDigest: "e".repeat(64),
+    };
+    const events = [
+      storedEvent({ eventId: "release-created", streamId: "release:release-1", type: "release.created", payload: { schemaVersion: 1, packet, packetDigest } }),
+      storedEvent({ eventId: "worktree", streamId: "release:release-1", streamVersion: 2, globalPosition: 2, type: "release.worktree_intent", payload: { schemaVersion: 1, path: `/worktrees/${canary}`, resultCommit: "a".repeat(40) } }),
+      storedEvent({ eventId: "environment", streamId: "release:release-1", streamVersion: 3, globalPosition: 3, type: "release.environment_intent", payload: { schemaVersion: 1, home: `/home/${canary}`, temporary: `/tmp/${canary}` } }),
+      storedEvent({ eventId: "artifact", streamId: "release:release-1", streamVersion: 4, globalPosition: 4, type: "release.artifact_hashed", payload: { schemaVersion: 1, path: canary, size: 42, sha256: "f".repeat(64) } }),
+      storedEvent({ eventId: "task-complete", streamId: "milestone-1", streamVersion: 5, globalPosition: 5, type: "milestone.task_completed", payload: {
+        taskId: "verifier", actorId: "local-verifier", role: "verifier", outcome: "completed",
+        evidence: {
+          schemaVersion: 1, releaseStreamId: "release:release-1", packetDigest, resultCommit: "a".repeat(40), status: "prepared_local_only",
+          releaseEvents: [releaseReference, { ...releaseReference, eventId: "artifact", eventType: "release.artifact_hashed", streamVersion: 4 }],
+          artifacts: [{ pathDigest: digestCanonical(canary), size: 42, sha256: "f".repeat(64) }],
+        },
+      } }),
+    ];
+
+    const jsonl = storedEventsToAgentTailEvents(events).map(agentTailEventToJsonLine).join("");
+    expect(jsonl).not.toContain(canary);
+    expect(jsonl).not.toContain("/worktrees/");
+    expect(jsonl).not.toContain(process.execPath);
+  });
+  it("fails closed instead of tracing malformed release completion evidence containing a path", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "milestone.task_completed", payload: {
+        taskId: "verifier", actorId: "local-verifier", role: "verifier", outcome: "failed",
+        evidence: { releaseStreamId: "release:release-1", artifactPath: "private/CANARY.tgz" },
+      },
+    }))).toThrow();
+  });
   it("maps a stored event to the Agent Tail v1 envelope", () => {
     const event = storedEvent({
       eventId: "event-created",

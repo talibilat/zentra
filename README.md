@@ -63,6 +63,15 @@ The CLI reads a JSON object containing the project identity, absolute repository
     "full": ["/absolute/path/to/node", "--test"],
     "focusedTimeoutMs": 30000,
     "fullTimeoutMs": 300000
+  },
+  "releasePreparation": {
+    "build": ["/absolute/path/to/node", "scripts/build.mjs"],
+    "package": ["/absolute/path/to/node", "scripts/package.mjs"],
+    "verify": ["/absolute/path/to/node", "scripts/verify.mjs"],
+    "buildTimeoutMs": 300000,
+    "packageTimeoutMs": 300000,
+    "verifyTimeoutMs": 300000,
+    "artifacts": ["dist/example-package.tgz"]
   }
 }
 ```
@@ -80,6 +89,20 @@ Every validation report and its durable provenance record the selected bounded `
 Relative paths, symlinks, `env` and similar wrappers, alternate spellings, missing targets, and absolute executables outside that allowlist are rejected during configuration parsing and checked again before process creation.
 
 Approved validation commands are executable and argument arrays invoked with `shell: false`, not shell command strings.
+
+`releasePreparation` is optional and available only through the programmatic API.
+
+Its build, package, and verify commands use the same canonical executable and timeout constraints as validation commands.
+
+Artifact entries must be unique safe relative paths to regular nonsymlink files inside the isolated exact-commit release worktree.
+
+Local release preparation never exposes push, tag, publish, pull request, remote release, GitHub broker, or credential capabilities.
+
+Configured release commands are trusted project code executed with the operating-system authority of the user running Zentra.
+
+The reduced environment and exact executable policy do not provide a filesystem or network sandbox, so this capability is restricted to projects the operator controls and trusts.
+
+Successful preparation reports `prepared_local_only` and pauses at the `release_boundary`; `no_release_operations` pauses before worktree or command effects, while `approval_required_for_remote` permits only the local preparation phase before the same pause.
 
 The `project validate` command accepts one configuration object or an array of configuration objects, while the MVP `task run` command requires exactly one configured project because its command contract has no project selector.
 

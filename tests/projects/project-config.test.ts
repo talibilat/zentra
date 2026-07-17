@@ -68,6 +68,68 @@ describe("ProjectConfigSchema", () => {
     );
   });
 
+  it("accepts optional typed local release preparation", () => {
+    const parsed = ProjectConfigSchema.parse({
+      ...validConfig,
+      releasePreparation: {
+        build: [process.execPath, "build.mjs"],
+        package: [process.execPath, "package.mjs"],
+        verify: [process.execPath, "verify.mjs"],
+        buildTimeoutMs: 1_000,
+        packageTimeoutMs: 2_000,
+        verifyTimeoutMs: 3_000,
+        artifacts: ["dist/package.tgz", "reports/verification.json"],
+      },
+    });
+
+    expect(parsed.releasePreparation?.artifacts).toEqual([
+      "dist/package.tgz",
+      "reports/verification.json",
+    ]);
+  });
+
+  it("defaults bounded release step timeouts", () => {
+    const parsed = ProjectConfigSchema.parse({
+      ...validConfig,
+      releasePreparation: {
+        build: [process.execPath, "build.mjs"], package: [process.execPath, "package.mjs"],
+        verify: [process.execPath, "verify.mjs"], artifacts: ["dist/package.tgz"],
+      },
+    });
+    expect(parsed.releasePreparation?.buildTimeoutMs).toBe(300_000);
+    expect(parsed.releasePreparation?.packageTimeoutMs).toBe(300_000);
+    expect(parsed.releasePreparation?.verifyTimeoutMs).toBe(300_000);
+  });
+
+  it.each(["../outside.tgz", "/tmp/outside.tgz", "dist\\package.tgz", "dist/../package.tgz"])(
+    "rejects unsafe release artifact path %j",
+    (artifact) => {
+      expect(() => ProjectConfigSchema.parse({
+        ...validConfig,
+        releasePreparation: {
+          build: [process.execPath, "build.mjs"],
+          package: [process.execPath, "package.mjs"],
+          verify: [process.execPath, "verify.mjs"],
+          buildTimeoutMs: 1_000,
+          packageTimeoutMs: 1_000,
+          verifyTimeoutMs: 1_000,
+          artifacts: [artifact],
+        },
+      })).toThrow();
+    },
+  );
+
+  it("rejects a noncanonical release executable", () => {
+    expect(() => ProjectConfigSchema.parse({
+      ...validConfig,
+      releasePreparation: {
+        build: ["node", "build.mjs"], package: [process.execPath, "package.mjs"],
+        verify: [process.execPath, "verify.mjs"], buildTimeoutMs: 1_000,
+        packageTimeoutMs: 1_000, verifyTimeoutMs: 1_000, artifacts: ["dist/package.tgz"],
+      },
+    })).toThrow(/approved canonical absolute path/);
+  });
+
   it.each([MIN_VALIDATION_TIMEOUT_MS, MAX_VALIDATION_TIMEOUT_MS])(
     "accepts the inclusive timeout boundary %dms",
     (timeoutMs) => {

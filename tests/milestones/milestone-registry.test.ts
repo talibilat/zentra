@@ -142,4 +142,40 @@ describe("MilestoneRegistry", () => {
       journal.close();
     }
   });
+
+  it("durably binds exactly one release operation to the admitted verifier", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      const verifierPlan = plan("release-milestone", "verifier");
+      verifierPlan.tasks[0] = {
+        ...verifierPlan.tasks[0]!,
+        roleAssignment: { role: "verifier", agentId: "local-verifier", harness: "deterministic" },
+        risk: { level: "medium", authority: "local_release_preparation", requiresReview: true, requiresApproval: false },
+      };
+      registry.register({
+        milestoneId: "release-milestone", projectId: "zentra", title: "Release",
+        correlationId: "release-trace", plan: verifierPlan,
+      });
+      journal.append("release-milestone", 2, [{
+        streamId: "release-milestone", type: "milestone.task_ready",
+        payload: { taskId: "verifier", admissionDigest: "a".repeat(64) },
+        causationId: null, correlationId: "release-trace",
+      }]);
+      const binding = {
+        schemaVersion: 1 as const, releaseId: "release-one", taskId: "verifier",
+        packetDigest: "b".repeat(64), verifierAdmissionDigest: "a".repeat(64),
+      };
+
+      expect(registry.bindReleaseOperation("release-milestone", binding).releaseOperation).toEqual(binding);
+      expect(registry.bindReleaseOperation("release-milestone", binding).releaseOperation).toEqual(binding);
+      const before = journal.readStream("release-milestone");
+      expect(() => registry.bindReleaseOperation("release-milestone", {
+        ...binding, releaseId: "release-two", packetDigest: "c".repeat(64),
+      })).toThrow(/already bound to release-one/);
+      expect(journal.readStream("release-milestone")).toEqual(before);
+    } finally {
+      journal.close();
+    }
+  });
 });

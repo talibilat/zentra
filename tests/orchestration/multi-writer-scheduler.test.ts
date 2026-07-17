@@ -780,6 +780,7 @@ class ControlledRegistry {
       replanningAttentionHistory: [], replanningResolutions: [], replanningPolicy: null, replanningPauseOccurrence: null,
       writerOwnership: {}, maxConcurrentWriters: null, traceId: "trace-batch", tracePath: null,
       result: null,
+      releaseOperation: null,
     };
   }
 
