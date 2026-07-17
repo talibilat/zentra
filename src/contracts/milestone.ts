@@ -175,6 +175,22 @@ export const MilestoneSchema = z.strictObject({
   }
 });
 
+export const VerifiedMilestoneIntegrationEvidenceSchema = z.strictObject({
+  taskStreamId: IdentitySchema,
+  integrationEventId: IdentitySchema,
+  integrationStreamVersion: z.number().int().positive(),
+  integrationPayloadDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  completionEventId: IdentitySchema,
+  completionStreamVersion: z.number().int().positive(),
+  completionPayloadDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  resultCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
+});
+
+export const MilestoneCompletedPayloadSchema = z.strictObject({
+  outcome: z.literal("completed"),
+  evidence: VerifiedMilestoneIntegrationEvidenceSchema,
+});
+
 export type MilestoneLifecycleState = z.infer<typeof MilestoneLifecycleStateSchema>;
 export type MilestoneRole = z.infer<typeof MilestoneRoleSchema>;
 export type Harness = z.infer<typeof HarnessSchema>;
@@ -188,6 +204,7 @@ export type StopAndAskState = z.infer<typeof StopAndAskStateSchema>;
 export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 export type MilestonePlan = z.infer<typeof MilestonePlanSchema>;
 export type Milestone = z.infer<typeof MilestoneSchema>;
+export type VerifiedMilestoneIntegrationEvidence = z.infer<typeof VerifiedMilestoneIntegrationEvidenceSchema>;
 
 export function assertAcyclicMilestonePlan<TPlan extends MilestonePlan>(plan: TPlan): TPlan {
   const problem = dependencyProblem(plan.tasks);

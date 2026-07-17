@@ -1,6 +1,7 @@
 import type { StoredEvent } from "../contracts/event.js";
 import {
   MilestonePlanSchema,
+  MilestoneCompletedPayloadSchema,
   StopAndAskStateSchema,
   type MilestoneLifecycleState,
   type MilestonePlan,
@@ -154,7 +155,7 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     state.streamVersion = event.streamVersion;
     const terminalOutcome = TERMINAL_EVENTS.get(event.type);
     if (terminalOutcome !== undefined) {
-      if (terminalOutcome === "completed") assertSuccessfulMilestoneCompletion(state);
+      if (terminalOutcome === "completed") assertSuccessfulMilestoneCompletion(state, event);
       state.lifecycle = "terminal";
       state.terminalOutcome = terminalOutcome;
       state.stopAndAsk = null;
@@ -566,6 +567,7 @@ function updateTask(
   const taskId = payloadString(event, "taskId");
   const current = state.tasks.get(taskId);
   if (current === undefined) throw new Error(`unknown planned task: ${taskId}`);
+  validateAssignedActor(state, event, taskId, status);
   if (current.status === "completed") throw new Error(`planned task ${taskId} is already completed`);
   if (status === "ready") {
     const parsed = TaskReadyPayloadSchema.safeParse(objectPayload(event));
@@ -605,13 +607,40 @@ function updateTask(
   }));
 }
 
-function assertSuccessfulMilestoneCompletion(state: MilestoneState): void {
+function assertSuccessfulMilestoneCompletion(state: MilestoneState, event: StoredEvent): void {
   if (state.plan === null) throw new Error("successful milestone completion requires a plan");
+  if (
+    state.plan.tasks.some((task) => task.roleAssignment.role === "implementer") &&
+    state.plan.tasks.some((task) => task.roleAssignment.role === "reviewer")
+  ) MilestoneCompletedPayloadSchema.parse(objectPayload(event));
   for (const task of state.plan.tasks) {
     const view = state.tasks.get(task.taskId);
     if (view?.terminalOutcome !== "completed") {
       throw new Error("successful milestone completion requires all planned tasks completed");
     }
+  }
+}
+
+function validateAssignedActor(
+  state: MilestoneState,
+  event: StoredEvent,
+  taskId: string,
+  status: PlannedTaskStatus,
+): void {
+  if (status !== "running" && status !== "completed") return;
+  const payload = objectPayload(event);
+  const actorId = payload["actorId"];
+  const role = payload["role"];
+  if (actorId === undefined && role === undefined) {
+    if (
+      state.plan!.tasks.some((task) => task.roleAssignment.role === "implementer") &&
+      state.plan!.tasks.some((task) => task.roleAssignment.role === "reviewer")
+    ) throw new Error(`planned task ${taskId} requires assigned actor evidence`);
+    return;
+  }
+  const assignment = state.plan!.tasks.find((task) => task.taskId === taskId)!.roleAssignment;
+  if (actorId !== assignment.agentId || role !== assignment.role) {
+    throw new Error(`planned task ${taskId} actor contradicts its assignment`);
   }
 }
 

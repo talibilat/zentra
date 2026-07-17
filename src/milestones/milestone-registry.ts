@@ -29,7 +29,14 @@ import {
   type ReplanningReason,
   type RevisionEvidenceReference,
 } from "../contracts/replanning.js";
-import { MilestonePlanSchema, type MilestonePlan } from "../contracts/milestone.js";
+import {
+  MilestoneCompletedPayloadSchema,
+  MilestonePlanSchema,
+  type MilestonePlan,
+  type MilestoneRole,
+  type VerifiedMilestoneIntegrationEvidence,
+} from "../contracts/milestone.js";
+import type { TerminalOutcome } from "../contracts/task.js";
 import { modelSheetSha256 } from "../routing/model-router.js";
 import { projectTask } from "../tasks/task-projection.js";
 
@@ -189,6 +196,7 @@ export class MilestoneRegistry {
       const events = this.journal.readStream(streamId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${streamId} has no view`);
+      verifyStoredCompletion(this.journal, events, view);
       return Object.freeze({
         milestoneId: view.milestoneId,
         projectId: view.projectId,
@@ -521,14 +529,99 @@ export class MilestoneRegistry {
     throw new Error("replanning resolution did not converge");
   }
 
+  startTask(milestoneId: string, taskId: string, actorId: string, role: MilestoneRole): MilestoneRecord {
+    const view = this.requireMilestone(milestoneId);
+    const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
+    if (task === undefined || view.tasks[taskId]?.status !== "ready") {
+      throw new Error(`planned task ${taskId} is not ready`);
+    }
+    if (task.roleAssignment.agentId !== actorId || task.roleAssignment.role !== role) {
+      throw new Error(`planned task ${taskId} actor contradicts its assignment`);
+    }
+    return this.appendTransition(milestoneId, "milestone.task_running", { taskId, actorId, role });
+  }
+
+  completeTask(
+    milestoneId: string,
+    taskId: string,
+    outcome: TerminalOutcome,
+    evidence: Readonly<Record<string, unknown>> = {},
+  ): MilestoneRecord {
+    const view = this.requireMilestone(milestoneId);
+    const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
+    if (task === undefined || view.tasks[taskId]?.status !== "running") {
+      throw new Error(`planned task ${taskId} is not running`);
+    }
+    return this.appendTransition(milestoneId, "milestone.task_completed", {
+      taskId,
+      actorId: task.roleAssignment.agentId,
+      role: task.roleAssignment.role,
+      outcome,
+      evidence,
+    });
+  }
+
+  finish(
+    milestoneId: string,
+    outcome: TerminalOutcome,
+    evidence: Readonly<Record<string, unknown>> = {},
+  ): MilestoneRecord {
+    if (outcome === "completed") throw new Error("use completeIntegrated for successful milestone completion");
+    return this.appendTransition(milestoneId, `milestone.${outcome}`, { outcome, evidence });
+  }
+
+  completeIntegrated(milestoneId: string, taskStreamId: string): MilestoneRecord {
+    const milestoneEvents = this.journal.readStream(milestoneId);
+    let milestone = projectMilestone(milestoneEvents);
+    if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
+    const evidence = verifiedIntegrationEvidence(this.journal, milestoneEvents, milestone, taskStreamId);
+    const runningReviewer = milestone.plan?.tasks.find((planned) =>
+      planned.roleAssignment.role === "reviewer" && milestone!.tasks[planned.taskId]?.status === "running");
+    if (runningReviewer !== undefined) {
+      this.completeTask(milestoneId, runningReviewer.taskId, "completed", evidence);
+      milestone = this.requireMilestone(milestoneId);
+    }
+    if (milestone.plan?.tasks.some((planned) => milestone!.tasks[planned.taskId]?.terminalOutcome !== "completed")) {
+      throw new Error("successful milestone completion requires all planned tasks completed");
+    }
+    return this.appendTransition(milestoneId, "milestone.completed", {
+      outcome: "completed",
+      evidence,
+    });
+  }
+
   inspect(milestoneId: string): MilestoneRecord | null {
     const events = this.journal.readStream(milestoneId);
     const view = projectMilestone(events);
-    return view === null ? null : withTrace(view, events);
+    if (view === null) return null;
+    verifyStoredCompletion(this.journal, events, view);
+    return withTrace(view, events);
   }
 
   resume(milestoneId: string): MilestoneRecord | null {
     return this.inspect(milestoneId);
+  }
+
+  private requireMilestone(milestoneId: string): MilestoneRecord {
+    const view = this.inspect(milestoneId);
+    if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+    return view;
+  }
+
+  private appendTransition(milestoneId: string, type: string, payload: unknown): MilestoneRecord {
+    const events = this.journal.readStream(milestoneId);
+    const view = projectMilestone(events);
+    if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
+    const nextEvent: NewEvent<string, unknown> = {
+      streamId: milestoneId,
+      type,
+      payload: canonicalPayload(payload),
+      causationId: null,
+      correlationId: events[0]!.correlationId,
+    };
+    projectMilestone([...events, candidateStoredEvent(nextEvent, view.streamVersion + 1)]);
+    const stored = this.journal.append(milestoneId, view.streamVersion, [nextEvent]);
+    return withTrace(projectMilestone([...events, ...stored])!, [...events, ...stored]);
   }
 }
 
@@ -679,4 +772,83 @@ function isReplanningAttention(value: MilestoneView["replanningAttention"]): val
 
 function projectionFailed(journal: EventJournal): boolean {
   return "projectionFailed" in journal && (journal as EventJournal & { readonly projectionFailed: boolean }).projectionFailed;
+}
+
+function eventPayload(event: StoredEvent | undefined): Readonly<Record<string, unknown>> | null {
+  return event === undefined || typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)
+    ? null
+    : event.payload as Readonly<Record<string, unknown>>;
+}
+
+function recordValue(
+  value: Readonly<Record<string, unknown>> | null,
+  key: string,
+): Readonly<Record<string, unknown>> | null {
+  const nested = value?.[key];
+  return typeof nested === "object" && nested !== null && !Array.isArray(nested)
+    ? nested as Readonly<Record<string, unknown>>
+    : null;
+}
+
+function verifiedIntegrationEvidence(
+  journal: EventJournal,
+  milestoneEvents: readonly StoredEvent[],
+  milestone: MilestoneView,
+  taskStreamId: string,
+): VerifiedMilestoneIntegrationEvidence {
+  const implementers = milestone.plan?.tasks.filter((task) => task.roleAssignment.role === "implementer") ?? [];
+  if (implementers.length !== 1 || implementers[0]!.taskId !== taskStreamId) {
+    throw new Error("integration evidence must belong to the planned implementer task");
+  }
+  const taskEvents = journal.readStream(taskStreamId);
+  if (
+    taskEvents.length === 0 ||
+    taskEvents.some((event) => event.streamId !== taskStreamId || event.correlationId !== milestoneEvents[0]!.correlationId)
+  ) throw new Error("integrated task stream is not bound to the milestone trace");
+  const task = projectTask(taskEvents);
+  if (task?.terminalOutcome !== "completed") {
+    throw new Error("successful milestone completion requires a completed task stream");
+  }
+  const integration = taskEvents.findLast((event) => event.type === "task.integration_observed");
+  const completion = taskEvents.findLast((event) => event.type === "task.completed");
+  const cleanup = taskEvents.findLast((event) =>
+    event.type === "task.cleanup_completed" || event.type === "task.cleanup_reconciled");
+  const integrationPayload = eventPayload(integration);
+  const receipt = recordValue(integrationPayload, "receipt");
+  const resultCommit = receipt?.["resultCommit"];
+  if (
+    integration === undefined || completion === undefined || cleanup === undefined ||
+    integrationPayload?.["verification"] !== "verified" ||
+    typeof resultCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(resultCommit) ||
+    receipt?.["taskId"] !== taskStreamId || receipt["projectId"] !== milestone.projectId || receipt["outcome"] !== "completed" ||
+    integration.streamVersion >= cleanup.streamVersion || cleanup.streamVersion >= completion.streamVersion
+  ) throw new Error("task stream lacks ordered verified local integration evidence");
+  return {
+    taskStreamId,
+    integrationEventId: integration.eventId,
+    integrationStreamVersion: integration.streamVersion,
+    integrationPayloadDigest: digestCanonical(integration.payload),
+    completionEventId: completion.eventId,
+    completionStreamVersion: completion.streamVersion,
+    completionPayloadDigest: digestCanonical(completion.payload),
+    resultCommit,
+  };
+}
+
+function verifyStoredCompletion(
+  journal: EventJournal,
+  milestoneEvents: readonly StoredEvent[],
+  milestone: MilestoneView,
+): void {
+  if (milestone.terminalOutcome !== "completed" || milestone.plan === null || !(
+    milestone.plan.tasks.some((task) => task.roleAssignment.role === "implementer") &&
+    milestone.plan.tasks.some((task) => task.roleAssignment.role === "reviewer")
+  )) return;
+  const completion = milestoneEvents.at(-1);
+  if (completion?.type !== "milestone.completed") throw new Error("completed milestone lacks a terminal event");
+  const retained = MilestoneCompletedPayloadSchema.parse(completion.payload).evidence;
+  const verified = verifiedIntegrationEvidence(journal, milestoneEvents, milestone, retained.taskStreamId);
+  if (digestCanonical(retained) !== digestCanonical(verified)) {
+    throw new Error("milestone completion evidence contradicts the retained task stream");
+  }
 }
