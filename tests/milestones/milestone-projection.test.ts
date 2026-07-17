@@ -54,6 +54,32 @@ const plan = {
   ],
 };
 
+function terminalPayload(
+  outcome: "completed" | "cancelled" | "failed",
+  milestonePlan: typeof plan | null,
+) {
+  return {
+    schemaVersion: 1,
+    outcome,
+    result: {
+      schemaVersion: 1,
+      milestoneId: "milestone-1",
+      projectId: "zentra",
+      outcome,
+      tasks: (milestonePlan?.tasks ?? []).map((task) => ({
+        taskId: task.taskId,
+        role: task.roleAssignment.role,
+        status: outcome === "completed" ? "completed" : "planned",
+        outcome: outcome === "completed" ? "completed" : null,
+        evidence: [],
+      })),
+      integratedCommits: [], validations: [], reviews: [],
+      trace: { traceId: "run-1", path: null, outcome: "not_observed" },
+      pauses: [], uncertainties: [], decisions: [],
+    },
+  };
+}
+
 const security: SecuritySheet = {
   allowedRepositories: ["/tmp/repository"], allowedFileScopes: ["src/**", "tests/**"], forbiddenPaths: [".env"],
   network: { default: "denied", allowedDestinations: [] }, secretHandling: ["Do not expose secrets."],
@@ -179,12 +205,40 @@ describe("projectMilestone", () => {
     const view = projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Terminal milestone" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.failed", payload: { reason: "validation failed" }, streamVersion: 3 }),
+      event({ type: "milestone.failed", payload: terminalPayload("failed", plan), streamVersion: 3 }),
     ]);
 
     if (view === null) throw new Error("expected milestone view");
     expect(view.lifecycle).toBe("terminal");
     expect(view.terminalOutcome).toBe("failed");
+  });
+
+  it("replays legacy non-success and singleton completion payloads with no issue-30 result", () => {
+    const failed = projectMilestone([
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "Legacy failed" }, streamVersion: 1 }),
+      event({ type: "milestone.failed", payload: { outcome: "failed", evidence: { stage: "legacy" } }, streamVersion: 2 }),
+    ]);
+    expect(failed).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed", result: null });
+
+    const completed = projectMilestone([
+      event({ type: "milestone.created", payload: { projectId: "zentra", title: "Legacy complete" }, streamVersion: 1 }),
+      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
+      event({ type: "milestone.task_running", payload: { taskId: "task-a" }, streamVersion: 4 }),
+      event({ type: "milestone.task_completed", payload: { taskId: "task-a", outcome: "completed" }, streamVersion: 5 }),
+      event({ type: "milestone.task_ready", payload: readyPayload("task-b"), streamVersion: 6 }),
+      event({ type: "milestone.task_running", payload: { taskId: "task-b" }, streamVersion: 7 }),
+      event({ type: "milestone.task_completed", payload: { taskId: "task-b", outcome: "completed" }, streamVersion: 8 }),
+      event({ type: "milestone.completed", payload: {
+        outcome: "completed",
+        evidence: {
+          taskStreamId: "legacy-task", integrationEventId: "integration", integrationStreamVersion: 1,
+          integrationPayloadDigest: "a".repeat(64), completionEventId: "completion", completionStreamVersion: 2,
+          completionPayloadDigest: "b".repeat(64), resultCommit: "c".repeat(40),
+        },
+      }, streamVersion: 9 }),
+    ]);
+    expect(completed).toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed", result: null });
   });
 
   it("fails closed on malformed or contradictory milestone histories", () => {
@@ -197,7 +251,7 @@ describe("projectMilestone", () => {
     ])).toThrow("unknown planned task");
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
-      event({ type: "milestone.failed", payload: {}, streamVersion: 2 }),
+      event({ type: "milestone.failed", payload: terminalPayload("failed", null), streamVersion: 2 }),
       event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
     ])).toThrow("milestone is already terminal");
     expect(() => projectMilestone([
@@ -223,8 +277,8 @@ describe("projectMilestone", () => {
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
-      event({ type: "milestone.completed", payload: {}, streamVersion: 3 }),
-    ])).toThrow("successful milestone completion requires all planned tasks completed");
+      event({ type: "milestone.completed", payload: terminalPayload("completed", plan), streamVersion: 3 }),
+    ])).toThrow("milestone terminal result task outcome contradicts same-stream state");
     expect(() => projectMilestone([
       event({ streamId: "", type: "milestone.created", payload: { projectId: "zentra", title: "Bad" }, streamVersion: 1 }),
     ])).toThrow("milestone.created streamId must be a nonempty string");
@@ -240,7 +294,7 @@ describe("projectMilestone", () => {
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "Paused" }, streamVersion: 1 }),
       event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
       event({ type: "milestone.paused", payload: pausedPayload("task-a"), streamVersion: 3 }),
-      event({ type: "milestone.cancelled", payload: { reason: "operator cancelled" }, streamVersion: 4 }),
+      event({ type: "milestone.cancelled", payload: terminalPayload("cancelled", plan), streamVersion: 4 }),
     ]);
 
     if (view === null) throw new Error("expected milestone view");

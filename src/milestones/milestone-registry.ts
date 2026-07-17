@@ -48,6 +48,11 @@ import { ReviewDecisionSchema } from "../reviews/reviewer-adapter.js";
 import { canonicalValidationDigest } from "../reviews/reviewer-adapter.js";
 import { ValidationReportSchema } from "../capabilities/validation-runner.js";
 import { artifactEvidenceSha256, projectArtifacts } from "../contracts/artifact.js";
+import { MilestoneTerminalPayloadSchema } from "../contracts/milestone-result.js";
+import {
+  buildMilestoneTerminalResult,
+  verifyMilestoneTerminalResult,
+} from "./milestone-result.js";
 
 export interface RegisterMilestoneInput {
   readonly milestoneId: string;
@@ -72,6 +77,7 @@ export interface MilestoneSummary {
   readonly traceId: string;
   readonly tracePath: string | null;
   readonly taskCount: number;
+  readonly result: MilestoneView["result"];
 }
 
 export interface MilestoneRecord extends MilestoneView {
@@ -213,6 +219,10 @@ export class MilestoneRegistry {
       if (view === null) throw new Error(`milestone ${streamId} has no view`);
       verifyStoredCompletion(this.journal, events, view);
       assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
+      verifyStoredWriterIntegrations(this.journal, events, view);
+      verifyStoredWriterReleases(this.journal, events, view);
+      const record = withTrace(view, events);
+      if (record.result !== null) verifyMilestoneTerminalResult(this.journal, record, record.result);
       return Object.freeze({
         milestoneId: view.milestoneId,
         projectId: view.projectId,
@@ -223,6 +233,7 @@ export class MilestoneRegistry {
         traceId: events[0]!.correlationId,
         tracePath: tracePathFrom(events[0]!),
         taskCount: view.plan?.tasks.length ?? 0,
+        result: view.result,
       });
     }));
   }
@@ -625,7 +636,19 @@ export class MilestoneRegistry {
     evidence: Readonly<Record<string, unknown>> = {},
   ): MilestoneRecord {
     if (outcome === "completed") throw new Error("use completeIntegrated for successful milestone completion");
-    return this.appendTransition(milestoneId, `milestone.${outcome}`, { outcome, evidence });
+    if (Object.keys(evidence).length > 0) throw new Error("terminal milestone evidence is derived from the journal");
+    return this.finishFromEvidence(milestoneId, outcome);
+  }
+
+  completeFromEvidence(milestoneId: string): MilestoneRecord {
+    return this.terminalizeFromEvidence(milestoneId, "completed");
+  }
+
+  finishFromEvidence(
+    milestoneId: string,
+    outcome: Exclude<TerminalOutcome, "completed">,
+  ): MilestoneRecord {
+    return this.terminalizeFromEvidence(milestoneId, outcome);
   }
 
   completeIntegrated(milestoneId: string, taskStreamId: string): MilestoneRecord {
@@ -655,10 +678,7 @@ export class MilestoneRegistry {
     if (milestone.plan?.tasks.some((planned) => milestone!.tasks[planned.taskId]?.terminalOutcome !== "completed")) {
       throw new Error("successful milestone completion requires all planned tasks completed");
     }
-    return this.appendTransition(milestoneId, "milestone.completed", {
-      outcome: "completed",
-      evidence,
-    });
+    return this.completeFromEvidence(milestoneId);
   }
 
   completeWriterIntegration(milestoneId: string, writerTaskId: string): MilestoneRecord {
@@ -836,7 +856,9 @@ export class MilestoneRegistry {
     assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
     verifyStoredWriterIntegrations(this.journal, events, view);
     verifyStoredWriterReleases(this.journal, events, view);
-    return withTrace(view, events);
+    const record = withTrace(view, events);
+    if (record.result !== null) verifyMilestoneTerminalResult(this.journal, record, record.result);
+    return record;
   }
 
   resume(milestoneId: string): MilestoneRecord | null {
@@ -847,6 +869,35 @@ export class MilestoneRegistry {
     const view = this.inspect(milestoneId);
     if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
     return view;
+  }
+
+  private terminalizeFromEvidence(milestoneId: string, outcome: TerminalOutcome): MilestoneRecord {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const current = this.inspect(milestoneId);
+      if (current === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      if (current.lifecycle === "terminal") {
+        if (current.terminalOutcome !== outcome) {
+          throw new Error(`milestone ${milestoneId} completed with another outcome`);
+        }
+        if (current.result !== null) verifyMilestoneTerminalResult(this.journal, current, current.result);
+        return current;
+      }
+      const events = this.journal.readStream(milestoneId);
+      const result = buildMilestoneTerminalResult({ journal: this.journal, milestone: current, outcome });
+      const payload = MilestoneTerminalPayloadSchema.parse({ schemaVersion: 1, outcome, result });
+      const nextEvent = this.newMilestoneEvent(events, milestoneId, `milestone.${outcome}`, payload);
+      projectMilestone([...events, candidateStoredEvent(nextEvent, current.streamVersion + 1)]);
+      try {
+        const stored = this.journal.append(milestoneId, current.streamVersion, [nextEvent]);
+        const updatedEvents = [...events, ...stored];
+        const updated = withTrace(projectMilestone(updatedEvents)!, updatedEvents);
+        verifyMilestoneTerminalResult(this.journal, updated, result);
+        return updated;
+      } catch (error) {
+        if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      }
+    }
+    throw new Error("milestone terminal completion did not converge");
   }
 
   private appendTransition(milestoneId: string, type: string, payload: unknown): MilestoneRecord {
@@ -1209,26 +1260,46 @@ function verifyStoredCompletion(
   milestoneEvents: readonly StoredEvent[],
   milestone: MilestoneView,
 ): void {
-  if (milestone.terminalOutcome !== "completed" || milestone.plan === null || !(
+  if (milestone.terminalOutcome !== "completed" || milestone.plan === null) return;
+  const completion = milestoneEvents.at(-1);
+  if (completion?.type !== "milestone.completed") throw new Error("completed milestone lacks a terminal event");
+  if (milestone.result === null) {
+    const hasWriterReviewPair = milestone.plan.tasks.some((task) => task.roleAssignment.role === "implementer") &&
+      milestone.plan.tasks.some((task) => task.roleAssignment.role === "reviewer");
+    if (!hasWriterReviewPair && Object.keys(eventPayload(completion) ?? {}).length === 0) return;
+    const retained = MilestoneCompletedPayloadSchema.parse(completion.payload).evidence;
+    const reviewer = milestone.plan.tasks.find((task) =>
+      task.roleAssignment.role === "reviewer" && task.dependencies.includes(retained.taskStreamId));
+    if (reviewer === undefined) throw new Error("completed legacy milestone lacks a paired reviewer");
+    const verified = verifiedIntegrationEvidence(
+      journal, milestoneEvents, milestone, retained.taskStreamId, true, reviewer.roleAssignment.agentId,
+    );
+    if (digestCanonical(retained) !== digestCanonical(verified)) {
+      throw new Error("legacy milestone completion evidence contradicts the retained task stream");
+    }
+    return;
+  }
+  const terminal = MilestoneTerminalPayloadSchema.parse(completion.payload);
+  verifyMilestoneTerminalResult(journal, withTrace(milestone, milestoneEvents), terminal.result);
+  if (!(
     milestone.plan.tasks.some((task) => task.roleAssignment.role === "implementer") &&
     milestone.plan.tasks.some((task) => task.roleAssignment.role === "reviewer")
   )) return;
-  const completion = milestoneEvents.at(-1);
-  if (completion?.type !== "milestone.completed") throw new Error("completed milestone lacks a terminal event");
-  const retained = MilestoneCompletedPayloadSchema.parse(completion.payload).evidence;
-  const reviewer = milestone.plan.tasks.find((task) =>
-    task.roleAssignment.role === "reviewer" && task.dependencies.includes(retained.taskStreamId));
-  if (reviewer === undefined) throw new Error("completed milestone lacks a paired reviewer");
-  const verified = verifiedIntegrationEvidence(
-    journal,
-    milestoneEvents,
-    milestone,
-    retained.taskStreamId,
-    true,
-    reviewer.roleAssignment.agentId,
-  );
-  if (digestCanonical(retained) !== digestCanonical(verified)) {
-    throw new Error("milestone completion evidence contradicts the retained task stream");
+  for (const retained of terminal.result.integratedCommits) {
+    const reviewer = milestone.plan.tasks.find((task) =>
+      task.roleAssignment.role === "reviewer" && task.dependencies.includes(retained.taskId));
+    if (reviewer === undefined) throw new Error("completed milestone lacks a paired reviewer");
+    const verified = verifiedIntegrationEvidence(
+      journal,
+      milestoneEvents,
+      milestone,
+      retained.taskId,
+      false,
+      reviewer.roleAssignment.agentId,
+    );
+    if (retained.resultCommit !== verified.resultCommit) {
+      throw new Error("milestone completion evidence contradicts the retained task stream");
+    }
   }
 }
 

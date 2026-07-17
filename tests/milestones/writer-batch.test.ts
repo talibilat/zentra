@@ -11,6 +11,44 @@ import { ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE, artifactEvidenceSha256 } from "../
 import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 
 describe("journal-backed writer batch claims", () => {
+  it("replays and re-verifies an actual legacy singleton completion payload", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const registry = new MilestoneRegistry(journal);
+    registry.register({
+      milestoneId: "milestone-batch", projectId: "fixture", title: "Legacy singleton", correlationId: "trace-batch",
+      plan: { ...batchPlan(), tasks: batchPlan().tasks.slice(0, 2) },
+    });
+    appendMilestoneEvent(journal, "milestone.task_ready", { taskId: "writer-a", admissionDigest: "a".repeat(64) });
+    registry.startTask("milestone-batch", "writer-a", "model-a", "implementer");
+    registry.completeTask("milestone-batch", "writer-a", "completed");
+    appendMilestoneEvent(journal, "milestone.task_ready", { taskId: "review-a", admissionDigest: "b".repeat(64) });
+    registry.startTask("milestone-batch", "review-a", "reviewer-a", "reviewer");
+    appendIntegratedTask(journal, "writer-a");
+    registry.completeTask("milestone-batch", "review-a", "completed");
+    const taskEvents = journal.readStream("writer-a");
+    const integration = taskEvents.find((event) => event.type === "task.integration_observed")!;
+    const completion = taskEvents.find((event) => event.type === "task.completed")!;
+    const receipt = (integration.payload as { receipt: { resultCommit: string } }).receipt;
+    appendMilestoneEvent(journal, "milestone.completed", {
+      outcome: "completed",
+      evidence: {
+        taskStreamId: "writer-a",
+        integrationEventId: integration.eventId,
+        integrationStreamVersion: integration.streamVersion,
+        integrationPayloadDigest: digestCanonical(integration.payload),
+        completionEventId: completion.eventId,
+        completionStreamVersion: completion.streamVersion,
+        completionPayloadDigest: digestCanonical(completion.payload),
+        resultCommit: receipt.resultCommit,
+      },
+    });
+
+    expect(registry.inspect("milestone-batch")).toMatchObject({
+      lifecycle: "terminal", terminalOutcome: "completed", result: null,
+    });
+    journal.close();
+  });
+
   it("atomically claims non-overlapping writers and retains ownership through review", () => {
     const journal = new SqliteEventJournal(":memory:");
     try {

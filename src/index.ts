@@ -41,6 +41,8 @@ export {
   PlannedTaskSchema,
   RoleAssignmentSchema,
 } from "./contracts/milestone.js";
+export { MilestoneTerminalResultSchema, MilestoneTerminalPayloadSchema } from "./contracts/milestone-result.js";
+export type { MilestoneTerminalResult, MilestoneEvidenceReference } from "./contracts/milestone-result.js";
 export {
   createMilestoneAuthorityEnvelope,
   createReplanningPolicyBinding,

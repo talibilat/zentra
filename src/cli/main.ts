@@ -1202,6 +1202,16 @@ function publicRecoveryDecision(decision: Awaited<ReturnType<RecoveryService["in
 }
 
 function publicMilestoneStatus(milestone: NonNullable<ReturnType<MilestoneRegistry["inspect"]>>) {
+  if (milestone.lifecycle === "terminal") return Object.freeze({
+    milestoneId: milestone.milestoneId,
+    projectId: milestone.projectId,
+    lifecycle: milestone.lifecycle,
+    terminalOutcome: milestone.terminalOutcome,
+    streamVersion: milestone.streamVersion,
+    traceId: milestone.traceId,
+    tracePath: milestone.tracePath,
+    result: milestone.result,
+  });
   if (milestone.lifecycle !== "paused" || milestone.attention === null) return milestone;
   return Object.freeze({
     milestoneId: milestone.milestoneId,

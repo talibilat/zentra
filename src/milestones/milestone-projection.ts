@@ -41,6 +41,11 @@ import {
   type ReplanningResolutionPayload,
   type ReplanningPolicyBinding,
 } from "../contracts/replanning.js";
+import {
+  LegacyMilestoneNonSuccessPayloadSchema,
+  MilestoneTerminalPayloadSchema,
+  type MilestoneTerminalResult,
+} from "../contracts/milestone-result.js";
 
 export type PlannedTaskStatus = "planned" | "ready" | "running" | "blocked" | "completed";
 
@@ -71,12 +76,14 @@ export interface MilestoneView {
   readonly executedTaskIds: readonly string[];
   readonly hasActiveEffects: boolean;
   readonly hasUncertainEffects: boolean;
+  readonly hasTraceFailure: boolean;
   readonly replanningAttentionHistory: readonly ReplanningAttention[];
   readonly replanningResolutions: readonly ReplanningResolutionPayload[];
   readonly replanningPolicy: ReplanningPolicyBinding | null;
   readonly replanningPauseOccurrence: { readonly eventId: string; readonly streamVersion: number } | null;
   readonly writerOwnership: Readonly<Record<string, WriterOwnershipView>>;
   readonly maxConcurrentWriters: number | null;
+  readonly result: MilestoneTerminalResult | null;
 }
 
 export interface WriterOwnershipView {
@@ -123,11 +130,13 @@ interface MilestoneState {
   openCodeRuns: Map<string, { actorId: string; role: string; capsuleId: string; capabilityId: string; transportModelId: string; repositoryRevision: string }>;
   resources: Map<string, { taskId: string; intent: Record<string, unknown>; prepared: Record<string, unknown> | null; cleanup: Record<string, unknown> | null }>;
   tracedTasks: Set<string>;
+  traceOutcomes: Map<string, "emitted" | "failed">;
   startedTasks: Set<string>;
   writerOwnership: Map<string, WriterOwnershipView>;
   maxConcurrentWriters: number | null;
   writerModelLimits: Map<string, number>;
   writerBatchIds: Set<string>;
+  result: MilestoneTerminalResult | null;
 }
 
 const TERMINAL_EVENTS = new Map<string, TerminalOutcome>([
@@ -168,11 +177,13 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     openCodeRuns: new Map(),
     resources: new Map(),
     tracedTasks: new Set(),
+    traceOutcomes: new Map(),
     startedTasks: new Set(),
     writerOwnership: new Map(),
     maxConcurrentWriters: null,
     writerModelLimits: new Map(),
     writerBatchIds: new Set(),
+    result: null,
   };
 
   for (const event of events.slice(1)) {
@@ -189,7 +200,29 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     state.streamVersion = event.streamVersion;
     const terminalOutcome = TERMINAL_EVENTS.get(event.type);
     if (terminalOutcome !== undefined) {
-      if (terminalOutcome === "completed") assertSuccessfulMilestoneCompletion(state, event);
+      const payload = objectPayload(event);
+      const isIssue30 = "result" in payload;
+      if (isIssue30) {
+        const terminal = MilestoneTerminalPayloadSchema.parse(payload);
+        if (terminal.outcome !== terminalOutcome || terminal.result.milestoneId !== state.milestoneId ||
+          terminal.result.projectId !== state.projectId) {
+          throw new Error("milestone terminal result contradicts its stream identity");
+        }
+        assertTerminalResultTaskConsistency(state, terminal.result);
+        state.result = terminal.result;
+      } else if (terminalOutcome === "completed") {
+        const hasWriterReviewPair = state.plan?.tasks.some((task) => task.roleAssignment.role === "implementer") === true &&
+          state.plan.tasks.some((task) => task.roleAssignment.role === "reviewer");
+        if (Object.keys(payload).length !== 0 || hasWriterReviewPair) {
+          MilestoneCompletedPayloadSchema.parse(payload);
+        }
+      } else {
+        const legacy = LegacyMilestoneNonSuccessPayloadSchema.parse(payload);
+        if ("outcome" in legacy && legacy.outcome !== terminalOutcome) {
+          throw new Error("legacy milestone terminal outcome contradicts its event type");
+        }
+      }
+      if (terminalOutcome === "completed") assertSuccessfulMilestoneCompletion(state);
       state.lifecycle = "terminal";
       state.terminalOutcome = terminalOutcome;
       state.stopAndAsk = null;
@@ -498,8 +531,12 @@ function assertCleanupReconciliation(previous: Record<string, unknown>, complete
 function observeTrace(state: MilestoneState, event: StoredEvent): void {
   const parsed = OpenCodeTraceObservedPayloadSchema.parse(objectPayload(event));
   if (state.tasks.get(parsed.taskId)?.status !== "completed") throw new Error("OpenCode trace observation requires task completion");
-  if (state.tracedTasks.has(parsed.taskId)) throw new Error("duplicate OpenCode trace observation");
+  const prior = state.traceOutcomes.get(parsed.taskId);
+  if (prior !== undefined && !(prior === "emitted" && parsed.outcome === "failed")) {
+    throw new Error("duplicate OpenCode trace observation");
+  }
   state.tracedTasks.add(parsed.taskId);
+  state.traceOutcomes.set(parsed.taskId, parsed.outcome);
 }
 
 function assertResourceIdentity(intent: Record<string, unknown>, observed: {
@@ -779,16 +816,33 @@ function updateTask(
   }));
 }
 
-function assertSuccessfulMilestoneCompletion(state: MilestoneState, event: StoredEvent): void {
+function assertSuccessfulMilestoneCompletion(state: MilestoneState): void {
   if (state.plan === null) throw new Error("successful milestone completion requires a plan");
-  if (
-    state.plan.tasks.some((task) => task.roleAssignment.role === "implementer") &&
-    state.plan.tasks.some((task) => task.roleAssignment.role === "reviewer")
-  ) MilestoneCompletedPayloadSchema.parse(objectPayload(event));
   for (const task of state.plan.tasks) {
     const view = state.tasks.get(task.taskId);
     if (view?.terminalOutcome !== "completed") {
       throw new Error("successful milestone completion requires all planned tasks completed");
+    }
+  }
+}
+
+function assertTerminalResultTaskConsistency(state: MilestoneState, result: MilestoneTerminalResult): void {
+  if (result.tasks.length !== (state.plan?.tasks.length ?? 0)) {
+    throw new Error("milestone terminal result must include every planned task");
+  }
+  for (const [index, planned] of (state.plan?.tasks ?? []).entries()) {
+    const retained = result.tasks[index];
+    const current = state.tasks.get(planned.taskId);
+    if (retained?.taskId !== planned.taskId || retained.role !== planned.roleAssignment.role ||
+      retained.status !== current?.status || retained.outcome !== current.terminalOutcome) {
+      throw new Error("milestone terminal result task outcome contradicts same-stream state");
+    }
+    for (const evidence of retained.evidence.filter((item) => item.streamId === state.milestoneId)) {
+      const event = state.seenEvents.find((candidate) => candidate.eventId === evidence.eventId);
+      if (event === undefined || event.type !== evidence.eventType || event.streamVersion !== evidence.streamVersion ||
+        digestCanonical(event.payload) !== evidence.payloadDigest) {
+        throw new Error("milestone terminal result same-stream evidence is invalid");
+      }
     }
   }
 }
@@ -843,12 +897,14 @@ function freezeView(state: MilestoneState): MilestoneView {
     executedTaskIds: Object.freeze([...state.startedTasks].sort()),
     hasActiveEffects: state.openCodeRuns.size > 0 || [...state.resources.values()].some((resource) => resource.cleanup === null),
     hasUncertainEffects: [...state.resources.values()].some((resource) => resource.cleanup?.["outcome"] === "uncertain"),
+    hasTraceFailure: [...state.traceOutcomes.values()].some((outcome) => outcome === "failed"),
     replanningAttentionHistory: Object.freeze([...state.replanningAttentionHistory]),
     replanningResolutions: Object.freeze([...state.replanningResolutions]),
     replanningPolicy: state.replanningPolicy,
     replanningPauseOccurrence: state.replanningPauseOccurrence === null ? null : Object.freeze({ ...state.replanningPauseOccurrence }),
     writerOwnership: Object.freeze(Object.fromEntries(state.writerOwnership)),
     maxConcurrentWriters: state.maxConcurrentWriters,
+    result: state.result,
   });
 }
 

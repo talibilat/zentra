@@ -49,7 +49,9 @@ export class OpenCodeReadOnlyProgram {
     private readonly security: SecuritySheet,
     private readonly capsule: OpenCodeReadOnlyCapsule = new DockerOpenCodeReadOnlyCapsule(),
   ) {
-    this.projected = new ProjectingEventJournal(journal, agentTailSink);
+    this.projected = journal instanceof ProjectingEventJournal
+      ? journal
+      : new ProjectingEventJournal(journal, agentTailSink);
     this.agent = new OpenCodeReadOnlyAgent(this.projected, capsule, broker, models);
   }
 
@@ -140,6 +142,7 @@ export class OpenCodeReadOnlyProgram {
       request.taskId,
       this.security,
       context,
+      this.models,
     );
     if (admission.status === "paused") {
       return Object.freeze({
@@ -154,17 +157,28 @@ export class OpenCodeReadOnlyProgram {
       repositoryPath: admission.admission.packet.repository,
       admission: admission.admission,
     });
-    const traceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
+    const observedTraceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
     const events = this.journal.readStream(request.milestoneId);
     const correlationId = events[0]?.correlationId;
     if (correlationId === undefined) throw new Error("OpenCode milestone stream disappeared before trace observation");
-    this.journal.append(request.milestoneId, events.at(-1)!.streamVersion, [{
+    this.projected.append(request.milestoneId, events.at(-1)!.streamVersion, [{
       streamId: request.milestoneId,
       type: "milestone.agent_trace_observed",
-      payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: traceOutcome }),
+      payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: observedTraceOutcome }),
       causationId: null,
       correlationId,
     }]);
+    if (observedTraceOutcome === "emitted" && this.projected.projectionFailed) {
+      const corrected = this.journal.readStream(request.milestoneId);
+      this.projected.append(request.milestoneId, corrected.at(-1)!.streamVersion, [{
+        streamId: request.milestoneId,
+        type: "milestone.agent_trace_observed",
+        payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: "failed" }),
+        causationId: corrected.at(-1)!.eventId,
+        correlationId,
+      }]);
+    }
+    const traceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
     return Object.freeze({
       status: "executed",
       ...result,
