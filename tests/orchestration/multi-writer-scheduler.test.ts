@@ -11,6 +11,7 @@ import { ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE, artifactEvidenceSha256 } from "../
 import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-writer-scheduler.js";
+import { WriterResourceGovernor } from "../../src/orchestration/writer-resource-governor.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 
@@ -424,6 +425,157 @@ describe("MultiWriterOwnershipScheduler", () => {
         terminalOutcome: outcome,
         releasePhase: "post_handoff_reviewer",
       });
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("releases shared capacity at durable handoff while retaining logical ownership through integration", async () => {
+    const firstPlan = planWithPaths("src/a.ts", "src/b.ts");
+    const secondPlan = { ...planWithPaths("src/a.ts", "src/b.ts"), milestoneId: "milestone-second" };
+    const firstRegistry = new ControlledRegistry(firstPlan);
+    const secondRegistry = new ControlledRegistry(secondPlan);
+    const governor = new WriterResourceGovernor(1);
+    const firstMayFinish = Promise.withResolvers<void>();
+    const starts: string[] = [];
+    const execution = (label: string, pause: boolean) => ({
+      run: async (request: any) => {
+        starts.push(label);
+        await request.onReviewReady({ taskStreamId: request.task.taskId, diffSha256: "a".repeat(64), validation: {} });
+        if (pause) await firstMayFinish.promise;
+        else firstMayFinish.resolve();
+        return completedTask(request.task.taskId);
+      },
+    });
+    const firstRequest = { ...schedule(firstPlan, 1, 1), tasks: [schedule(firstPlan, 1, 1).tasks[0]!] };
+    const secondRequest = { ...schedule(secondPlan, 1, 1), tasks: [schedule(secondPlan, 1, 1).tasks[0]!] };
+
+    const results = await Promise.all([
+      new MultiWriterOwnershipScheduler(firstRegistry as never, execution("first", true), governor).run(firstRequest),
+      new MultiWriterOwnershipScheduler(secondRegistry as never, execution("second", false), governor).run(secondRequest),
+    ]);
+
+    expect(starts).toEqual(["first", "second"]);
+    expect(results.every((result) => result.tasks["review-a"]?.terminalOutcome === "completed")).toBe(true);
+  });
+
+  it("rereads readiness after a shared permit wait and does not claim stale work", async () => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const request = { ...schedule(plan, 1, 1), tasks: [schedule(plan, 1, 1).tasks[0]!] };
+    const registry = new ControlledRegistry(plan);
+    const governor = new WriterResourceGovernor(1);
+    const selected = request.modelSheet.models[0]!;
+    const held = await governor.acquire([{
+      writerId: "outside",
+      capabilityId: selected.id,
+      capabilityDigest: digestCanonical(selected),
+      maxConcurrency: selected.maxConcurrency,
+    }], new AbortController().signal);
+    let executions = 0;
+    const running = new MultiWriterOwnershipScheduler(registry as never, {
+      run: async () => { executions += 1; return completedTask("writer-a"); },
+    }, governor).run(request);
+    await Promise.resolve();
+    registry.startTask(plan.milestoneId, "writer-a");
+    held.release("outside");
+
+    const result = await running;
+    expect(executions).toBe(0);
+    expect(registry.batches).toEqual([]);
+    expect(result.tasks["writer-a"]?.status).toBe("running");
+  });
+
+  it("aborts a permit wait before claim or execution", async () => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const base = schedule(plan, 1, 1);
+    const abort = new AbortController();
+    const request = {
+      ...base,
+      tasks: [{ ...base.tasks[0]!, execution: { ...(base.tasks[0]!.execution as any), signal: abort.signal } }],
+    };
+    const registry = new ControlledRegistry(plan);
+    const governor = new WriterResourceGovernor(1);
+    const selected = request.modelSheet.models[0]!;
+    const held = await governor.acquire([{
+      writerId: "outside", capabilityId: selected.id,
+      capabilityDigest: digestCanonical(selected), maxConcurrency: 1,
+    }], new AbortController().signal);
+    let executions = 0;
+    const running = new MultiWriterOwnershipScheduler(registry as never, {
+      run: async () => { executions += 1; return completedTask("writer-a"); },
+    }, governor).run(request);
+    abort.abort();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(executions).toBe(0);
+    expect(registry.batches).toEqual([]);
+    held.release("outside");
+  });
+
+  it("releases a proven pre-effect rejection", async () => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const request = { ...schedule(plan, 1, 1), tasks: [schedule(plan, 1, 1).tasks[0]!] };
+    const journal = new SqliteEventJournal(":memory:");
+    const registry = registeredSchedulerRegistry(journal, plan, request);
+    const governor = new WriterResourceGovernor(1);
+    try {
+      const result = await new MultiWriterOwnershipScheduler(registry, {
+        run: async () => {
+          appendTerminalWriterStream(journal, "writer-a", "failed");
+          throw new Error("spawn never started after durable failed observation");
+        },
+      }, governor).run(request);
+      expect(result.writerOwnership["writer-a"]?.status).toBe("released");
+      const selected = request.modelSheet.models[0]!;
+      const next = await governor.acquire([{
+        writerId: "next", capabilityId: selected.id,
+        capabilityDigest: digestCanonical(selected), maxConcurrency: 1,
+      }], new AbortController().signal);
+      next.release("next");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("retains an uncertain running permit and releases it on later exact terminal reconciliation", async () => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const request = { ...schedule(plan, 1, 1), tasks: [schedule(plan, 1, 1).tasks[0]!] };
+    const journal = new SqliteEventJournal(":memory:");
+    const registry = registeredSchedulerRegistry(journal, plan, request);
+    const governor = new WriterResourceGovernor(1);
+    try {
+      await new MultiWriterOwnershipScheduler(registry, {
+        run: async () => {
+          appendUncertainWriterStream(journal, "writer-a");
+          return uncertainTask("writer-a");
+        },
+      }, governor).run(request);
+      const selected = request.modelSheet.models[0]!;
+      let nextEntered = false;
+      const waiting = governor.acquire([{
+        writerId: "next", capabilityId: selected.id,
+        capabilityDigest: digestCanonical(selected), maxConcurrency: 1,
+      }], new AbortController().signal).then((permit) => { nextEntered = true; return permit; });
+      await Promise.resolve();
+      expect(nextEntered).toBe(false);
+      const version = journal.readStream("writer-a").at(-1)!.streamVersion;
+      journal.append("writer-a", version, [
+        {
+          streamId: "writer-a", type: "task.effect_reconciled", payload: {
+            schemaVersion: 1, boundary: "worker", resolution: "abandoned",
+            reason: "operator confirmed the writer stopped", decidedBy: "operator", decisionId: "decision-1",
+          }, causationId: null, correlationId: "trace-batch",
+        },
+        {
+          streamId: "writer-a", type: "task.failed", payload: { stage: "writer", reason: "reconciled terminal" },
+          causationId: null, correlationId: "trace-batch",
+        },
+      ]);
+      await new MultiWriterOwnershipScheduler(registry, {
+        run: async () => { throw new Error("terminal effect must not retry"); },
+      }, governor).run(request);
+      const next = await waiting;
+      expect(nextEntered).toBe(true);
+      next.release("next");
     } finally {
       journal.close();
     }

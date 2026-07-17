@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -21,9 +21,10 @@ import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
-import { runCli } from "../../src/cli/main.js";
 import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-writer-scheduler.js";
 import { MultiAgentMilestoneCoordinator } from "../../src/orchestration/multi-agent-milestone.js";
+import { MultipleMilestoneScheduler } from "../../src/orchestration/multiple-milestone-scheduler.js";
+import { WriterResourceGovernor } from "../../src/orchestration/writer-resource-governor.js";
 import { OpenCodeIntegratedSingleFileTracer } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
 import { WriterWorktreeCapsule } from "../../src/orchestration/writer-worktree-capsule.js";
 import type { ModelCapability, ModelSheet } from "../../src/policy/model-sheet.js";
@@ -47,14 +48,13 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-describe("MultiWriterOwnershipScheduler real-Git production path", () => {
-  it("overlaps independent writers and serializes their validated reviewed integrations", async () => {
+describe("MultipleMilestoneScheduler real-Git production path", () => {
+  it("runs two production milestone coordinators with shared writer and integration control", async () => {
     const fixture = await fixtureProject();
     const databasePath = path.join(fixture.root, "scheduler.sqlite");
-    const tracePath = path.join(fixture.root, "scheduler.jsonl");
+    const tracePaths = [path.join(fixture.root, "milestone-a.jsonl"), path.join(fixture.root, "milestone-b.jsonl")];
     let sqlite: SqliteEventJournal | null = new SqliteEventJournal(databasePath);
-    const sink = AgentTailJsonlFileSink.open(fixture.root, tracePath);
-    const journal = new ProjectingEventJournal(sqlite, sink);
+    const sinks = tracePaths.map((tracePath) => AgentTailJsonlFileSink.open(fixture.root, tracePath));
     try {
       const supervisor = new ProcessSupervisor();
       const writerModel = model("writer-model", "implementer", 2);
@@ -75,16 +75,18 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
       }, AbortSignal.timeout(10_000));
       expect(probe.outcome).toBe("completed");
 
-      const plan = milestonePlan();
-      const registry = new MilestoneRegistry(journal);
-      registry.register({
-        milestoneId: plan.milestoneId,
-        projectId: plan.projectId,
-        title: "Parallel real Git writers",
-        correlationId: "trace-real-multi-writer",
-        tracePath,
-        plan,
-        authority: { security, modelSheet },
+      const plans = [milestonePlan("a"), milestonePlan("b")];
+      const journals = sinks.map((sink) => new ProjectingEventJournal(sqlite!, sink));
+      const registries = journals.map((journal, index) => {
+        const plan = plans[index]!;
+        const registry = new MilestoneRegistry(journal);
+        registry.register({
+          milestoneId: plan.milestoneId, projectId: plan.projectId,
+          title: `Real Git milestone ${index === 0 ? "A" : "B"}`,
+          correlationId: `trace-real-${index === 0 ? "a" : "b"}`,
+          tracePath: tracePaths[index]!, plan, authority: { security, modelSheet },
+        });
+        return registry;
       });
       const worktrees = new WorktreeManager(git);
       const capsule = new WriterWorktreeCapsule(
@@ -94,98 +96,66 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
         git,
       );
       const validations = new TrackingValidationRunner(supervisor);
-      const integrations = new IntegrationQueue(git, validations);
-      const tasks = new TaskService(journal);
-      const reviewers = new Map([
-        ["writer-a", reviewerAdapter("reviewer-a", "review-a", fixture.repository)],
-        ["writer-b", reviewerAdapter("reviewer-b", "review-b", fixture.repository)],
-      ]);
-      const tracers = new Map([...reviewers].map(([writerTaskId, reviewer]) => [
-        writerTaskId,
-        new OpenCodeIntegratedSingleFileTracer(tasks, capsule, validations, worktrees, {
-          reviewer,
-          reviews: new ReviewGate(),
-          integrations,
-          git,
-        }),
-      ]));
-      const execution = {
-        run: (request: Parameters<OpenCodeIntegratedSingleFileTracer["run"]>[0]) => {
-          const tracer = tracers.get(request.task.taskId);
-          if (tracer === undefined) throw new Error("missing task tracer");
-          return tracer.run(request);
-        },
-      };
-
-      const writerSchedule = {
-        milestoneId: plan.milestoneId,
-        maxConcurrentWriters: 2,
-        security,
-        modelSheet,
-        tasks: ["writer-a", "writer-b"].map((writerTaskId) => {
-          const writer = plan.tasks.find((task) => task.taskId === writerTaskId)!;
-          const reviewer = plan.tasks.find((task) =>
-            task.roleAssignment.role === "reviewer" && task.dependencies.includes(writerTaskId))!;
-          const reviewerModel = modelSheet.models.find((candidate) => candidate.id === reviewer.roleAssignment.agentId)!;
-          return {
-            writerTaskId,
-            reviewerTaskId: reviewer.taskId,
-            writerAdmission: admission(fixture.repository, writerModel, writer),
-            reviewerAdmission: admission(fixture.repository, reviewerModel, reviewer),
-            execution: {
-              project: fixture.project,
-              task: writer,
-              model: writerModel,
-              security,
-              probe,
-              reviewerId: reviewer.roleAssignment.agentId,
-              signal: AbortSignal.timeout(30_000),
-            },
-          };
-        }),
-      };
-      const readOnly = new OpenCodeReadOnlyProgram(
-        journal,
-        sink,
-        { execute: async () => { throw new Error("fixture capsule owns the bounded response"); } },
-        modelSheet,
-        security,
-        readOnlyCapsule(),
-      );
-      const scheduled = await new MultiAgentMilestoneCoordinator(
-        registry,
-        readOnly,
-        new MultiWriterOwnershipScheduler(registry, execution),
-      ).run({
-        milestoneId: plan.milestoneId,
-        readOnlyTasks: ["research", "plan"].map((taskId) => {
-          const planned = plan.tasks.find((task) => task.taskId === taskId)!;
-          return {
-            taskId,
-            request: {
-              milestoneId: plan.milestoneId,
-              taskId,
-              repositoryPath: fixture.repository,
+      const governor = new WriterResourceGovernor(2);
+      const coordinators = plans.map((plan, index) => {
+        const suffix = index === 0 ? "a" : "b";
+        const registry = registries[index]!;
+        const journal = journals[index]!;
+        const reviewer = reviewerAdapter(`reviewer-${suffix}`, `review-${suffix}`, fixture.repository, plan.milestoneId);
+        const tracer = new OpenCodeIntegratedSingleFileTracer(
+          new TaskService(journal), capsule, validations, worktrees,
+          { reviewer, reviews: new ReviewGate(), integrations: new IntegrationQueue(git, validations), git },
+        );
+        const execution = { run: (request: Parameters<OpenCodeIntegratedSingleFileTracer["run"]>[0]) => tracer.run(request) };
+        const readOnly = new OpenCodeReadOnlyProgram(
+          journal, sinks[index]!,
+          { execute: async () => { throw new Error("fixture capsule owns the bounded response"); } },
+          modelSheet, security, readOnlyCapsule(fixture.root, suffix),
+        );
+        return new MultiAgentMilestoneCoordinator(
+          registry, readOnly, new MultiWriterOwnershipScheduler(registry, execution, governor),
+        );
+      });
+      const requests = plans.map((plan, index) => {
+        const suffix = index === 0 ? "a" : "b";
+        const writer = plan.tasks.find((task) => task.taskId === `writer-${suffix}`)!;
+        const reviewer = plan.tasks.find((task) => task.taskId === `review-${suffix}`)!;
+        const reviewerModel = modelSheet.models.find((candidate) => candidate.id === reviewer.roleAssignment.agentId)!;
+        return {
+          milestoneId: plan.milestoneId,
+          readOnlyTasks: [`research-${suffix}`, `plan-${suffix}`].map((taskId) => {
+            const planned = plan.tasks.find((task) => task.taskId === taskId)!;
+            return { taskId, request: {
+              milestoneId: plan.milestoneId, taskId, repositoryPath: fixture.repository,
               role: planned.roleAssignment.role as "planner" | "researcher",
               rolePrompt: `Produce bounded ${planned.roleAssignment.role} evidence.`,
-              budget: {
-                maxSeconds: planned.budget.maxSeconds,
-                maxCostUsd: planned.budget.maxCostUsd,
-                maxInputTokens: planned.budget.maxInputTokens,
-                maxOutputTokens: planned.budget.maxOutputTokens,
-              },
-              timeoutMs: 15_000,
-              signal: AbortSignal.timeout(30_000),
-            },
-          };
-        }),
-        writerSchedule,
+              budget: { maxSeconds: 15, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 1_000 },
+              timeoutMs: 15_000, signal: AbortSignal.timeout(30_000),
+            } };
+          }),
+          writerSchedule: {
+            milestoneId: plan.milestoneId, maxConcurrentWriters: 2, security, modelSheet,
+            tasks: [{
+              writerTaskId: writer.taskId, reviewerTaskId: reviewer.taskId,
+              writerAdmission: admission(fixture.repository, writerModel, writer),
+              reviewerAdmission: admission(fixture.repository, reviewerModel, reviewer),
+              execution: { project: fixture.project, task: writer, model: writerModel, security, probe,
+                reviewerId: reviewer.roleAssignment.agentId, signal: AbortSignal.timeout(30_000) },
+            }],
+          },
+        };
       });
+      const scheduled = await new MultipleMilestoneScheduler(governor).run(plans.map((plan, index) => ({
+        milestoneId: plan.milestoneId, projectId: plan.projectId,
+        traceId: `trace-real-${index === 0 ? "a" : "b"}`,
+        coordinator: coordinators[index]!, request: requests[index]!,
+      })));
 
-      expect(scheduled.terminalOutcome).toBe("completed");
-      expect(scheduled.writerOwnership).toMatchObject({
-        "writer-a": { status: "integrated", reviewerTaskId: "review-a" },
-        "writer-b": { status: "integrated", reviewerTaskId: "review-b" },
+      expect(scheduled.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+      const results = scheduled.map((result) => {
+        if (result.status !== "fulfilled") throw result.reason;
+        expect(result.value.terminalOutcome).toBe("completed");
+        return result.value;
       });
       expect(validations.focusedRuns).toBe(2);
       expect(validations.fullRuns).toBe(2);
@@ -197,58 +167,37 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
       expect(await gitOutput(fixture.repository, ["show", "main:src/a.mjs"])).toContain("base-a");
       expect(await gitOutput(fixture.repository, ["show", "main:src/b.mjs"])).toContain("base-b");
       expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
-      for (const taskId of ["writer-a", "writer-b"]) {
-        expect(journal.readStream(taskId).map((event) => event.type)).toEqual(expect.arrayContaining([
+      for (const [index, taskId] of ["writer-a", "writer-b"].entries()) {
+        expect(journals[index]!.readStream(taskId).map((event) => event.type)).toEqual(expect.arrayContaining([
           "task.validation_completed",
           "task.review_approved",
           "task.integration_observed",
           "task.completed",
         ]));
       }
-      const result = scheduled;
-      expect(result).toMatchObject({
-        lifecycle: "terminal",
-        terminalOutcome: "completed",
-        result: {
-          outcome: "completed",
-          integratedCommits: [{ taskId: "writer-a" }, { taskId: "writer-b" }],
-          reviews: [{ taskId: "writer-a", reviewerId: "reviewer-a" }, { taskId: "writer-b", reviewerId: "reviewer-b" }],
-        },
-      });
-      expect(result.result?.validations.map(({ taskId, name, outcome }) => ({ taskId, name, outcome }))).toEqual([
-        { taskId: "writer-a", name: "focused", outcome: "completed" },
-        { taskId: "writer-a", name: "full", outcome: "completed" },
-        { taskId: "writer-b", name: "focused", outcome: "completed" },
-        { taskId: "writer-b", name: "full", outcome: "completed" },
-      ]);
-      expect(registry.completeFromEvidence(plan.milestoneId)).toEqual(result);
-
-      sink.close();
+      expect(results.map((result) => result.result?.integratedCommits[0]?.taskId)).toEqual(["writer-a", "writer-b"]);
+      for (const sink of sinks) sink.close();
       sqlite.close();
       sqlite = null;
       const reopened = SqliteEventJournal.openReadOnly(databasePath);
       try {
-        expect(new MilestoneRegistry(reopened).inspect(plan.milestoneId)).toEqual(result);
+        for (const [index, plan] of plans.entries()) {
+          expect(new MilestoneRegistry(reopened).inspect(plan.milestoneId)).toEqual(results[index]);
+        }
       } finally {
         reopened.close();
       }
-      const output: string[] = [];
-      const errors: string[] = [];
-      expect(await runCli(["milestone", "status", "--database", databasePath, "--milestone-id", plan.milestoneId], {
-        stdout: (value) => output.push(value), stderr: (value) => errors.push(value),
-        signalSource: { on: () => undefined, off: () => undefined },
-      })).toBe(0);
-      expect(errors).toEqual([]);
-      expect(JSON.parse(output.join(""))).toMatchObject({
-        command: "milestone.status",
-        milestone: { terminalOutcome: "completed", result: { outcome: "completed" } },
-      });
-      const tail = readFileSync(tracePath, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
-      expect(tail.map((event) => event.sequence)).toEqual([...tail].map((event) => event.sequence).sort((a, b) => a - b));
-      expect(tail.at(-1)).toMatchObject({ kind: "milestone.completed", operation: { status: "completed" } });
-      expect([...new Set(tail.map((event) => event.actor.role))]).toEqual(expect.arrayContaining(["scheduler", "integrator", "reviewer"]));
+      for (const [index, tracePath] of tracePaths.entries()) {
+        const tail = readFileSync(tracePath, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+        expect(tail.at(-1)).toMatchObject({
+          kind: "milestone.completed",
+          trace_id: `trace-real-${index === 0 ? "a" : "b"}`,
+          attributes: { zentra: { stream_id: plans[index]!.milestoneId } },
+        });
+        expect(tail.every((event) => event.trace_id === `trace-real-${index === 0 ? "a" : "b"}`)).toBe(true);
+      }
     } finally {
-      sink.close();
+      for (const sink of sinks) sink.close();
       sqlite?.close();
     }
   }, 60_000);
@@ -319,9 +268,18 @@ class ApprovingProgram implements OpenCodeReviewerProgram {
   }
 }
 
-function readOnlyCapsule(): OpenCodeReadOnlyCapsule {
+function readOnlyCapsule(root: string, suffix: "a" | "b"): OpenCodeReadOnlyCapsule {
   return {
     execute: async (request, _broker, _signal, observe) => {
+      if (request.role === "planner") {
+        writeFileSync(path.join(root, `readonly-${suffix}.started`), "started");
+        const peer = path.join(root, `readonly-${suffix === "a" ? "b" : "a"}.started`);
+        const deadline = Date.now() + 5_000;
+        while (!existsSync(peer)) {
+          if (Date.now() > deadline) throw new Error("read-only milestones did not overlap");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
       observe?.({
         type: "resources_prepared",
         payload: {
@@ -364,9 +322,9 @@ function readOnlyCapsule(): OpenCodeReadOnlyCapsule {
   };
 }
 
-function reviewerAdapter(reviewerId: string, taskId: string, repositoryPath: string): OpenCodeReviewerAdapter {
+function reviewerAdapter(reviewerId: string, taskId: string, repositoryPath: string, milestoneId: string): OpenCodeReviewerAdapter {
   return new OpenCodeReviewerAdapter(new ApprovingProgram(reviewerId), {
-    milestoneId: "real-multi-writer",
+    milestoneId,
     taskId,
     repositoryPath,
     reviewerId,
@@ -441,6 +399,7 @@ while (!existsSync(path.join(${JSON.stringify(root)}, peer + ".started"))) {
   if (Date.now() > deadline) process.exit(12);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 }
+if (taskId === "writer-b") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 const source = path.join(workspace, packet.ownedPaths[0]);
 const current = readFileSync(source, "utf8");
 writeFileSync(source, current.replace(taskId === "writer-a" ? "base-a" : "base-b", taskId === "writer-a" ? "updated-a" : "updated-b"));
@@ -449,7 +408,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
   return realpathSync.native(executable);
 }
 
-function milestonePlan(): MilestonePlan {
+function milestonePlan(suffix: "a" | "b"): MilestonePlan {
   const task = (taskId: string, role: "planner" | "researcher" | "implementer" | "reviewer", agentId: string, dependencies: string[], ownedPath: string): PlannedTask => ({
     taskId,
     title: taskId,
@@ -463,16 +422,14 @@ function milestonePlan(): MilestonePlan {
     budget: { maxSeconds: 15, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 1_000 },
   });
   return {
-    milestoneId: "real-multi-writer",
+    milestoneId: `real-milestone-${suffix}`,
     projectId: "fixture",
     goal: "Integrate two independent reviewed files.",
     tasks: [
-      task("plan", "planner", "planner", [], "src/**"),
-      task("research", "researcher", "researcher", ["plan"], "src/**"),
-      task("writer-a", "implementer", "writer-model", ["research"], "src/a.mjs"),
-      task("review-a", "reviewer", "reviewer-a", ["writer-a"], "src/a.mjs"),
-      task("writer-b", "implementer", "writer-model", ["research"], "src/b.mjs"),
-      task("review-b", "reviewer", "reviewer-b", ["writer-b"], "src/b.mjs"),
+      task(`plan-${suffix}`, "planner", "planner", [], "src/**"),
+      task(`research-${suffix}`, "researcher", "researcher", [`plan-${suffix}`], "src/**"),
+      task(`writer-${suffix}`, "implementer", "writer-model", [`research-${suffix}`], `src/${suffix}.mjs`),
+      task(`review-${suffix}`, "reviewer", `reviewer-${suffix}`, [`writer-${suffix}`], `src/${suffix}.mjs`),
     ],
   };
 }

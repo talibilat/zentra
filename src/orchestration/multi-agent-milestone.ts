@@ -8,6 +8,7 @@ import type {
   MultiWriterOwnershipScheduler,
   MultiWriterScheduleRequest,
 } from "./multi-writer-scheduler.js";
+import type { WriterResourceGovernor } from "./writer-resource-governor.js";
 
 export interface ScheduledReadOnlyTask {
   readonly taskId: string;
@@ -26,6 +27,17 @@ export class MultiAgentMilestoneCoordinator {
     private readonly readOnly: Pick<OpenCodeReadOnlyProgram, "run">,
     private readonly writers: Pick<MultiWriterOwnershipScheduler, "run">,
   ) {}
+
+  usesWriterGovernor(governor: WriterResourceGovernor): boolean {
+    return "usesGovernor" in this.writers &&
+      typeof this.writers.usesGovernor === "function" &&
+      this.writers.usesGovernor(governor);
+  }
+
+  inspectIdentity(milestoneId: string): { readonly projectId: string; readonly traceId: string } {
+    const milestone = this.requireMilestone(milestoneId);
+    return Object.freeze({ projectId: milestone.projectId, traceId: milestone.traceId });
+  }
 
   async run(request: MultiAgentMilestoneRequest): Promise<MilestoneRecord> {
     if (request.writerSchedule.milestoneId !== undefined &&
