@@ -46,6 +46,7 @@ import {
   MilestoneTerminalPayloadSchema,
   type MilestoneTerminalResult,
 } from "../contracts/milestone-result.js";
+import { ReleaseOperationBoundPayloadSchema, type ReleaseOperationBoundPayload } from "../release/release-events.js";
 
 export type PlannedTaskStatus = "planned" | "ready" | "running" | "blocked" | "completed";
 
@@ -84,6 +85,7 @@ export interface MilestoneView {
   readonly writerOwnership: Readonly<Record<string, WriterOwnershipView>>;
   readonly maxConcurrentWriters: number | null;
   readonly result: MilestoneTerminalResult | null;
+  readonly releaseOperation: ReleaseOperationBoundPayload | null;
 }
 
 export interface WriterOwnershipView {
@@ -137,6 +139,7 @@ interface MilestoneState {
   writerModelLimits: Map<string, number>;
   writerBatchIds: Set<string>;
   result: MilestoneTerminalResult | null;
+  releaseOperation: ReleaseOperationBoundPayload | null;
 }
 
 const TERMINAL_EVENTS = new Map<string, TerminalOutcome>([
@@ -184,6 +187,7 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     writerModelLimits: new Map(),
     writerBatchIds: new Set(),
     result: null,
+    releaseOperation: null,
   };
 
   for (const event of events.slice(1)) {
@@ -266,6 +270,9 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       case "milestone.writer_terminal_released":
         applyWriterTerminalReleased(state, event);
         break;
+      case "milestone.release_operation_bound":
+        applyReleaseOperationBound(state, event);
+        break;
       case "milestone.paused":
         applyPaused(state, event);
         break;
@@ -297,6 +304,19 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
   }
 
   return freezeView(state);
+}
+
+function applyReleaseOperationBound(state: MilestoneState, event: StoredEvent): void {
+  const payload = ReleaseOperationBoundPayloadSchema.parse(objectPayload(event));
+  if (state.releaseOperation !== null) throw new Error("milestone release operation is already bound");
+  const planned = state.plan?.tasks.find((task) => task.taskId === payload.taskId);
+  const current = state.tasks.get(payload.taskId);
+  if (planned?.roleAssignment.role !== "verifier" || planned.roleAssignment.harness !== "deterministic" ||
+    planned.risk.authority !== "local_release_preparation" || current?.status !== "ready" ||
+    current.admissionDigest !== payload.verifierAdmissionDigest) {
+    throw new Error("milestone release operation does not match the admitted verifier");
+  }
+  state.releaseOperation = payload;
 }
 
 function applyWriterBatchStarted(state: MilestoneState, event: StoredEvent): void {
@@ -905,6 +925,7 @@ function freezeView(state: MilestoneState): MilestoneView {
     writerOwnership: Object.freeze(Object.fromEntries(state.writerOwnership)),
     maxConcurrentWriters: state.maxConcurrentWriters,
     result: state.result,
+    releaseOperation: state.releaseOperation,
   });
 }
 

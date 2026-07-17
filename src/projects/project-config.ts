@@ -10,6 +10,7 @@ export const MAX_VALIDATION_TIMEOUT_MS = 30 * 60 * 1_000;
 export const DEFAULT_FOCUSED_VALIDATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_FULL_VALIDATION_TIMEOUT_MS = 5 * 60 * 1_000;
 export const DEFAULT_INTEGRATION_BRANCH = "zentra/integration";
+export const DEFAULT_RELEASE_STEP_TIMEOUT_MS = 5 * 60 * 1_000;
 
 export const ValidationTimeoutSchema = z
   .number()
@@ -202,6 +203,26 @@ const CommandSchema = z
     }
   });
 
+const SafeReleaseArtifactSchema = z.string().min(1).max(4_096).refine((candidate) => {
+  if (path.isAbsolute(candidate) || candidate.includes("\\") || candidate.includes("\0")) return false;
+  const segments = candidate.split("/");
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}, { message: "Release artifacts must be safe relative paths" });
+
+export const ReleasePreparationConfigSchema = z.strictObject({
+  build: CommandSchema,
+  package: CommandSchema,
+  verify: CommandSchema,
+  buildTimeoutMs: ValidationTimeoutSchema.default(DEFAULT_RELEASE_STEP_TIMEOUT_MS),
+  packageTimeoutMs: ValidationTimeoutSchema.default(DEFAULT_RELEASE_STEP_TIMEOUT_MS),
+  verifyTimeoutMs: ValidationTimeoutSchema.default(DEFAULT_RELEASE_STEP_TIMEOUT_MS),
+  artifacts: z.array(SafeReleaseArtifactSchema).min(1).max(256).superRefine((artifacts, context) => {
+    if (new Set(artifacts).size !== artifacts.length) {
+      context.addIssue({ code: "custom", message: "Release artifact paths must be unique" });
+    }
+  }),
+});
+
 export const ProjectConfigSchema = z.object({
   projectId: z.string().min(1),
   repositoryPath: z.string().refine(path.isAbsolute),
@@ -219,6 +240,8 @@ export const ProjectConfigSchema = z.object({
       DEFAULT_FULL_VALIDATION_TIMEOUT_MS,
     ),
   }),
+  releasePreparation: ReleasePreparationConfigSchema.optional(),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+export type ReleasePreparationConfig = z.infer<typeof ReleasePreparationConfigSchema>;

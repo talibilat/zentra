@@ -88,6 +88,10 @@ export {
   OpenCodeReviewerAdapter,
   OpenCodeReviewerUncertainError,
 } from "./reviews/opencode-reviewer-adapter.js";
+export { LocalReleaseCoordinator } from "./release/local-release-coordinator.js";
+export type { LocalReleaseCoordinatorResult } from "./release/local-release-coordinator.js";
+export { ReleasePreparationConfigSchema } from "./projects/project-config.js";
+export type { ReleasePreparationConfig } from "./projects/project-config.js";
 export {
   modelSheetSha256,
   routeApprovedModel,

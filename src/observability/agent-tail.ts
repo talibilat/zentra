@@ -5,6 +5,7 @@ import { MilestonePausedPayloadSchema } from "../contracts/authority-attention.j
 import { parseRoutingEventPayload } from "../routing/routing-events.js";
 import { MilestoneAuthorityEnvelopePayloadSchema, PlanRevisionPayloadSchema, ReplanningPausedPayloadSchema, ReplanningPolicyBoundPayloadSchema, ReplanningResolutionPayloadSchema } from "../contracts/replanning.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
+import { parseReleaseEventPayload, ReleaseMilestoneTaskCompletedPayloadSchema } from "../release/release-events.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -72,6 +73,10 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedPolicyPayload(event.payload)
     : event.type === "milestone.authority_envelope_established"
       ? redactedEnvelopePayload(event.payload)
+    : isPotentialReleaseTaskCompletion(event)
+      ? redactedReleaseTaskCompletionPayload(event.payload)
+    : event.type.startsWith("release.")
+      ? redactedReleasePayload(event.type, event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -142,6 +147,7 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
   if (event.type.startsWith("milestone.task_")) {
     const taskId = payloadString(event.payload, "taskId");
@@ -159,6 +165,7 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("release.")) return { id: "zentra-local-release-runner", role: "verifier" };
   if (event.type === "milestone.paused") {
     const paused = parseMilestonePausedPayload(event.payload);
     return "revisionId" in paused.attention
@@ -247,9 +254,14 @@ function actorFor(event: StoredEvent): AgentTailActor {
 
 function operationName(event: StoredEvent): string {
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
+  if (event.type === "milestone.release_operation_bound") return "release_preparation";
   if (event.type === "milestone.paused") {
-    return ReplanningPausedPayloadSchema.safeParse(event.payload).success ? "milestone_replanning" : "authority_boundary";
+    if (ReplanningPausedPayloadSchema.safeParse(event.payload).success) return "milestone_replanning";
+    const paused = MilestonePausedPayloadSchema.parse(event.payload);
+    return paused.attention.reason === "release_boundary" ? "release_boundary" : "authority_boundary";
   }
+  if (event.type === "release.prepared_local_only") return "release_boundary";
+  if (event.type.startsWith("release.")) return "release_preparation";
   if (event.type.startsWith("routing.")) return "model_routing";
   if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
@@ -279,6 +291,11 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (type === "release.step_started" || type === "release.worktree_intent") return "running";
+  if (type === "release.step_observed") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "release.failed") return "failed";
+  if (type === "release.prepared_local_only") return "waiting";
+  if (type.startsWith("release.")) return "completed";
   if (type === "routing.model_selected") return "completed";
   if (type === "routing.outcome_recorded") {
     return payloadString(event.payload, "outcome") ?? "failed";
@@ -369,6 +386,71 @@ function cloneJson(value: unknown): unknown {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error("Agent Tail payload must be JSON-serializable");
   return JSON.parse(serialized) as unknown;
+}
+
+function redactedReleasePayload(type: string, payload: unknown): unknown {
+  const parsed = parseReleaseEventPayload(type, payload);
+  if (type === "release.created") {
+    const created = parsed as { readonly schemaVersion: number; readonly packetDigest: string; readonly packet: Readonly<Record<string, unknown>> };
+    const packet = created.packet;
+    const commands = packet["commands"] as Readonly<Record<string, unknown>>;
+    return Object.freeze({
+      schemaVersion: created.schemaVersion,
+      packetDigest: created.packetDigest,
+      releaseId: packet["releaseId"], milestoneId: packet["milestoneId"], taskId: packet["taskId"],
+      projectId: packet["projectId"], resultCommit: packet["resultCommit"], integrationRef: packet["integrationRef"],
+      securityDigest: packet["securityDigest"], authorityDigest: packet["authorityDigest"],
+      verifierAdmissionDigest: packet["verifierAdmissionDigest"],
+      commandsDigest: digestCanonical(commands),
+      artifactManifestDigest: digestCanonical(packet["artifacts"]),
+      artifactCount: Array.isArray(packet["artifacts"]) ? packet["artifacts"].length : 0,
+    });
+  }
+  if (type === "release.worktree_intent") {
+    const intent = parsed as Readonly<Record<string, unknown>>;
+    return Object.freeze({ schemaVersion: intent["schemaVersion"], resultCommit: intent["resultCommit"], pathDigest: digestCanonical(intent["path"]) });
+  }
+  if (type === "release.environment_intent") {
+    const intent = parsed as Readonly<Record<string, unknown>>;
+    return Object.freeze({ schemaVersion: intent["schemaVersion"], environmentPathsDigest: digestCanonical([intent["home"], intent["temporary"]]) });
+  }
+  if (type === "release.artifact_hashed") {
+    const artifact = parsed as Readonly<Record<string, unknown>>;
+    return Object.freeze({
+      schemaVersion: artifact["schemaVersion"], pathDigest: digestCanonical(artifact["path"]),
+      size: artifact["size"], sha256: artifact["sha256"],
+    });
+  }
+  if (type !== "release.step_observed") return parsed;
+  const report = parsed as Readonly<Record<string, unknown>>;
+  return Object.freeze({
+    schemaVersion: report["schemaVersion"],
+    name: report["name"],
+    argvSha256: report["argvSha256"],
+    outcome: report["outcome"],
+    exitCode: report["exitCode"],
+    outputSha256: report["outputSha256"],
+  });
+}
+
+function redactedReleaseTaskCompletionPayload(payload: unknown): unknown {
+  const parsed = ReleaseMilestoneTaskCompletedPayloadSchema.parse(payload);
+  return Object.freeze({
+    taskId: parsed.taskId,
+    actorId: parsed.actorId,
+    role: parsed.role,
+    outcome: parsed.outcome,
+    evidence: Object.freeze({
+      ...parsed.evidence,
+      artifacts: parsed.evidence.artifacts.map((artifact) => Object.freeze({ ...artifact })),
+    }),
+  });
+}
+
+function isPotentialReleaseTaskCompletion(event: StoredEvent): boolean {
+  if (event.type !== "milestone.task_completed") return false;
+  const evidence = payloadRecord(event.payload, "evidence");
+  return payloadString(evidence, "releaseStreamId") !== null;
 }
 
 function chosenModelAttributes(type: string, payload: unknown): object {
