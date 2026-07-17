@@ -322,6 +322,30 @@ describe("Agent Tail event envelope export", () => {
     });
   });
 
+  it("projects generic milestone agents into separate child spans", () => {
+    const implementer = storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1",
+      type: "milestone.task_running",
+      payload: { taskId: "implement", actorId: "writer-1", role: "implementer" },
+    }));
+    const reviewer = storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1",
+      type: "milestone.task_running",
+      payload: { taskId: "review", actorId: "reviewer-1", role: "reviewer" },
+    }));
+
+    expect(implementer).toMatchObject({
+      span_id: "milestone:milestone-1:task:implement",
+      parent_span_id: "milestone:milestone-1",
+      actor: { id: "writer-1", role: "implementer" },
+    });
+    expect(reviewer).toMatchObject({
+      span_id: "milestone:milestone-1:task:review",
+      parent_span_id: "milestone:milestone-1",
+      actor: { id: "reviewer-1", role: "reviewer" },
+    });
+  });
+
   it("exposes strictly validated chosen-model routing metadata", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "routing.model_selected",

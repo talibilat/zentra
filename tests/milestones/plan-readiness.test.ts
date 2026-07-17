@@ -78,7 +78,7 @@ const context: OpenCodeTaskAdmissionContext = {
   kind: "opencode", repositoryPath: process.cwd(), actorId: "opencode-general", harness: "opencode",
   role: "implementer", capabilityId: "opencode-general", transportModelId: "fixture/model",
   authority: "workspace_write",
-  roles: ["implementer"], toolPermissions: ["read_repository"], network: "denied",
+  roles: ["implementer"], toolPermissions: ["read_repository", "write_worktree"], network: "denied",
   contextTokens: 10_000,
   requestedBudget: { maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000, timeoutMs: 300_000 },
 };
@@ -109,6 +109,33 @@ describe("assessMilestonePlanReadiness", () => {
       reason: "ready",
       attention: null,
     });
+  });
+
+  it("requires exact authority-specific tools for implementers and reviewers", () => {
+    expect(assessMilestonePlanReadiness({
+      plan: basePlan,
+      taskId: "task-a",
+      security,
+      packet: createOpenCodeAdmissionPacket({
+        plan: basePlan as never,
+        milestoneId: "milestone-ready",
+        taskId: "task-a",
+        security,
+        canonicalRepository: security.allowedRepositories[0]!,
+        actorId: context.actorId,
+        harness: context.harness,
+        role: context.role,
+        capabilityId: context.capabilityId,
+        transportModelId: context.transportModelId,
+        authority: context.authority,
+        roles: context.roles,
+        toolPermissions: ["read_repository"],
+        network: context.network,
+        contextTokens: context.contextTokens,
+        requestedBudget: context.requestedBudget,
+      }),
+      context: { ...context, toolPermissions: ["read_repository"] },
+    })).toMatchObject({ status: "blocked", reason: "plan_not_ready" });
   });
 
   it("blocks malformed plans with missing acceptance criteria", () => {

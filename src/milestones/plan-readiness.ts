@@ -142,7 +142,9 @@ function assessAuthority(
   }
   const expectedTools = packet.role === "reviewer"
     ? ["read_repository", "review_diff"]
-    : ["read_repository"];
+    : packet.role === "implementer"
+      ? ["read_repository", "write_worktree"]
+      : ["read_repository"];
   if (!sameCanonicalSet(context.toolPermissions, expectedTools)) {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }

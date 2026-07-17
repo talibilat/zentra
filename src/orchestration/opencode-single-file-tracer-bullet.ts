@@ -63,7 +63,15 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly security: SecuritySheet;
   readonly probe: OpenCodeProbeReport;
   readonly reviewerId?: string;
+  readonly correlationId?: string;
+  readonly onReviewReady?: (handoff: ValidatedChangeHandoff) => void | Promise<void>;
   readonly signal: AbortSignal;
+}
+
+export interface ValidatedChangeHandoff {
+  readonly taskStreamId: string;
+  readonly diffSha256: string;
+  readonly validation: ValidationReport;
 }
 
 export interface OpenCodeIntegrationDependencies {
@@ -127,7 +135,7 @@ export class OpenCodeSingleFileTracerBullet {
       taskId: request.task.taskId,
       projectId: request.project.projectId,
       title: request.task.title,
-      correlationId: request.task.taskId,
+      correlationId: request.correlationId ?? request.task.taskId,
     });
 
     let observedWorkspace: string | null = null;
@@ -395,6 +403,11 @@ export class OpenCodeSingleFileTracerBullet {
       validation,
     };
     try {
+      await request.onReviewReady?.({
+        taskStreamId: request.task.taskId,
+        diffSha256,
+        validation,
+      });
       const decision = await dependencies.reviewer.review(reviewInput, request.signal);
       const evidence = dependencies.reviews.verifyEvidence(reviewInput, decision);
       if (!evidence.approved) {

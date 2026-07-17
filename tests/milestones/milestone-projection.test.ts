@@ -114,6 +114,14 @@ describe("projectMilestone", () => {
   });
 
   it("rejects OpenCode completion evidence that contradicts the running repository revision", () => {
+    const openCodePlan = {
+      ...plan,
+      tasks: [{
+        ...plan.tasks[0]!,
+        roleAssignment: { role: "planner", agentId: "agent-a", harness: "opencode" },
+        risk: { ...plan.tasks[0]!.risk, authority: "read_only" },
+      }],
+    };
     const summary = "Evidence.";
     const running = {
       taskId: "task-a", capsuleId: "capsule-a", actorId: "agent-a", role: "planner", harness: "opencode",
@@ -136,7 +144,7 @@ describe("projectMilestone", () => {
     const cleanup = { ...prepared, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true };
     expect(() => projectMilestone([
       event({ type: "milestone.created", payload: { projectId: "zentra", title: "OpenCode" }, streamVersion: 1 }),
-      event({ type: "milestone.plan_created", payload: { plan }, streamVersion: 2 }),
+      event({ type: "milestone.plan_created", payload: { plan: openCodePlan }, streamVersion: 2 }),
       event({ type: "milestone.task_ready", payload: readyPayload("task-a"), streamVersion: 3 }),
       event({ type: "milestone.agent_resource_intent", payload: intent, streamVersion: 4 }),
       event({ type: "milestone.task_running", payload: running, streamVersion: 5 }),
@@ -294,7 +302,8 @@ describe("projectMilestone", () => {
     }));
 
     expect(exported.trace_id).toBe("run-shared");
-    expect(exported.span_id).toBe("milestone:milestone-1");
+    expect(exported.span_id).toBe("milestone:milestone-1:task:task-a");
+    expect(exported.parent_span_id).toBe("milestone:milestone-1");
     expect(exported.sequence).toBe(44);
     expect(exported.actor).toEqual({ id: "zentra-scheduler", role: "scheduler" });
     expect(exported.operation).toEqual({ name: "milestone", status: "running" });

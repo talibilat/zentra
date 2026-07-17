@@ -84,7 +84,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     event_id: event.eventId,
     trace_id: event.correlationId,
     span_id: spanIdFor(event),
-    parent_span_id: null,
+    parent_span_id: parentSpanIdFor(event),
     emitter_id: AGENT_TAIL_JOURNAL_EMITTER_ID,
     sequence: event.globalPosition,
     timestamp: event.recordedAt,
@@ -143,9 +143,19 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
+  if (event.type.startsWith("milestone.task_")) {
+    const taskId = payloadString(event.payload, "taskId");
+    if (taskId !== null) return `milestone:${event.streamId}:task:${taskId}`;
+  }
   if (event.type.startsWith("milestone.")) return `milestone:${event.streamId}`;
   if (event.type.startsWith("capsule.")) return `capsule:${event.streamId}`;
   return `task:${event.streamId}`;
+}
+
+function parentSpanIdFor(event: StoredEvent): string | null {
+  return event.type.startsWith("milestone.task_") && payloadString(event.payload, "taskId") !== null
+    ? `milestone:${event.streamId}`
+    : null;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
@@ -180,7 +190,12 @@ function actorFor(event: StoredEvent): AgentTailActor {
     return { id: "zentra-capsule-controller", role: "worker_controller" };
   }
   if (event.type.startsWith("milestone.")) {
-    if (event.type.includes("task_")) return { id: "zentra-scheduler", role: "scheduler" };
+    if (event.type.includes("task_")) {
+      return {
+        id: payloadString(event.payload, "actorId") ?? "zentra-scheduler",
+        role: payloadString(event.payload, "role") ?? "scheduler",
+      };
+    }
     if (event.type === "milestone.plan_created") return { id: "zentra-planner", role: "planner" };
     return { id: "zentra-orchestrator", role: "orchestrator" };
   }
@@ -328,7 +343,7 @@ function isOpenCodeRoleEvent(event: StoredEvent): boolean {
 
 function isPotentialOpenCodeRoleEvent(event: StoredEvent): boolean {
   return (event.type === "milestone.task_running" || event.type === "milestone.task_completed") &&
-    (payloadString(event.payload, "harness") === "opencode" || payloadString(event.payload, "actorId") !== null);
+    payloadString(event.payload, "harness") === "opencode";
 }
 
 function payloadBoolean(payload: unknown, key: string): boolean | null {
