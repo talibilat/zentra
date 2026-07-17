@@ -22,6 +22,7 @@ export interface OpenCodeProbeRequest {
   readonly modelId: string;
   readonly models: ModelSheet;
   readonly security: SecuritySheet;
+  readonly home?: string;
 }
 
 export interface OpenCodeProbeReport {
@@ -102,6 +103,7 @@ export class OpenCodeProbe {
       args: ["--version"],
       cwd: canonicalCwd,
       timeoutMs: request.timeoutMs,
+      ...(request.home === undefined ? {} : { environment: { HOME: canonicalDirectory(request.home) } }),
     }, signal, "validation");
 
     let executableSha256: string | null = null;

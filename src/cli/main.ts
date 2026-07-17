@@ -42,6 +42,7 @@ import {
 } from "../observability/agent-tail-file-sink.js";
 import { RecoveryService } from "../orchestration/recovery.js";
 import { TracerBulletOrchestrator } from "../orchestration/tracer-bullet.js";
+import { InstalledMilestoneRunner } from "../orchestration/installed-milestone.js";
 import {
   loadModelSheet,
   ModelSheetError,
@@ -72,6 +73,10 @@ import type { TaskView } from "../tasks/task-projection.js";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
 import { GitClient } from "../workspaces/git-client.js";
 import { WorktreeManager } from "../workspaces/worktree-manager.js";
+import {
+  OpenRouterModelBroker,
+  loadProviderConfig,
+} from "../providers/openrouter-model-broker.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
 const REVIEWER_ID = "zentra-deterministic-reviewer";
@@ -135,6 +140,7 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   INVALID_CONTENT: "Task content is too large.",
   INVALID_FILE: "File must be one safe root-level filename.",
   INVALID_MODEL_SHEET: "Model sheet is invalid.",
+  INVALID_PROVIDER_CONFIG: "Provider configuration is invalid.",
   INVALID_SECURITY_SHEET: "Security sheet is invalid.",
   INVALID_TASK_ID: "Task ID must be one safe path and ref component.",
   INVALID_TITLE: "Task title is invalid.",
@@ -196,6 +202,17 @@ interface MilestonePreviewOptions extends PolicyPreviewOptions, ProjectOptions, 
 interface MilestoneStatusOptions {
   readonly database: string;
   readonly milestoneId: string;
+}
+
+interface MilestoneRunOptions extends ProjectOptions, Pick<DatabaseTaskOptions, "database"> {
+  readonly goal: string;
+  readonly modelSheet: string;
+  readonly securitySheet: string;
+  readonly provider: string;
+  readonly opencode: string;
+  readonly opencodeHome: string;
+  readonly agentTailJsonl: string;
+  readonly file: string;
 }
 
 interface CapsuleConformanceOptions {
@@ -337,6 +354,109 @@ function createProgram(
     });
 
   const milestone = program.command("milestone").description("Plan and inspect milestones.");
+  milestone
+    .command("run")
+    .description("Run one installed OpenCode milestone from an explicitly bounded goal.")
+    .requiredOption("--goal <sentence>", "one natural-language goal; wording grants no authority")
+    .requiredOption("--config <path>", "canonical project configuration file")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--model-sheet <path>", "canonical Markdown model sheet")
+    .requiredOption("--security-sheet <path>", "canonical Markdown security sheet")
+    .requiredOption("--provider <path>", "canonical fixed-endpoint provider configuration")
+    .requiredOption("--opencode <path>", "canonical OpenCode executable")
+    .requiredOption("--opencode-home <path>", "canonical explicit OpenCode home for writer and probe")
+    .requiredOption("--agent-tail-jsonl <path>", "canonical new Agent Tail JSONL trace path")
+    .requiredOption("--file <path>", "one explicit security-authorized relative file")
+    .action(async (options: MilestoneRunOptions) => {
+      assertSafeTitle(options.goal);
+      assertSafeRelativeFile(options.file);
+      assertCanonicalInputFile(options.config);
+      assertCanonicalInputFile(options.modelSheet);
+      assertCanonicalInputFile(options.securitySheet);
+      assertCanonicalInputFile(options.provider);
+      assertCanonicalExecutable(options.opencode);
+      assertCanonicalDirectory(options.opencodeHome);
+      assertCanonicalOutputPath(options.database);
+      assertCanonicalOutputPath(options.agentTailJsonl);
+      const configs = loadProjects(options.config);
+      if (configs.length !== 1) throw new CliFailure("INVALID_CONFIG");
+      const project = configs[0]!;
+      const models = loadModelSheetForCli(options.modelSheet);
+      const security = loadSecuritySheetForCli(options.securitySheet);
+      let providerConfig;
+      try {
+        providerConfig = loadProviderConfig(options.provider);
+      } catch {
+        throw new CliFailure("INVALID_PROVIDER_CONFIG");
+      }
+      const broker = new OpenRouterModelBroker(providerConfig);
+      const milestoneId = `milestone-${createHash("sha256")
+        .update(`${project.projectId}\0${options.goal}\0${options.file}`, "utf8")
+        .digest("hex").slice(0, 16)}`;
+      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, liveStdout);
+      const sqlite = new SqliteEventJournal(options.database);
+      let sink: AgentTailJsonlFileSink | undefined;
+      let runner: InstalledMilestoneRunner | undefined;
+      let projectionFailed = false;
+      let runFailed = false;
+      try {
+        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
+        runner = new InstalledMilestoneRunner({
+          journal: sqlite,
+          sink,
+          broker,
+        });
+        await runner.run({
+          milestoneId,
+          goal: options.goal,
+          file: options.file,
+          tracePath: trace.canonicalPath,
+          project,
+          models,
+          security,
+          openCodeExecutable: options.opencode,
+          openCodeHome: options.opencodeHome,
+          signal,
+        });
+      } catch {
+        runFailed = true;
+      } finally {
+        projectionFailed = (runner?.traceProjectionFailed ?? false) || (sink?.streamFailed ?? false);
+        try {
+          sink?.close();
+        } finally {
+          sqlite.close();
+        }
+      }
+      const replay = SqliteEventJournal.openReadOnly(options.database);
+      let terminal;
+      try {
+        terminal = new MilestoneRegistry(replay).inspect(milestoneId);
+      } finally {
+        replay.close();
+      }
+      if (terminal === null) throw new CliFailure("OPERATION_FAILED");
+      const outcome = terminal.terminalOutcome;
+      setResult({
+        exitCode: milestoneExitCode(outcome, projectionFailed || runFailed),
+        streamOutput: true,
+        value: {
+          command: "milestone.run",
+          milestoneId,
+          projectId: terminal.projectId,
+          lifecycle: terminal.lifecycle,
+          outcome,
+          tracePath: trace.canonicalPath,
+          ...(terminal.attention === null ? {} : {
+            attention: { reason: terminal.attention.reason, classification: terminal.attention.classification },
+          }),
+          trace: {
+            path: trace.canonicalPath,
+            outcome: projectionFailed ? "failed" : terminal.result?.trace.outcome ?? "not_observed",
+          },
+        },
+      });
+    });
   milestone
     .command("preview")
     .description("Create a durable milestone plan preview without executing workers.")
@@ -1111,6 +1231,47 @@ function assertSafeRootFile(candidate: string): void {
   }
 }
 
+function assertSafeRelativeFile(candidate: string): void {
+  if (candidate.length === 0 || Buffer.byteLength(candidate, "utf8") > 4_096 || path.isAbsolute(candidate) ||
+    candidate.includes("\\") || /[\u0000-\u001f\u007f]/.test(candidate) ||
+    candidate.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new CliFailure("INVALID_FILE");
+  }
+}
+
+function assertCanonicalInputFile(candidate: string): void {
+  try {
+    if (!path.isAbsolute(candidate) || path.normalize(candidate) !== candidate ||
+      realpathSync.native(candidate) !== candidate || !statSync(candidate).isFile()) throw new Error("invalid");
+  } catch {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
+function assertCanonicalExecutable(candidate: string): void {
+  assertCanonicalInputFile(candidate);
+  if ((statSync(candidate).mode & 0o111) === 0) throw new CliFailure("INVALID_COMMAND");
+}
+
+function assertCanonicalDirectory(candidate: string): void {
+  try {
+    if (!path.isAbsolute(candidate) || path.normalize(candidate) !== candidate ||
+      realpathSync.native(candidate) !== candidate || !statSync(candidate).isDirectory()) throw new Error("invalid");
+  } catch {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
+function assertCanonicalOutputPath(candidate: string): void {
+  try {
+    if (!path.isAbsolute(candidate) || path.normalize(candidate) !== candidate ||
+      realpathSync.native(path.dirname(candidate)) !== path.dirname(candidate) ||
+      (existsSync(candidate) && realpathSync.native(candidate) !== candidate)) throw new Error("invalid");
+  } catch {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
 function assertSafeTitle(title: string): void {
   if (title.length === 0 || Buffer.byteLength(title, "utf8") > MAX_TITLE_BYTES) {
     throw new CliFailure("INVALID_TITLE");
@@ -1224,6 +1385,7 @@ function publicMilestoneStatus(milestone: NonNullable<ReturnType<MilestoneRegist
 }
 
 function commandLabel(argv: readonly string[]): string {
+  if (argv[0] === "milestone" && argv[1] === "run") return "milestone.run";
   if (argv[0] === "milestone" && argv[1] === "preview") return "milestone.preview";
   if (argv[0] === "milestone" && argv[1] === "list") return "milestone.list";
   if (argv[0] === "milestone" && argv[1] === "status") return "milestone.status";
@@ -1235,6 +1397,14 @@ function commandLabel(argv: readonly string[]): string {
   if (argv[0] === "task" && argv[1] === "status") return "task.status";
   if (argv[0] === "recover") return "recover";
   return "unknown";
+}
+
+function milestoneExitCode(outcome: TaskView["terminalOutcome"], traceFailed: boolean): number {
+  if (traceFailed || outcome === null || outcome === "failed") return 1;
+  if (outcome === "completed") return 0;
+  if (outcome === "cancelled") return 2;
+  if (outcome === "denied") return 3;
+  return 4;
 }
 
 function serializeJson(value: Record<string, unknown>): string {

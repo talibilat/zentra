@@ -30,6 +30,7 @@ export interface OpenCodeWriterRequest {
   readonly packet: WriterTaskPacket;
   readonly timeoutMs: number;
   readonly expectedExecutableSha256?: string;
+  readonly home?: string;
 }
 
 export interface OpenCodeWriterReport {
@@ -84,6 +85,7 @@ export class OpenCodeWriter {
       cwd,
       timeoutMs: request.timeoutMs,
       environment: {
+        ...(request.home === undefined ? {} : { HOME: canonicalDirectory(request.home) }),
         OPENCODE_CONFIG_CONTENT: writerConfiguration(request.model, request.packet.ownedPaths),
         OPENCODE_DISABLE_AUTOUPDATE: "1",
         OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",

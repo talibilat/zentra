@@ -62,6 +62,7 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
   readonly probe: OpenCodeProbeReport;
+  readonly openCodeHome?: string;
   readonly reviewerId?: string;
   readonly correlationId?: string;
   readonly onReviewReady?: (handoff: ValidatedChangeHandoff) => void | Promise<void>;

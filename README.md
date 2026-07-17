@@ -174,7 +174,7 @@ Repository leases coexist with journal tables in the canonical event-journal SQL
 External repository actors can still move or delete the head after that final check, so reconciliation verifies the created PR's exact head OID and keeps any mismatch uncertain.
 The conformance command keeps model traffic disabled and proves only the OpenCode version and executable digest.
 The programmatic read-only OpenCode role requires an explicitly supplied typed `ModelBroker` and records the broker-reported model metadata and bounded evidence in the milestone journal.
-Installed milestone CLI composition belongs to issue #34 and is not exposed by issue #18.
+The installed milestone command composes that role with the existing OpenCode probe, isolated writer worktree, named validations, independent reviewer, disposable integration candidate, terminal result builder, and Agent Tail projection.
 Issue #18 supports programmatic composition through `OpenCodeReadOnlyProgram`, which requires an authoritative journal, retained `AgentTailJsonlFileSink`, trusted `ModelBroker`, parsed `ModelSheet`, and parsed `SecuritySheet`.
 The program resolves the task-assigned capability from that sheet and constructs `DockerOpenCodeReadOnlyCapsule`; callers do not select a model in each run request.
 `ModelCapability.id` remains the local assignment and policy identity, while `ModelCapability.model` is the approved provider transport identity sent to `ModelBroker` and required in its receipt.
@@ -235,6 +235,55 @@ Before creating the deterministic sanitized view or any Docker resource, the pro
 After an interrupted attempt, `program.reconcile({ milestoneId, taskId, capsuleId? })` discovers labeled resources, removes and proves their absence, and journals cleanup before another attempt can start.
 The built-in `DisabledModelBroker` performs no provider transport and no provider credentials are invented or passed into the capsule.
 Policy files, journals, command results, and Agent Tail JSONL must never contain credentials.
+
+Run one fixed planner-to-implementer-to-reviewer milestone from a natural-language goal.
+
+```bash
+zentra milestone run \
+  --goal "Update the greeting implementation" \
+  --config /canonical/path/zentra.project.json \
+  --database /canonical/path/zentra.sqlite \
+  --model-sheet /canonical/path/MODELS.md \
+  --security-sheet /canonical/path/SECURITY-SHEET.md \
+  --provider /canonical/path/openrouter.json \
+  --opencode /canonical/path/opencode \
+  --opencode-home /canonical/path/opencode-home \
+  --agent-tail-jsonl /canonical/path/zentra.jsonl \
+  --file src/greeting.ts
+```
+
+Every path argument is explicit and canonical.
+The command does not resolve fixtures, source checkouts, package-development paths, alternate executables, provider URLs, or provider headers.
+The provider configuration is strict JSON:
+
+```json
+{
+  "provider": "openrouter",
+  "credentialEnv": "ZENTRA_OPENROUTER_KEY",
+  "timeoutMs": 30000
+}
+```
+
+Production model transport uses only `https://openrouter.ai/api/v1/chat/completions`, rejects redirects, sends the exact model selected by the model sheet, and permits only bounded text or `read`, `glob`, and `grep` tool calls.
+The configured environment credential name must be an uppercase environment identifier and cannot name ambient process-control variables such as `PATH`, `HOME`, or `NODE_OPTIONS`.
+The credential is resolved only by the host broker and is not written to the journal, trace, command output, model prompt, or OpenCode capsule.
+Planner and reviewer model turns use this host broker.
+The host OpenCode writer remains a separate boundary and may use auth already configured inside the exact canonical `--opencode-home` directory.
+The writer and probe receive that directory as their minimal `HOME`; they do not inherit ambient `HOME`, arbitrary parent secrets, or the raw broker credential.
+Cancellation proven before POST dispatch is `cancelled`.
+After POST dispatch begins, transport rejection, timeout, or cancellation is `uncertain` because remote completion and usage are unknown, and it is never retried automatically.
+Redirects, malformed or oversized received responses, model drift, invalid tool arguments, disallowed tools, and budget excess are `failed`.
+
+The fixed plan has exactly one planner, one implementer, and one independent reviewer selected from unambiguous approved model-sheet capabilities.
+Only the explicit `--file`, project validations, configured integration branch, security sheet, and model sheet grant authority.
+Goal wording cannot add files, tools, network destinations, credentials, commands, approval, integration targets, or release authority.
+The command always retains Agent Tail JSONL and streams the same JSONL on stdout while running.
+Its final compact replay-backed JSON is written to stderr and contains only the command, milestone and project identities, canonical terminal outcome, and trace path/outcome.
+Exit codes are `0` for `completed`, `1` for failed, nonterminal, or trace failure, `2` for `cancelled`, `3` for `denied`, and `4` for `timed_out`.
+The production CLI owns and closes both the trace sink and SQLite journal on every path.
+The package root does not export the CLI runtime, provider transport, broker implementation, credential-bearing Fetch seam, or capsule-construction seam.
+Packed tests invoke the actual installed binary and use an external test-only Node preload to intercept the fixed endpoint and capsule module; there is no product option for a provider URL, arbitrary headers, transport, or capsule.
+The real authenticated OpenRouter smoke test remains separately environment-gated under issue #35.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 

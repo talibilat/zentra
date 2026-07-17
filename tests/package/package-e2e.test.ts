@@ -74,6 +74,22 @@ function runNpm(args: readonly string[], cwd: string) {
   return run(nodeExecutable, [npmExecutable, ...args], cwd);
 }
 
+async function runNonzero(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+  try {
+    await run(executable, args, cwd, env);
+    throw new Error("expected command to fail");
+  } catch (error) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    if (typeof failure.code !== "number") throw error;
+    return { code: failure.code, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+}
+
 function packageSandbox(): string {
   const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-source-")));
   temporaryDirectories.push(sandbox);
@@ -231,6 +247,139 @@ describe("publishable CLI package", () => {
     expect(JSON.parse(programmatic.stdout)).toEqual({ status: "paused", reason: "missing_authority" });
     expect(existsSync(programmaticDatabase)).toBe(true);
     expect(readFileSync(programmaticTrace, "utf8")).toContain('"kind":"milestone.paused"');
+
+    const milestoneRoot = path.join(consumer, "installed-milestone");
+    mkdirSync(milestoneRoot);
+    const milestoneProject = await initializeProject(milestoneRoot);
+    const milestoneModels = path.join(milestoneRoot, "MODELS.md");
+    const milestoneProvider = path.join(milestoneRoot, "openrouter.json");
+    const milestoneTrace = path.join(milestoneRoot, "milestone.jsonl");
+    const milestoneOpenCode = path.join(milestoneRoot, "opencode");
+    const milestoneOpenCodeHome = path.join(milestoneRoot, "opencode-home");
+    const milestonePreload = path.join(milestoneRoot, "intercept-openrouter.mjs");
+    const milestoneWriterObservation = path.join(milestoneRoot, "writer-observation.json");
+    mkdirSync(milestoneOpenCodeHome);
+    writeFileSync(milestoneModels, `# Models
+
+## Models
+| id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| planner | opencode | fixture/planner | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| implementer | opencode | fixture/implementer | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
+| reviewer | opencode | fixture/reviewer | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
+`, "utf8");
+    writeFileSync(milestoneProvider, '{"provider":"openrouter","credentialEnv":"ZENTRA_TEST_OPENROUTER_KEY","timeoutMs":5000}\n', "utf8");
+    writeFileSync(milestoneOpenCode, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === "--version") { process.stdout.write("package-opencode 1\\n"); process.exit(0); }
+const packet = JSON.parse(args[10]);
+writeFileSync(${JSON.stringify(milestoneWriterObservation)}, JSON.stringify({ home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null, brief: packet.brief }));
+const target = path.join(args[9], packet.ownedPaths[0]);
+writeFileSync(target, readFileSync(target, "utf8").replace("hello", "hello from package"));
+process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+`, { mode: 0o755 });
+    writeFileSync(milestonePreload, [
+      'import { createHash } from "node:crypto";',
+      'import { registerHooks } from "node:module";',
+      'registerHooks({ load(url, context, nextLoad) {',
+      '  if (!url.endsWith("/dist/src/capsule/opencode-read-only-capsule.js")) return nextLoad(url, context);',
+      '  return { format: "module", shortCircuit: true, source: `export class DockerOpenCodeReadOnlyCapsule { async execute(request, broker, signal, observe) { observe?.({ type: "resources_prepared", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision } }); const receipt = await broker.execute({ modelId: request.transportModelId, prompt: request.rolePrompt, maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens, maxCostUsd: request.budget.maxCostUsd }, signal); observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } }); return { outcome: receipt.outcome === "completed" ? "completed" : "failed", openCode: { version: "1.18.1", executableSha256: "d".repeat(64) }, model: receipt.model, evidence: receipt.response?.type === "text" ? [{ kind: request.role === "reviewer" ? "review" : "plan", summary: receipt.response.text }] : [], cleanup: "completed", brokerTransport: receipt.outcome === "uncertain" ? "uncertain" : "completed" }; } } export function parseOpenCodeFinalAssistantText() { throw new Error("not used by external test capsule"); }` };',
+      '} });',
+      'const strings = (value) => typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];',
+      'globalThis.fetch = async (input, init) => {',
+      '  if (String(input) !== "https://openrouter.ai/api/v1/chat/completions") throw new Error("unexpected test transport destination");',
+      '  if (process.env.ZENTRA_TEST_PROVIDER_FAILURE === "1") return new Response(null, { status: 500 });',
+      '  const body = JSON.parse(String(init.body)); const prompt = body.messages[0].content;',
+      '  let content = "Use only the explicitly owned file.";',
+      '  const challengeText = strings(body.messages).find((value) => value.startsWith("{") && value.includes("\\\"requiredResponse\\\""));',
+      '  if (challengeText) { const challenge = JSON.parse(challengeText); content = JSON.stringify({ schemaVersion: 1, reviewerId: challenge.request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(JSON.stringify(challenge.request), "utf8").digest("hex"), diffSha256: challenge.request.diffSha256, validationSha256: challenge.request.validationSha256, decidedAt: "2026-07-17T12:00:00.000Z", reason: "The installed package exact diff is approved." }); }',
+      '  return Response.json({ model: body.model, choices: [{ message: { content, tool_calls: [] } }], usage: { prompt_tokens: 20, completion_tokens: 20, cost: 0.01 } });',
+      '};',
+    ].join("\n"), "utf8");
+    const installedMilestone = await run(binary, [
+      "milestone", "run", "--goal", "Update the package greeting",
+      "--config", milestoneProject.config,
+      "--database", milestoneProject.database,
+      "--model-sheet", milestoneModels,
+      "--security-sheet", milestoneProject.securitySheet,
+      "--provider", milestoneProvider,
+      "--opencode", realpathSync.native(milestoneOpenCode),
+      "--opencode-home", realpathSync.native(milestoneOpenCodeHome),
+      "--agent-tail-jsonl", milestoneTrace,
+      "--file", "greeting.txt",
+    ], consumer, {
+      ...subprocessEnvironment,
+      NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}`,
+      ZENTRA_TEST_OPENROUTER_KEY: "package-provider-secret",
+      ZENTRA_AMBIENT_SECRET: "must-not-reach-writer",
+    });
+    expect(installedMilestone.stdout).toContain('"kind":"milestone.created"');
+    expect(JSON.parse(installedMilestone.stderr)).toMatchObject({
+      command: "milestone.run",
+      projectId: "package-project",
+      lifecycle: "terminal",
+      outcome: "completed",
+      tracePath: milestoneTrace,
+      trace: { path: milestoneTrace, outcome: "emitted" },
+    });
+    expect(`${installedMilestone.stdout}${installedMilestone.stderr}`).not.toContain("package-provider-secret");
+    expect(`${installedMilestone.stdout}${installedMilestone.stderr}`).not.toContain(repositoryRoot);
+    expect(Buffer.concat([
+      readFileSync(milestoneProject.database),
+      readFileSync(milestoneTrace),
+    ]).toString("utf8")).not.toContain("package-provider-secret");
+    expect(JSON.parse(readFileSync(milestoneWriterObservation, "utf8"))).toEqual({
+      home: milestoneOpenCodeHome,
+      ambient: null,
+      brief: expect.stringContaining("Update the package greeting"),
+    });
+    expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], milestoneProject.repository)).stdout)
+      .toBe("hello from package\n");
+
+    const pauseModels = path.join(milestoneRoot, "PAUSE-MODELS.md");
+    const pauseDatabase = path.join(milestoneRoot, "pause.sqlite");
+    const pauseTrace = path.join(milestoneRoot, "pause.jsonl");
+    writeFileSync(pauseModels, readFileSync(milestoneModels, "utf8").replace(
+      "fixture/planner | planner | planning | low | 128000",
+      "fixture/planner | planner | planning | low | 100",
+    ), "utf8");
+    const baseMilestoneArgs = [
+      "--config", milestoneProject.config,
+      "--security-sheet", milestoneProject.securitySheet,
+      "--provider", milestoneProvider,
+      "--opencode", realpathSync.native(milestoneOpenCode),
+      "--opencode-home", realpathSync.native(milestoneOpenCodeHome),
+      "--file", "greeting.txt",
+    ];
+    const harnessEnvironment = {
+      ...subprocessEnvironment,
+      NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}`,
+      ZENTRA_TEST_OPENROUTER_KEY: "package-provider-secret",
+    };
+    const pausedRun = await runNonzero(binary, [
+      "milestone", "run", "--goal", "Pause at exact authority", ...baseMilestoneArgs,
+      "--database", pauseDatabase, "--model-sheet", pauseModels, "--agent-tail-jsonl", pauseTrace,
+    ], consumer, harnessEnvironment);
+    expect(pausedRun.code).toBe(1);
+    expect(JSON.parse(pausedRun.stderr)).toMatchObject({
+      command: "milestone.run", lifecycle: "paused", outcome: null, tracePath: pauseTrace,
+      attention: { reason: "plan_not_ready" },
+    });
+
+    const failureDatabase = path.join(milestoneRoot, "provider-failure.sqlite");
+    const failureTrace = path.join(milestoneRoot, "provider-failure.jsonl");
+    const failedRun = await runNonzero(binary, [
+      "milestone", "run", "--goal", "Record provider failure", ...baseMilestoneArgs,
+      "--database", failureDatabase, "--model-sheet", milestoneModels, "--agent-tail-jsonl", failureTrace,
+    ], consumer, { ...harnessEnvironment, ZENTRA_TEST_PROVIDER_FAILURE: "1" });
+    expect(failedRun.code).toBe(1);
+    expect(JSON.parse(failedRun.stderr)).toMatchObject({
+      command: "milestone.run", lifecycle: "terminal", outcome: "failed", tracePath: failureTrace,
+    });
+    expect(`${failedRun.stdout}${failedRun.stderr}${readFileSync(failureTrace, "utf8")}`)
+      .not.toContain("package-provider-secret");
 
     const fixtureTemp = path.join(consumer, "fixture-temp");
     mkdirSync(fixtureTemp, { mode: 0o700 });
