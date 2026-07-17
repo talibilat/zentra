@@ -624,9 +624,10 @@ class ControlledRegistry {
       milestoneId: this.plan.milestoneId, projectId: this.plan.projectId, title: "Batch", lifecycle: "running",
       terminalOutcome: null, streamVersion: 1, plan: this.plan, stopAndAsk: null, attention: null,
       replanningAttention: null, tasks: this.statuses, historicalTasks: {}, authorityEnvelope: null, revisions: [],
-      planHistory: [this.plan], executedTaskIds: [], hasActiveEffects: false, hasUncertainEffects: false,
+      planHistory: [this.plan], executedTaskIds: [], hasActiveEffects: false, hasUncertainEffects: false, hasTraceFailure: false,
       replanningAttentionHistory: [], replanningResolutions: [], replanningPolicy: null, replanningPauseOccurrence: null,
       writerOwnership: {}, maxConcurrentWriters: null, traceId: "trace-batch", tracePath: null,
+      result: null,
     };
   }
 

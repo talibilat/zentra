@@ -401,7 +401,7 @@ describe("bounded milestone replanning", () => {
     append(journal, "milestone.task_ready", { taskId: "task-revised", admissionDigest: "b".repeat(64) });
     append(journal, "milestone.task_running", { taskId: "task-revised" });
     append(journal, "milestone.task_completed", { taskId: "task-revised", outcome: "completed" });
-    append(journal, "milestone.completed", {});
+    registry.completeFromEvidence("milestone-replan");
 
     expect(registry.inspect("milestone-replan")).toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed" });
     journal.close();

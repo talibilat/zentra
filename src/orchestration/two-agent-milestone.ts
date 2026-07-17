@@ -123,8 +123,9 @@ export class TwoAgentMilestoneCoordinator {
     if (!reviewerStarted) {
       const current = this.milestones.inspect(request.milestoneId)!;
       if (current.lifecycle === "paused" || writerCompleted) return current;
+      if (outcome === "completed") throw new Error("completed writer result lacks its review handoff");
       this.milestones.completeTask(request.milestoneId, writer.taskId, outcome, { taskStreamId: result.taskId });
-      return this.milestones.finish(request.milestoneId, outcome, { taskStreamId: result.taskId });
+      return this.milestones.finishFromEvidence(request.milestoneId, outcome);
     }
     this.milestones.completeTask(request.milestoneId, reviewer.taskId, outcome, {
       taskStreamId: result.taskId,
@@ -132,7 +133,7 @@ export class TwoAgentMilestoneCoordinator {
     });
     return outcome === "completed"
       ? this.milestones.completeIntegrated(request.milestoneId, result.taskId)
-      : this.milestones.finish(request.milestoneId, outcome, { taskStreamId: result.taskId });
+      : this.milestones.finishFromEvidence(request.milestoneId, outcome);
   }
 }
 

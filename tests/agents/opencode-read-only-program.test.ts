@@ -9,6 +9,7 @@ import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-onl
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
+import { MultiAgentMilestoneCoordinator } from "../../src/orchestration/multi-agent-milestone.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 
 const security: SecuritySheet = {
@@ -184,7 +185,8 @@ describe("OpenCodeReadOnlyProgram", () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-program-")));
     mkdirSync(path.join(root, "src"));
     writeFileSync(path.join(root, "src/context.ts"), "context\n");
-    const journal = new SqliteEventJournal(":memory:");
+    const databasePath = path.join(root, "program.sqlite");
+    const journal = new SqliteEventJournal(databasePath);
     const registry = new MilestoneRegistry(journal);
     registry.register({
       milestoneId: "milestone-program", projectId: "zentra", title: "Program", correlationId: "trace-program",
@@ -236,11 +238,12 @@ describe("OpenCodeReadOnlyProgram", () => {
       models: [{ id: "approved-planner", harness: "opencode", model: "fixture/transport-model", roles: ["planner"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }],
     }, { ...security, allowedRepositories: [root] }, capsule);
 
-    const result = await program.run({
+    const runRequest = {
       milestoneId: "milestone-program", taskId: "task-program", repositoryPath: root,
-      role: "planner", rolePrompt: "Plan.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      role: "planner" as const, rolePrompt: "Plan.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       timeoutMs: 1_000, signal: new AbortController().signal,
-    });
+    };
+    const result = await program.run(runRequest);
 
     expect(result).toMatchObject({ outcome: "completed", trace: { outcome: trace }, operationOutcome });
     expect(journal.readStream("milestone-program").at(-1)).toMatchObject({
@@ -253,6 +256,37 @@ describe("OpenCodeReadOnlyProgram", () => {
       capabilityId: "approved-planner", transportModelId: "fixture/transport-model",
       model: { id: "fixture/transport-model" },
     });
+    if (sinkClosed) {
+      expect(() => registry.completeFromEvidence("milestone-program")).toThrow("trace projection failed");
+      let redispatches = 0;
+      const coordinator = new MultiAgentMilestoneCoordinator(
+        registry,
+        { run: async () => { redispatches += 1; throw new Error("must not redispatch"); } } as never,
+        { run: async () => { throw new Error("writers must remain blocked"); } } as never,
+      );
+      const request = {
+        milestoneId: "milestone-program",
+        readOnlyTasks: [{ taskId: "task-program", request: runRequest }],
+        writerSchedule: {} as never,
+      };
+      const terminal = await coordinator.run(request);
+      expect(terminal).toMatchObject({
+        lifecycle: "terminal", terminalOutcome: "failed",
+        result: { trace: { outcome: "failed" } },
+      });
+      expect(terminal.result?.decisions.map((decision) => decision.kind)).toContain("milestone.agent_trace_failed");
+      expect(await coordinator.run(request)).toEqual(terminal);
+      expect(redispatches).toBe(0);
+      const reopened = SqliteEventJournal.openReadOnly(databasePath);
+      const restarted = new MultiAgentMilestoneCoordinator(
+        new MilestoneRegistry(reopened),
+        { run: async () => { redispatches += 1; throw new Error("must not redispatch after reopen"); } } as never,
+        { run: async () => { throw new Error("writers must remain blocked after reopen"); } } as never,
+      );
+      expect(await restarted.run(request)).toEqual(terminal);
+      expect(redispatches).toBe(0);
+      reopened.close();
+    }
     if (!sinkClosed) sink.close();
     journal.close();
     rmSync(root, { recursive: true, force: true });

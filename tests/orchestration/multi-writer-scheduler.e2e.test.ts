@@ -6,6 +6,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { OpenCodeReadOnlyProgramResult } from "../../src/agents/opencode-read-only-program.js";
+import { OpenCodeReadOnlyProgram } from "../../src/agents/opencode-read-only-program.js";
+import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import {
   ValidationRunner,
   type ValidationReport,
@@ -16,8 +18,12 @@ import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
+import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
+import { runCli } from "../../src/cli/main.js";
 import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-writer-scheduler.js";
+import { MultiAgentMilestoneCoordinator } from "../../src/orchestration/multi-agent-milestone.js";
 import { OpenCodeIntegratedSingleFileTracer } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
 import { WriterWorktreeCapsule } from "../../src/orchestration/writer-worktree-capsule.js";
 import type { ModelCapability, ModelSheet } from "../../src/policy/model-sheet.js";
@@ -44,13 +50,19 @@ afterEach(() => {
 describe("MultiWriterOwnershipScheduler real-Git production path", () => {
   it("overlaps independent writers and serializes their validated reviewed integrations", async () => {
     const fixture = await fixtureProject();
-    const journal = new SqliteEventJournal(path.join(fixture.root, "scheduler.sqlite"));
+    const databasePath = path.join(fixture.root, "scheduler.sqlite");
+    const tracePath = path.join(fixture.root, "scheduler.jsonl");
+    let sqlite: SqliteEventJournal | null = new SqliteEventJournal(databasePath);
+    const sink = AgentTailJsonlFileSink.open(fixture.root, tracePath);
+    const journal = new ProjectingEventJournal(sqlite, sink);
     try {
       const supervisor = new ProcessSupervisor();
       const writerModel = model("writer-model", "implementer", 2);
       const reviewerA = model("reviewer-a", "reviewer", 1);
       const reviewerB = model("reviewer-b", "reviewer", 1);
-      const modelSheet: ModelSheet = { models: [writerModel, reviewerA, reviewerB] };
+      const planner = model("planner", "planner", 1);
+      const researcher = model("researcher", "researcher", 1);
+      const modelSheet: ModelSheet = { models: [planner, researcher, writerModel, reviewerA, reviewerB] };
       const security = securitySheet(fixture.repository);
       const executable = fakeConcurrentOpenCode(fixture.root);
       const probe = await new OpenCodeProbe(supervisor).probe({
@@ -70,6 +82,7 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
         projectId: plan.projectId,
         title: "Parallel real Git writers",
         correlationId: "trace-real-multi-writer",
+        tracePath,
         plan,
         authority: { security, modelSheet },
       });
@@ -104,7 +117,7 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
         },
       };
 
-      const result = await new MultiWriterOwnershipScheduler(registry, execution).run({
+      const writerSchedule = {
         milestoneId: plan.milestoneId,
         maxConcurrentWriters: 2,
         security,
@@ -130,10 +143,47 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
             },
           };
         }),
+      };
+      const readOnly = new OpenCodeReadOnlyProgram(
+        journal,
+        sink,
+        { execute: async () => { throw new Error("fixture capsule owns the bounded response"); } },
+        modelSheet,
+        security,
+        readOnlyCapsule(),
+      );
+      const scheduled = await new MultiAgentMilestoneCoordinator(
+        registry,
+        readOnly,
+        new MultiWriterOwnershipScheduler(registry, execution),
+      ).run({
+        milestoneId: plan.milestoneId,
+        readOnlyTasks: ["research", "plan"].map((taskId) => {
+          const planned = plan.tasks.find((task) => task.taskId === taskId)!;
+          return {
+            taskId,
+            request: {
+              milestoneId: plan.milestoneId,
+              taskId,
+              repositoryPath: fixture.repository,
+              role: planned.roleAssignment.role as "planner" | "researcher",
+              rolePrompt: `Produce bounded ${planned.roleAssignment.role} evidence.`,
+              budget: {
+                maxSeconds: planned.budget.maxSeconds,
+                maxCostUsd: planned.budget.maxCostUsd,
+                maxInputTokens: planned.budget.maxInputTokens,
+                maxOutputTokens: planned.budget.maxOutputTokens,
+              },
+              timeoutMs: 15_000,
+              signal: AbortSignal.timeout(30_000),
+            },
+          };
+        }),
+        writerSchedule,
       });
 
-      expect(result.terminalOutcome).toBeNull();
-      expect(result.writerOwnership).toMatchObject({
+      expect(scheduled.terminalOutcome).toBe("completed");
+      expect(scheduled.writerOwnership).toMatchObject({
         "writer-a": { status: "integrated", reviewerTaskId: "review-a" },
         "writer-b": { status: "integrated", reviewerTaskId: "review-b" },
       });
@@ -155,8 +205,51 @@ describe("MultiWriterOwnershipScheduler real-Git production path", () => {
           "task.completed",
         ]));
       }
+      const result = scheduled;
+      expect(result).toMatchObject({
+        lifecycle: "terminal",
+        terminalOutcome: "completed",
+        result: {
+          outcome: "completed",
+          integratedCommits: [{ taskId: "writer-a" }, { taskId: "writer-b" }],
+          reviews: [{ taskId: "writer-a", reviewerId: "reviewer-a" }, { taskId: "writer-b", reviewerId: "reviewer-b" }],
+        },
+      });
+      expect(result.result?.validations.map(({ taskId, name, outcome }) => ({ taskId, name, outcome }))).toEqual([
+        { taskId: "writer-a", name: "focused", outcome: "completed" },
+        { taskId: "writer-a", name: "full", outcome: "completed" },
+        { taskId: "writer-b", name: "focused", outcome: "completed" },
+        { taskId: "writer-b", name: "full", outcome: "completed" },
+      ]);
+      expect(registry.completeFromEvidence(plan.milestoneId)).toEqual(result);
+
+      sink.close();
+      sqlite.close();
+      sqlite = null;
+      const reopened = SqliteEventJournal.openReadOnly(databasePath);
+      try {
+        expect(new MilestoneRegistry(reopened).inspect(plan.milestoneId)).toEqual(result);
+      } finally {
+        reopened.close();
+      }
+      const output: string[] = [];
+      const errors: string[] = [];
+      expect(await runCli(["milestone", "status", "--database", databasePath, "--milestone-id", plan.milestoneId], {
+        stdout: (value) => output.push(value), stderr: (value) => errors.push(value),
+        signalSource: { on: () => undefined, off: () => undefined },
+      })).toBe(0);
+      expect(errors).toEqual([]);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        command: "milestone.status",
+        milestone: { terminalOutcome: "completed", result: { outcome: "completed" } },
+      });
+      const tail = readFileSync(tracePath, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+      expect(tail.map((event) => event.sequence)).toEqual([...tail].map((event) => event.sequence).sort((a, b) => a - b));
+      expect(tail.at(-1)).toMatchObject({ kind: "milestone.completed", operation: { status: "completed" } });
+      expect([...new Set(tail.map((event) => event.actor.role))]).toEqual(expect.arrayContaining(["scheduler", "integrator", "reviewer"]));
     } finally {
-      journal.close();
+      sink.close();
+      sqlite?.close();
     }
   }, 60_000);
 });
@@ -224,6 +317,51 @@ class ApprovingProgram implements OpenCodeReviewerProgram {
       },
     });
   }
+}
+
+function readOnlyCapsule(): OpenCodeReadOnlyCapsule {
+  return {
+    execute: async (request, _broker, _signal, observe) => {
+      observe?.({
+        type: "resources_prepared",
+        payload: {
+          capsuleId: request.capsuleId,
+          resourceLabel: request.resources.resourceLabel,
+          containerName: request.resources.containerName,
+          containerId: "d".repeat(64),
+          imageName: request.resources.imageName,
+          imageId: `sha256:${"e".repeat(64)}`,
+          repositoryViewPath: request.repositoryPath,
+          repositoryRevision: request.securityBoundary.repositoryRevision,
+        },
+      });
+      observe?.({
+        type: "cleanup_observed",
+        payload: {
+          capsuleId: request.capsuleId,
+          resourceLabel: request.resources.resourceLabel,
+          containerName: request.resources.containerName,
+          containerId: "d".repeat(64),
+          imageName: request.resources.imageName,
+          imageId: `sha256:${"e".repeat(64)}`,
+          repositoryViewPath: request.repositoryPath,
+          repositoryRevision: request.securityBoundary.repositoryRevision,
+          outcome: "completed",
+          containerAbsent: true,
+          imageAbsent: true,
+          repositoryViewAbsent: false,
+        },
+      });
+      return {
+        outcome: "completed",
+        openCode: { version: "1.18.1", executableSha256: "f".repeat(64) },
+        model: { id: request.transportModelId, provider: "fixture", name: request.actorId },
+        evidence: [{ kind: request.role === "planner" ? "plan" : "research", summary: `${request.role} evidence.` }],
+        cleanup: "completed",
+        brokerTransport: "completed",
+      };
+    },
+  };
 }
 
 function reviewerAdapter(reviewerId: string, taskId: string, repositoryPath: string): OpenCodeReviewerAdapter {
@@ -312,7 +450,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 }
 
 function milestonePlan(): MilestonePlan {
-  const task = (taskId: string, role: "implementer" | "reviewer", agentId: string, dependencies: string[], ownedPath: string): PlannedTask => ({
+  const task = (taskId: string, role: "planner" | "researcher" | "implementer" | "reviewer", agentId: string, dependencies: string[], ownedPath: string): PlannedTask => ({
     taskId,
     title: taskId,
     description: `Complete ${taskId}.`,
@@ -321,7 +459,7 @@ function milestonePlan(): MilestonePlan {
     forbiddenPaths: [".env", ".git/**"],
     acceptanceCriteria: ["The exact change is validated and independently reviewed."],
     roleAssignment: { role, agentId, harness: "opencode" },
-    risk: { level: "low", authority: role === "implementer" ? "workspace_write" : "review", requiresReview: role === "implementer", requiresApproval: false },
+    risk: { level: "low", authority: role === "implementer" ? "workspace_write" : role === "reviewer" ? "review" : "read_only", requiresReview: role === "implementer", requiresApproval: false },
     budget: { maxSeconds: 15, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 1_000 },
   });
   return {
@@ -329,25 +467,29 @@ function milestonePlan(): MilestonePlan {
     projectId: "fixture",
     goal: "Integrate two independent reviewed files.",
     tasks: [
-      task("writer-a", "implementer", "writer-model", [], "src/a.mjs"),
+      task("plan", "planner", "planner", [], "src/**"),
+      task("research", "researcher", "researcher", ["plan"], "src/**"),
+      task("writer-a", "implementer", "writer-model", ["research"], "src/a.mjs"),
       task("review-a", "reviewer", "reviewer-a", ["writer-a"], "src/a.mjs"),
-      task("writer-b", "implementer", "writer-model", [], "src/b.mjs"),
+      task("writer-b", "implementer", "writer-model", ["research"], "src/b.mjs"),
       task("review-b", "reviewer", "reviewer-b", ["writer-b"], "src/b.mjs"),
     ],
   };
 }
 
-function model(id: string, role: "implementer" | "reviewer", maxConcurrency: number): ModelCapability {
+function model(id: string, role: "planner" | "researcher" | "implementer" | "reviewer", maxConcurrency: number): ModelCapability {
   return {
     id,
     harness: "opencode",
     model: role === "implementer" ? "provider/model" : `fixture/${id}`,
     roles: [role],
-    specialties: [role === "implementer" ? "coding" : "review"],
+    specialties: [role === "implementer" ? "coding" : role],
     costTier: "low",
     contextTokens: 128_000,
     maxConcurrency,
-    toolPermissions: role === "implementer" ? ["read_repository", "write_worktree"] : ["read_repository", "review_diff"],
+    toolPermissions: role === "implementer"
+      ? ["read_repository", "write_worktree"]
+      : role === "reviewer" ? ["read_repository", "review_diff"] : ["read_repository"],
     network: "denied",
     fallbackOrder: [],
     qualityHistory: { successes: 1, attempts: 1 },
