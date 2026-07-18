@@ -78,6 +78,13 @@ const ReviewRequestedPayloadSchema = z.strictObject({
   reviewerId: z.string().min(1),
   validation: ValidationReportSchema,
 });
+const ReviewDispatchIntentPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  reviewerId: z.string().min(1),
+  diffSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  validationSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  dispatchId: z.string().uuid(),
+});
 const ReviewApprovedPayloadSchema = z.strictObject({
   review: ReviewDecisionSchema,
 });
@@ -184,6 +191,7 @@ interface RecoveryChain {
   readonly started: z.infer<typeof StartedPayloadSchema> | null;
   readonly validationStarted: z.infer<typeof ValidationStartedPayloadSchema> | null;
   readonly reviewRequested: z.infer<typeof ReviewRequestedPayloadSchema> | null;
+  readonly reviewDispatchIntent: z.infer<typeof ReviewDispatchIntentPayloadSchema> | null;
   readonly reviewApproved: z.infer<typeof ReviewApprovedPayloadSchema> | null;
   readonly integrationStarted: z.infer<typeof IntegrationStartedPayloadSchema> | null;
   readonly integrationPrepared: z.infer<typeof IntegrationPreparedPayloadSchema> | null;
@@ -617,6 +625,14 @@ export class RecoveryService {
           return decision(taskId, "record_failure", "durable focused validation evidence is invalid");
         }
         return decision(taskId, "resume_preparation", "focused validation is durable and review has not been recorded");
+      }
+
+      if (last.type === "task.review_dispatch_intent") {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          "reviewer dispatch intent is durable but no exact reviewer result was retained; inspect reviewer resources and explicitly reconcile before any retry",
+        );
       }
 
       if (last.type === "task.review_approved") {
@@ -1424,6 +1440,11 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     events,
     "task.review_requested",
   );
+  const reviewDispatchIntent = parseOptionalEvent(
+    ReviewDispatchIntentPayloadSchema,
+    events,
+    "task.review_dispatch_intent",
+  );
   const reviewApproved = parseOptionalEvent(
     ReviewApprovedPayloadSchema,
     events,
@@ -1489,6 +1510,13 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
       throw new Error("reviewer identity must differ from worker identity");
     }
   }
+  if (reviewDispatchIntent !== null && (
+    reviewRequested === null || reviewDispatchIntent.reviewerId !== reviewRequested.reviewerId ||
+    reviewDispatchIntent.validationSha256 !== canonicalValidationDigest(reviewRequested.validation) ||
+    reviewDispatchIntent.diffSha256 !== validationStarted?.diffSha256 ||
+    events.findIndex((event) => event.type === "task.review_dispatch_intent") <
+      events.findIndex((event) => event.type === "task.review_requested")
+  )) throw new Error("review dispatch intent contradicts the exact validated handoff");
   if (
     reviewApproved !== null &&
     (reviewRequested === null || reviewApproved.review.reviewerId !== reviewRequested.reviewerId)
@@ -1635,6 +1663,7 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
     started,
     validationStarted,
     reviewRequested,
+    reviewDispatchIntent,
     reviewApproved,
     integrationStarted,
     integrationPrepared,

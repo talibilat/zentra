@@ -229,7 +229,12 @@ export const ReplanningAttentionSchema = z.strictObject({
   }
 });
 
-export const ReplanningPausedPayloadSchema = z.strictObject({ attention: ReplanningAttentionSchema });
+export const ReplanningPausedPayloadSchema = z.strictObject({
+  attention: ReplanningAttentionSchema,
+  evidence: z.record(z.string().min(1).max(128), z.string().max(4_096))
+    .refine((value) => Object.keys(value).length <= 32)
+    .default({}),
+});
 
 export type MilestoneAuthorityEnvelope = z.infer<typeof MilestoneAuthorityEnvelopeSchema>;
 export type PlanRevisionPayload = z.infer<typeof PlanRevisionPayloadSchema>;

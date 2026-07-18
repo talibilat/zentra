@@ -131,6 +131,20 @@ describe("WorktreeManager", () => {
     expect(head.trim()).toBe(integrationHead.trim());
   });
 
+  it.each(["missing", "replaced"] as const)("rejects a %s retained worktree identity", async (state) => {
+    await manager.ensureIntegrationBranch(project);
+    let intent: WorkspaceCreationIntent | undefined;
+    const lease = await manager.create(project, `retained-${state}`, {}, (prepared) => { intent = prepared; });
+    if (state === "missing") {
+      await gitOk(repoPath, ["worktree", "remove", "--force", lease.path]);
+    } else {
+      rmSync(lease.path, { recursive: true, force: true });
+      mkdirSync(lease.path, { recursive: true });
+      await gitOk(lease.path, ["init", "-b", "replacement"]);
+    }
+    await expect(manager.verifyRetained(project, intent!)).rejects.toBeInstanceOf(WorkspaceCreationUncertainError);
+  });
+
   it("rejects an existing dirty worktree path", async () => {
     await manager.ensureIntegrationBranch(project);
     const lease = await manager.create(project, "task-002");

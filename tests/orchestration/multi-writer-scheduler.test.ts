@@ -14,6 +14,7 @@ import { ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE, artifactEvidenceSha256 } from "../
 import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-writer-scheduler.js";
+import { ValidatedHandoffReconciliationError } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
 import { WriterResourceGovernor } from "../../src/orchestration/writer-resource-governor.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
@@ -75,6 +76,55 @@ describe("MultiWriterOwnershipScheduler", () => {
 
     expect(registry.batches).toEqual(expected);
   });
+
+  it.each(["worktree_missing", "worktree_modified_or_evidence_mismatch", "worktree_replaced_or_unregistered"] as const)(
+    "pauses idempotently for stale validated handoff evidence: %s",
+    async (observedMismatch) => {
+      const plan = planWithPaths("src/a.ts", "src/b.ts");
+      const base = singleWriterSchedule(plan);
+      const request = { ...base, tasks: [{ ...base.tasks[0]!, reviewerLifecycle: "execution" as const }] };
+      const root = mkdtempSync(path.join(tmpdir(), "zentra-stale-handoff-restart-"));
+      const database = path.join(root, "journal.sqlite");
+      let journal = new SqliteEventJournal(database);
+      let resumptions = 0;
+      try {
+        let registry = registeredSchedulerRegistry(journal, plan, request);
+        await new MultiWriterOwnershipScheduler(registry, {
+          run: async (execution) => {
+            appendValidatedHandoffStream(journal, "writer-a", "reviewer-a", false);
+            await execution.onReviewReady({ taskStreamId: "writer-a", diffSha256: "a".repeat(64), validation: {} as never });
+            throw new Error("crash before reviewer dispatch");
+          },
+        }).run(request);
+        journal.close();
+        journal = new SqliteEventJournal(database);
+        registry = new MilestoneRegistry(journal);
+        const execution = {
+          run: async () => { throw new Error("writer must not rerun"); },
+          resumeValidatedHandoff: async () => {
+            resumptions += 1;
+            throw new ValidatedHandoffReconciliationError({
+              writerTaskId: "writer-a", expectedWorkspace: "/tmp/writer-a", expectedBranch: "ticket/writer-a",
+              expectedBaseCommit: "a".repeat(40), expectedChangedPath: "src/writer-a.ts",
+              expectedDiffSha256: "b".repeat(64), expectedValidationSha256: "c".repeat(64), observedMismatch,
+            });
+          },
+        };
+        const scheduler = new MultiWriterOwnershipScheduler(registry, execution);
+        const paused = await scheduler.run(request);
+        const version = paused.streamVersion;
+        expect(paused).toMatchObject({ lifecycle: "paused", replanningAttention: { reason: "evidence" } });
+        const pause = journal.readStream(plan.milestoneId).findLast((event) => event.type === "milestone.paused");
+        expect(pause?.payload).toMatchObject({ evidence: { observedMismatch, expectedDiffSha256: "b".repeat(64) } });
+        expect(await scheduler.run(request)).toEqual(paused);
+        expect(registry.inspect(plan.milestoneId)?.streamVersion).toBe(version);
+        expect(resumptions).toBe(1);
+      } finally {
+        journal.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("waits for a completed dependency before selecting the next writer", async () => {
     const baseline = planWithPaths("src/a.ts", "src/b.ts");
@@ -138,19 +188,85 @@ describe("MultiWriterOwnershipScheduler", () => {
     }
   });
 
-  it("does not retry a claimed writer whose milestone start is already durable", async () => {
+  it("does not retry a claimed writer whose milestone start is already durable after SQLite reopen", async () => {
     const plan = planWithPaths("src/a.ts", "src/b.ts");
     const request = singleWriterSchedule(plan);
-    const { journal, registry } = claimedRegistry(plan, request, true);
+    const root = mkdtempSync(path.join(tmpdir(), "zentra-writer-running-restart-"));
+    const database = path.join(root, "journal.sqlite");
+    const prepared = claimedRegistry(plan, request, true, database);
+    prepared.journal.close();
+    const journal = new SqliteEventJournal(database);
+    const registry = new MilestoneRegistry(journal);
     try {
       const result = await new MultiWriterOwnershipScheduler(registry, {
         run: async () => { throw new Error("worker effect must not retry"); },
       }).run(request);
 
-      expect(result.tasks["writer-a"]?.status).toBe("running");
-      expect(registry.inspectWriterTask(plan.milestoneId, "writer-a")).toBeNull();
+      expect(result).toMatchObject({ lifecycle: "paused", replanningAttention: { reason: "uncertain_effect" } });
+      expect(registry.inspectWriterTask(plan.milestoneId, "writer-a")).toMatchObject({
+        paused: true, uncertainEffect: { boundary: "worker", retryPolicy: "never_automatic" },
+      });
     } finally {
       journal.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["task handoff before milestone callback", false, false, "planned"],
+    ["handoff", true, false, "ready"],
+    ["reviewer running", true, true, "running"],
+  ] as const)("does not redispatch after durable %s state", async (_stage, completeHandoff, startReviewer, expectedStatus) => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const base = singleWriterSchedule(plan);
+    const request = { ...base, tasks: [{ ...base.tasks[0]!, reviewerLifecycle: "execution" as const }] };
+    const root = mkdtempSync(path.join(tmpdir(), "zentra-reviewer-running-restart-"));
+    const database = path.join(root, "journal.sqlite");
+    let executions = 0;
+    let resumptions = 0;
+    let journal = new SqliteEventJournal(database);
+    try {
+      let registry = registeredSchedulerRegistry(journal, plan, request);
+      const first = await new MultiWriterOwnershipScheduler(registry, {
+        run: async (execution) => {
+          executions += 1;
+          appendValidatedHandoffStream(journal, "writer-a", "reviewer-a", startReviewer);
+          if (completeHandoff) {
+            await execution.onReviewReady({ taskStreamId: execution.task.taskId, diffSha256: "a".repeat(64), validation: {} as never });
+          }
+          if (startReviewer) registry.startTask(plan.milestoneId, "review-a", "reviewer-a", "reviewer");
+          throw new Error("crash after durable handoff");
+        },
+      }).run(request);
+      expect(first.tasks["writer-a"]?.terminalOutcome).toBe(completeHandoff ? "completed" : null);
+      expect(first.tasks["review-a"]?.status).toBe(expectedStatus);
+      journal.close();
+      journal = new SqliteEventJournal(database);
+      registry = new MilestoneRegistry(journal);
+      const restarted = await new MultiWriterOwnershipScheduler(registry, {
+        run: async () => { executions += 1; throw new Error("must not redispatch"); },
+        resumeValidatedHandoff: async () => {
+          resumptions += 1;
+          registry.startTask(plan.milestoneId, "review-a", "reviewer-a", "reviewer");
+          const version = journal.readStream("writer-a").at(-1)!.streamVersion;
+          journal.append("writer-a", version, [{ streamId: "writer-a", type: "task.failed",
+            payload: { stage: "review", reason: "resumed reviewer failed" }, causationId: null, correlationId: "trace-batch" }]);
+          return failedTask("writer-a");
+        },
+      }).run(request);
+      if (startReviewer) {
+        expect(restarted).toMatchObject({ lifecycle: "paused", replanningAttention: { reason: "uncertain_effect" } });
+        expect(registry.inspectWriterTask(plan.milestoneId, "writer-a")).toMatchObject({
+          paused: true, uncertainEffect: { boundary: "review", retryPolicy: "never_automatic" },
+        });
+      } else {
+        expect(restarted.writerOwnership["writer-a"]?.status).toBe("released");
+      }
+      expect(executions).toBe(1);
+      expect(resumptions).toBe(startReviewer ? 0 : 1);
+    } finally {
+      journal.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -477,11 +593,16 @@ describe("MultiWriterOwnershipScheduler", () => {
     }
   });
 
-  it("reconciles a completed task stream by recording only missing milestone evidence", async () => {
+  it("reconciles integration completed before milestone evidence after SQLite reopen without redispatch", async () => {
     const plan = planWithPaths("src/a.ts", "src/b.ts");
     const request = singleWriterSchedule(plan);
-    const { journal, registry } = claimedRegistry(plan, request, true);
-    appendCompletedWriterStream(journal, "writer-a", "reviewer-a");
+    const root = mkdtempSync(path.join(tmpdir(), "zentra-integration-evidence-restart-"));
+    const database = path.join(root, "journal.sqlite");
+    const prepared = claimedRegistry(plan, request, true, database);
+    appendCompletedWriterStream(prepared.journal, "writer-a", "reviewer-a");
+    prepared.journal.close();
+    const journal = new SqliteEventJournal(database);
+    const registry = new MilestoneRegistry(journal);
     let executions = 0;
     try {
       const result = await new MultiWriterOwnershipScheduler(registry, {
@@ -497,6 +618,7 @@ describe("MultiWriterOwnershipScheduler", () => {
       expect(result.terminalOutcome).toBeNull();
     } finally {
       journal.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -985,6 +1107,25 @@ function preparePostWorkerPause(
 }
 
 function appendCompletedWriterStream(journal: SqliteEventJournal, taskId: string, reviewerId: string): void {
+  appendWriterEvidenceStream(journal, taskId, reviewerId, true, false);
+}
+
+function appendValidatedHandoffStream(
+  journal: SqliteEventJournal,
+  taskId: string,
+  reviewerId: string,
+  includeDispatch: boolean,
+): void {
+  appendWriterEvidenceStream(journal, taskId, reviewerId, false, includeDispatch);
+}
+
+function appendWriterEvidenceStream(
+  journal: SqliteEventJournal,
+  taskId: string,
+  reviewerId: string,
+  completed: boolean,
+  includeDispatch: boolean,
+): void {
   const resultCommit = "c".repeat(40);
   const diff = `diff --git a/src/${taskId}.ts b/src/${taskId}.ts\n+updated\n`;
   const diffSha256 = createHash("sha256").update(diff).digest("hex");
@@ -1022,18 +1163,24 @@ function appendCompletedWriterStream(journal: SqliteEventJournal, taskId: string
     ] as const;
   };
   const events: Array<readonly [string, unknown]> = [
-    ["task.created", { projectId: "fixture", title: taskId }], ["task.leased", { leaseOwner: "shared-model" }],
+    ["task.created", { projectId: "fixture", title: taskId }], ["task.leased", { leaseOwner: "shared-model", workspace: `/tmp/${taskId}` }],
     ["task.started", {}], ["task.writer_completed", { outcome: "completed" }],
     ...artifact("patch", patchEvidence),
-    ["task.validation_started", { patch: { path: patchEvidence.changedPath, sha256: patchEvidence.changedContentSha256 }, diffSha256 }],
+    ["task.validation_started", { patch: { type: "artifact.ready", path: patchEvidence.changedPath, sha256: patchEvidence.changedContentSha256 }, diffSha256 }],
     ...artifact("validation_report", validation),
     ["task.validation_completed", { outcome: "completed", validation, diffSha256 }],
     ["task.review_requested", { reviewerId, validation }],
+    ...(includeDispatch ? [["task.review_dispatch_intent", {
+      schemaVersion: 1, reviewerId, diffSha256, validationSha256: canonicalValidationDigest(validation),
+      dispatchId: "00000000-0000-4000-8000-000000000001",
+    }] as const] : []),
+    ...(completed ? [
     ...artifact("review_report", review),
     ["task.review_approved", { review }], ["task.integration_started", { sourceCommit: receipt.sourceCommit, review }],
     ...artifact("integration_receipt", receipt, "prepared"), ["task.integration_prepared", { receipt }],
     ["task.integration_observed", { receipt, verification: "verified" }], ["task.cleanup_started", cleanup],
     ["task.cleanup_completed", cleanup], ["task.completed", { receipt }],
+    ] as Array<readonly [string, unknown]> : []),
   ];
   journal.append(taskId, 0, events.map(([type, payload]) => ({
     streamId: taskId, type, payload, causationId: null, correlationId: "trace-batch",

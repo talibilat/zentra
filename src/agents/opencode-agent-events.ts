@@ -97,6 +97,7 @@ export const OpenCodeMilestoneCompletedPayloadSchema = z.strictObject({
 export const OpenCodeTraceObservedPayloadSchema = z.strictObject({
   taskId: IdSchema,
   outcome: z.enum(["emitted", "failed"]),
+  deferredCompletion: z.boolean().default(false),
 });
 
 export const OpenCodeResourceIntentPayloadSchema = z.strictObject({
@@ -138,7 +139,8 @@ export const OpenCodeCleanupObservedPayloadSchema = z.strictObject({
 
 export function parseOpenCodeMilestonePayload(type: string, payload: unknown): unknown {
   const schema = type === "milestone.task_running" ? OpenCodeMilestoneRunningPayloadSchema :
-    type === "milestone.task_completed" ? OpenCodeMilestoneCompletedPayloadSchema : null;
+    type === "milestone.task_completed" || type === "milestone.agent_execution_completed"
+      ? OpenCodeMilestoneCompletedPayloadSchema : null;
   if (schema === null) throw new Error("unsupported OpenCode milestone event type");
   const parsed = schema.safeParse(payload);
   if (!parsed.success) throw new Error("invalid OpenCode milestone event payload");

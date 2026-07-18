@@ -23,6 +23,8 @@ export interface OpenCodeProbeRequest {
   readonly models: ModelSheet;
   readonly security: SecuritySheet;
   readonly home?: string;
+  readonly expectedExecutableSha256?: string;
+  readonly expectedVersion?: string;
 }
 
 export interface OpenCodeProbeReport {
@@ -114,6 +116,11 @@ export class OpenCodeProbe {
         return failure(request, model, canonicalCwd, "probe_failed", startedAt);
       }
     }
+    const measuredVersion = result.rawStdout.endsWith("\n") ? result.rawStdout.replace(/\r?\n$/, "") : result.rawStdout;
+    if (result.outcome === "completed" && (
+      (request.expectedExecutableSha256 !== undefined && executableSha256 !== request.expectedExecutableSha256) ||
+      (request.expectedVersion !== undefined && measuredVersion !== request.expectedVersion)
+    )) return failure(request, model, canonicalCwd, "probe_failed", startedAt);
     return reportFromWorkerResult(
       model,
       executable,

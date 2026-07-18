@@ -10,6 +10,7 @@ import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { TaskView } from "../tasks/task-projection.js";
 import {
   authorizeScheduledTracerRequest,
+  ValidatedHandoffReconciliationError,
   type OpenCodeIntegratedSingleFileTracerRequest,
   type ValidatedChangeHandoff,
 } from "./opencode-single-file-tracer-bullet.js";
@@ -29,6 +30,7 @@ export interface ScheduledWriterTask {
   readonly writerAdmission: OpenCodeTaskAdmissionContext;
   readonly reviewerAdmission: OpenCodeTaskAdmissionContext;
   readonly execution: OpenCodeIntegratedSingleFileTracerRequest;
+  readonly reviewerLifecycle?: "scheduler" | "execution";
 }
 
 export interface MultiWriterScheduleRequest {
@@ -99,7 +101,63 @@ export class MultiWriterOwnershipScheduler {
           milestone = this.requireMilestone(request.milestoneId);
           reconciled = true;
         } else if (linked !== null || milestone.tasks[scheduled.writerTaskId]?.status === "running") {
-          return milestone;
+          const recovery = this.milestones.inspectWriterRecovery(
+            request.milestoneId, scheduled.writerTaskId, scheduled.reviewerTaskId,
+          );
+          if (recovery.uncertain) {
+            return this.milestones.pauseForUncertainReviewer(request.milestoneId, scheduled.writerTaskId, recovery);
+          }
+          if (recovery.safeValidatedHandoff) {
+            if (this.execution.resumeValidatedHandoff === undefined) {
+              throw new Error("validated handoff continuation is not supported by the configured execution");
+            }
+            let current = this.requireMilestone(request.milestoneId);
+            const writer = plannedTask(current, scheduled.writerTaskId, "implementer");
+            const reviewer = plannedTask(current, scheduled.reviewerTaskId, "reviewer");
+            if (current.tasks[writer.taskId]?.status === "running") {
+              this.milestones.completeTask(request.milestoneId, writer.taskId, "completed", {
+                taskStreamId: writer.taskId, reconciliation: "validated_handoff_before_dispatch",
+              });
+              current = this.requireMilestone(request.milestoneId);
+            }
+            if (current.tasks[reviewer.taskId]?.status === "planned" || current.tasks[reviewer.taskId]?.status === "blocked") {
+              const reviewerAdmission = this.milestones.admitTask(
+                request.milestoneId, reviewer.taskId, request.security, scheduled.reviewerAdmission, request.modelSheet,
+              );
+              if (reviewerAdmission.status !== "admitted") return reviewerAdmission.milestone;
+            }
+            let result: TaskView;
+            try {
+              result = await this.execution.resumeValidatedHandoff(authorizeScheduledTracerRequest({
+                ...scheduled.execution,
+                correlationId: milestone.traceId,
+                parentMilestoneId: milestone.milestoneId,
+                onReviewReady: async () => {},
+              }));
+            } catch (error) {
+              if (error instanceof ValidatedHandoffReconciliationError) {
+                return this.milestones.pauseForStaleHandoff(
+                  request.milestoneId, scheduled.writerTaskId, error.evidence,
+                );
+              }
+              throw error;
+            }
+            if (result.terminalOutcome === "completed") {
+              this.milestones.completeWriterIntegration(request.milestoneId, scheduled.writerTaskId);
+            } else if (result.terminalOutcome !== null) {
+              const reviewerState = this.requireMilestone(request.milestoneId).tasks[reviewer.taskId];
+              if (reviewerState?.status === "running") {
+                this.milestones.completeTask(request.milestoneId, reviewer.taskId, result.terminalOutcome,
+                  { taskStreamId: result.taskId, reconciliation: "resumed_validated_handoff" });
+              }
+              this.milestones.releaseTerminalWriter(request.milestoneId, scheduled.writerTaskId);
+            }
+            pending.delete(scheduled.writerTaskId);
+            milestone = this.requireMilestone(request.milestoneId);
+            reconciled = true;
+          } else {
+            return milestone;
+          }
         }
       }
       if (reconciled) continue;
@@ -175,9 +233,10 @@ export class MultiWriterOwnershipScheduler {
           this.milestones.startWriterBatch(request.milestoneId, {
             batchId,
             maxConcurrentWriters: request.maxConcurrentWriters,
-            writers: runnable.map(({ writer, reviewer, model }) => ({
+            writers: runnable.map(({ scheduled, writer, reviewer, model }) => ({
               writerTaskId: writer.taskId,
               reviewerTaskId: reviewer.taskId,
+              reviewerLifecycle: scheduled.reviewerLifecycle ?? "scheduler",
               actorId: writer.roleAssignment.agentId,
               capabilityId: model.id,
               transportModelId: model.model,
@@ -221,8 +280,10 @@ export class MultiWriterOwnershipScheduler {
               request.modelSheet,
             );
             if (reviewAdmission.status !== "admitted") throw new Error("reviewer admission paused the milestone");
-            this.milestones.startTask(request.milestoneId, reviewer.taskId, reviewer.roleAssignment.agentId, "reviewer");
-            reviewerStarted = true;
+            if (scheduled.reviewerLifecycle !== "execution") {
+              this.milestones.startTask(request.milestoneId, reviewer.taskId, reviewer.roleAssignment.agentId, "reviewer");
+              reviewerStarted = true;
+            }
             await barrier.arrive(index);
           },
         });
@@ -242,6 +303,15 @@ export class MultiWriterOwnershipScheduler {
           permit.release(resourceWriterId(request.milestoneId, writer.taskId));
         } else if (reviewerStarted && result.terminalOutcome !== null) {
           this.milestones.completeTask(request.milestoneId, reviewer.taskId, result.terminalOutcome, { taskStreamId: result.taskId });
+          this.milestones.releaseTerminalWriter(request.milestoneId, writer.taskId);
+        } else if (writerCompleted && scheduled.reviewerLifecycle === "execution" && result.terminalOutcome !== null) {
+          const reviewerState = this.requireMilestone(request.milestoneId).tasks[reviewer.taskId];
+          if (reviewerState?.status === "running") {
+            this.milestones.completeTask(request.milestoneId, reviewer.taskId, result.terminalOutcome,
+              { taskStreamId: result.taskId, reconciliation: "execution_managed_reviewer" });
+          } else if (reviewerState?.terminalOutcome !== result.terminalOutcome) {
+            throw new Error("execution-managed reviewer outcome contradicts the task stream");
+          }
           this.milestones.releaseTerminalWriter(request.milestoneId, writer.taskId);
         }
       }));
@@ -442,6 +512,7 @@ function assertClaimBinding(
   assertAdmissionCapability(scheduled.reviewerAdmission, selectedReviewer);
   if (
     ownership.reviewerTaskId !== scheduled.reviewerTaskId ||
+    ownership.reviewerLifecycle !== (scheduled.reviewerLifecycle ?? "scheduler") ||
     scheduled.execution.reviewerId !== reviewer.roleAssignment.agentId ||
     ownership.actorId !== selected.id || ownership.capabilityId !== selected.id ||
     ownership.transportModelId !== selected.model || ownership.harness !== selected.harness ||

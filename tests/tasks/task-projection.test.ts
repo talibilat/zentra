@@ -11,6 +11,7 @@ import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js"
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
 import { TaskService } from "../../src/tasks/task-service.js";
+import { createOpenCodeWriterEventChain } from "../../src/agents/opencode-writer-events.js";
 
 const journals: SqliteEventJournal[] = [];
 const temporaryDirectories: string[] = [];
@@ -62,6 +63,27 @@ function happyPath(): StoredEvent[] {
 }
 
 describe("projectTask", () => {
+  it("rejects removed or reordered native writer-event evidence during replay", () => {
+    const native = [{ type: "step_start" }, { type: "step_finish" }];
+    const chain = createOpenCodeWriterEventChain(`${native.map((event) => JSON.stringify(event)).join("\n")}\n`, native);
+    const prefix = [createdEvent(), makeEvent("task.leased", 2, { leaseOwner: "writer" }), makeEvent("task.started", 3)];
+    const payload = { outcome: "completed", writerEvidenceVersion: 2, stdoutSha256: chain.stdoutSha256,
+      rawOutputPolicy: "not_retained", protocolFailure: null, eventChain: chain };
+    expect(projectTask([...prefix, makeEvent("task.writer_completed", 4, payload)])?.lifecycle).toBe("running");
+    expect(() => projectTask([...prefix, makeEvent("task.writer_completed", 4, {
+      ...payload, eventChain: { ...chain, events: chain.events.slice(1) },
+    })])).toThrow();
+    expect(() => projectTask([...prefix, makeEvent("task.writer_completed", 4, {
+      ...payload, eventChain: { ...chain, events: [...chain.events].reverse() },
+    })])).toThrow();
+    expect(() => projectTask([...prefix, makeEvent("task.writer_completed", 4, {
+      ...payload, deniedToolRequests: [{ tool: "webfetch", pathSha256: null }],
+    })])).toThrow(/native event/);
+    const empty = createOpenCodeWriterEventChain("", []);
+    expect(() => projectTask([...prefix, makeEvent("task.writer_completed", 4, {
+      ...payload, stdoutSha256: empty.stdoutSha256, eventChain: empty,
+    })])).toThrow(/event chain/);
+  });
   it("returns null for an empty event list", () => {
     expect(projectTask([])).toBeNull();
   });

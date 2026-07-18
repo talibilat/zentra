@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import {
   isVerifiedValidationReport,
+  ValidationReportSchema,
   type ValidationReport,
   type ValidationRunner,
 } from "../capabilities/validation-runner.js";
@@ -12,6 +13,7 @@ import {
   artifactEvidenceSha256,
   type ArtifactKind,
   type PatchArtifactEvidence,
+  projectArtifacts,
 } from "../contracts/artifact.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import {
@@ -37,6 +39,7 @@ import type { ReviewGate } from "../reviews/review-gate.js";
 import { assessReviewPolicy } from "../reviews/review-policy.js";
 import { OpenCodeReviewerUncertainError } from "../reviews/opencode-reviewer-adapter.js";
 import {
+  canonicalValidationDigest,
   ReviewerExecutionError,
   type ReviewInput,
   type ReviewerAdapter,
@@ -66,18 +69,20 @@ import {
   RoleCapabilityEnvelopeService,
   buildRoleCapabilityBinding,
 } from "../workers/role-capability-envelope.js";
+import type { UntrustedEvidenceHandoff } from "./untrusted-evidence-handoff.js";
 
 export interface OpenCodeSingleFileTracerRequest {
   readonly project: ProjectConfig;
   readonly task: PlannedTask;
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
-  readonly probe: OpenCodeProbeReport;
+  readonly probe: OpenCodeProbeReport | null;
   readonly openCodeHome?: string;
   readonly reviewerId?: string;
   readonly correlationId?: string;
   readonly parentMilestoneId?: string;
   readonly onReviewReady?: (handoff: ValidatedChangeHandoff) => void | Promise<void>;
+  readonly guidance?: UntrustedEvidenceHandoff;
   readonly signal: AbortSignal;
 }
 
@@ -85,6 +90,14 @@ export interface ValidatedChangeHandoff {
   readonly taskStreamId: string;
   readonly diffSha256: string;
   readonly validation: ValidationReport;
+}
+
+export class ValidatedHandoffReconciliationError extends Error {
+  override readonly name = "ValidatedHandoffReconciliationError";
+
+  constructor(readonly evidence: Readonly<Record<string, string>>) {
+    super("validated handoff evidence requires bounded replanning");
+  }
 }
 
 export interface OpenCodeIntegrationDependencies {
@@ -128,6 +141,10 @@ export class OpenCodeIntegratedSingleFileTracer {
 
   run(request: OpenCodeIntegratedSingleFileTracerRequest): Promise<TaskView> {
     return this.tracer.run(request);
+  }
+
+  resumeValidatedHandoff(request: OpenCodeIntegratedSingleFileTracerRequest): Promise<TaskView> {
+    return this.tracer.resumeValidatedHandoff(request);
   }
 }
 
@@ -252,9 +269,10 @@ export class OpenCodeSingleFileTracerBullet {
       }
       capsule = await this.capsule.run({
         ...request,
+        ...(request.guidance === undefined ? {} : { guidance: request.guidance }),
         capabilityBinding: roleBinding,
-        executable: request.probe.executable!,
-        executableSha256: request.probe.executableSha256!,
+      executable: request.probe!.executable!,
+      executableSha256: request.probe!.executableSha256!,
         observer: {
           onWorktreeCreationStarted: (intent) => {
             this.tasks.append(request.task.taskId, "task.worktree_creation_started", intent, null);
@@ -542,6 +560,67 @@ export class OpenCodeSingleFileTracerBullet {
     );
   }
 
+  async resumeValidatedHandoff(request: OpenCodeSingleFileTracerRequest): Promise<TaskView> {
+    const events = this.tasks.readStream(request.task.taskId);
+    const current = this.current(request.task.taskId);
+    if (current.lifecycle !== "awaiting_review" || events.some((event) => event.type === "task.review_dispatch_intent")) {
+      throw new Error("validated handoff is not safely resumable before reviewer dispatch");
+    }
+    const leaseEvent = events.find((event) => event.type === "task.leased");
+    const creationEvent = events.find((event) => event.type === "task.worktree_creation_started");
+    const workspace = objectString(leaseEvent?.payload, "workspace");
+    const baseCommit = objectString(creationEvent?.payload, "baseCommit");
+    const artifacts = projectArtifacts(events);
+    const patchArtifact = artifacts.artifacts.find((artifact) => artifact.kind === "patch");
+    const validationArtifact = artifacts.artifacts.find((artifact) => artifact.kind === "validation_report");
+    const rawPatch = patchArtifact === undefined ? undefined : artifacts.evidenceByArtifactId[patchArtifact.artifactId];
+    const rawValidation = validationArtifact === undefined ? undefined : artifacts.evidenceByArtifactId[validationArtifact.artifactId];
+    let patch: PatchArtifactEvidence | null = null;
+    let validation: ValidationReport | null = null;
+    try {
+      patch = rawPatch as PatchArtifactEvidence;
+      validation = ValidationReportSchema.parse(rawValidation);
+      if (workspace === null || baseCommit === null || patchArtifact === undefined || validationArtifact === undefined ||
+        typeof patch?.diff !== "string" || typeof patch.diffSha256 !== "string" || typeof patch.changedPath !== "string") {
+        throw new Error("missing retained handoff fields");
+      }
+      const lease: WorkspaceLease = { taskId: request.task.taskId, branch: `ticket/${request.task.taskId}`, path: workspace };
+      await this.worktrees.verifyRetained(request.project, {
+        taskId: request.task.taskId, branch: lease.branch, path: workspace, baseCommit,
+      }, { signal: request.signal });
+      const inspected = await this.worktrees.inspect(lease, { signal: request.signal });
+      const diffSha256 = createHash("sha256").update(inspected.diff, "utf8").digest("hex");
+      if (inspected.diff !== patch.diff || diffSha256 !== patch.diffSha256 ||
+        patch.changedPath !== singleOwnedFile(request.task, true) || validation.outcome !== "completed") {
+        throw new Error("retained handoff differs from workspace");
+      }
+      return this.reviewCommitAndIntegrate(
+        request, lease, patch.changedPath, inspected.diff, diffSha256, validation,
+      );
+    } catch (error) {
+      if (error instanceof ValidatedHandoffReconciliationError) throw error;
+      if (this.tasks.readStream(request.task.taskId).some((event) => event.type === "task.review_dispatch_intent")) {
+        throw error;
+      }
+      const expectedDiffSha256 = patch?.diffSha256 ?? "missing";
+      const expectedValidationSha256 = validation === null ? "missing" : canonicalValidationDigest(validation);
+      throw new ValidatedHandoffReconciliationError(Object.freeze({
+        writerTaskId: request.task.taskId,
+        expectedWorkspace: workspace ?? "missing",
+        expectedBranch: `ticket/${request.task.taskId}`,
+        expectedBaseCommit: baseCommit ?? "missing",
+        expectedChangedPath: patch?.changedPath ?? "missing",
+        expectedDiffSha256,
+        expectedValidationSha256,
+        observedMismatch: workspace === null || !existsSync(workspace)
+          ? "worktree_missing"
+          : error instanceof Error && /registration|branch|worktree|base commit/i.test(error.message)
+            ? "worktree_replaced_or_unregistered"
+            : "worktree_modified_or_evidence_mismatch",
+      }));
+    }
+  }
+
   private async reviewCommitAndIntegrate(
     request: OpenCodeSingleFileTracerRequest,
     lease: WorkspaceLease,
@@ -573,6 +652,13 @@ export class OpenCodeSingleFileTracerBullet {
         diffSha256,
         validation,
       });
+      this.tasks.append(request.task.taskId, "task.review_dispatch_intent", {
+        schemaVersion: 1,
+        reviewerId,
+        diffSha256,
+        validationSha256: canonicalValidationDigest(validation),
+        dispatchId: randomUUID(),
+      }, null);
       const decision = await dependencies.reviewer.review(reviewInput, request.signal);
       const evidence = dependencies.reviews.verifyEvidence(reviewInput, decision);
       if (!evidence.approved) {
@@ -933,6 +1019,12 @@ export class OpenCodeSingleFileTracerBullet {
   }
 }
 
+function objectString(payload: unknown, key: string): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const value = (payload as Readonly<Record<string, unknown>>)[key];
+  return typeof value === "string" ? value : null;
+}
+
 function artifactPath(kind: ArtifactKind): string {
   return {
     patch: "artifacts/patch.diff",
@@ -996,7 +1088,7 @@ function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changed
     request.security.forbiddenPaths.some((scope) => scope === changedPath || (scope.endsWith("/**") && changedPath.startsWith(scope.slice(0, -3) + "/")))) {
     throw new Error("OpenCode writer request is outside its exact durable admission");
   }
-  if (!isVerifiedOpenCodeProbeReport(request.probe, {
+  if (request.probe === null || !isVerifiedOpenCodeProbeReport(request.probe, {
     modelId: request.model.id, model: request.model.model,
     provider: request.model.model.replace(/\/.*/, ""), cwd: request.project.repositoryPath,
   })) throw new Error("OpenCode single-file tracer requires a verified capability probe");
@@ -1037,6 +1129,7 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): obje
   return {
     workerId: report.modelId,
     harness: "opencode",
+    writerEvidenceVersion: 2,
     outcome: report.outcome,
     exitCode: report.exitCode,
     executable: report.executable,
@@ -1047,8 +1140,14 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): obje
     networkBoundary: report.networkBoundary,
     stdoutSha256: report.stdoutSha256,
     stderrSha256: report.stderrSha256,
+    eventChain: report.eventChain,
+    rawOutputPolicy: report.rawOutputPolicy,
+    protocolFailure: report.protocolFailure,
     startedAt: report.startedAt,
     finishedAt: report.finishedAt,
-    deniedToolRequests: report.deniedToolRequests,
+    deniedToolRequests: report.deniedToolRequests.map((denied) => ({
+      tool: denied.tool,
+      pathSha256: denied.path === null ? null : createHash("sha256").update(denied.path, "utf8").digest("hex"),
+    })),
   };
 }

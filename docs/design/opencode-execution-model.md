@@ -142,7 +142,7 @@ Native OpenCode web tools and internal subagents remain denied because OpenCode 
 
 Web research source evidence is journaled by digest and provenance without raw response content or query values.
 
-Azure provider configuration remains deferred to a separate ticket.
+Azure provider configuration is strict, host-brokered, and deployment-bound for read-only roles.
 
 ## Example Workflows
 
@@ -182,7 +182,7 @@ OpenCode provides the agent loop and coding tools.
 
 Azure provides the selected models.
 
-The initial product should use OpenCode with Azure and should not require OpenRouter.
+The initial product uses OpenCode with Azure and does not admit alternate provider configuration.
 
 Future harness adapters may support Codex, Claude Code, and other agent runtimes.
 
@@ -214,7 +214,7 @@ Potentially effectful uncertain operations must never be retried automatically.
 1. Define the generic OpenCode worker and internal-subagent execution contract.
 2. Add role-based capability envelopes for research, writing, and review.
 3. Add approved web research with source provenance and bounded network policy.
-4. Replace the required OpenRouter path with Azure-only provider configuration.
+4. Establish Azure-only provider configuration.
 5. Align installed milestone execution with OpenCode plus Azure for every role.
 6. Add end-to-end research, implementation, independent review, and parallel-worker tests.
 7. Run final Azure-authenticated package and Agent Trail conformance.

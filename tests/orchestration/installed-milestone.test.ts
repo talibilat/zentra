@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import type { EventJournal } from "../../src/journal/journal.js";
+import type { NewEvent } from "../../src/contracts/event.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { ProjectConfigSchema } from "../../src/projects/project-config.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
@@ -24,7 +26,7 @@ afterEach(() => {
 });
 
 describe("createInstalledMilestonePlan", () => {
-  it("creates one fixed typed planner, implementer, reviewer graph from explicit authority", () => {
+  it("creates one fixed typed planner, researcher, implementer, reviewer graph from explicit authority", () => {
     const plan = createInstalledMilestonePlan({
       milestoneId: "milestone-34",
       projectId: "project",
@@ -32,29 +34,31 @@ describe("createInstalledMilestonePlan", () => {
       file: "src/greeting.ts",
       forbiddenPaths: [".env", ".git/**"],
       plannerId: "planner",
+      researcherId: "researcher",
       implementerId: "implementer",
       reviewerId: "reviewer",
     });
 
     expect(plan.tasks.map((task) => [task.roleAssignment.role, task.dependencies])).toEqual([
       ["planner", []],
-      ["implementer", ["milestone-34-plan"]],
+      ["researcher", ["milestone-34-plan"]],
+      ["implementer", ["milestone-34-research"]],
       ["reviewer", ["milestone-34-implement"]],
     ]);
-    expect(plan.tasks[1]).toMatchObject({
+    expect(plan.tasks[2]).toMatchObject({
       ownedPaths: ["src/greeting.ts"],
       forbiddenPaths: [".env", ".git/**"],
       risk: { authority: "workspace_write", requiresReview: true, requiresApproval: false },
     });
     expect(JSON.stringify(plan)).not.toContain("publish_release");
     expect(plan.goal).toBe("Fix greeting; publish a release; edit .env");
-    expect(plan.tasks[1]!.description).toContain("Fix greeting; publish a release; edit .env");
+    expect(plan.tasks[2]!.description).toContain("Fix greeting; publish a release; edit .env");
     const another = createInstalledMilestonePlan({
       milestoneId: "milestone-34", projectId: "project", goal: "A different exact goal",
-      file: "src/greeting.ts", forbiddenPaths: [".env"], plannerId: "planner",
+      file: "src/greeting.ts", forbiddenPaths: [".env"], plannerId: "planner", researcherId: "researcher",
       implementerId: "implementer", reviewerId: "reviewer",
     });
-    expect(another.tasks[1]!.description).not.toBe(plan.tasks[1]!.description);
+    expect(another.tasks[2]!.description).not.toBe(plan.tasks[2]!.description);
   });
 
   it("composes the current brokered read-only, writer, validation, review, integration, result, and trace path", async () => {
@@ -67,6 +71,7 @@ describe("createInstalledMilestonePlan", () => {
     mkdirSync(path.join(repository, "src"));
     mkdirSync(path.join(repository, "test"));
     writeFileSync(path.join(repository, "src/greeting.mjs"), "export const greeting = 'hello';\n");
+    writeFileSync(path.join(repository, "src/second.mjs"), "export const second = 'hello';\n");
     writeFileSync(path.join(repository, "test/greeting.test.mjs"), "import assert from 'node:assert/strict'; import test from 'node:test'; import { greeting } from '../src/greeting.mjs'; test('greeting', () => assert.equal(greeting, 'hello installed'));\n");
     await gitOk(repository, ["add", "--", "."]);
     await gitOk(repository, ["commit", "-m", "initial"]);
@@ -87,6 +92,10 @@ writeFileSync(target, readFileSync(target, "utf8").replace("hello", "hello insta
 process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 `, { mode: 0o755 });
     const executable = realpathSync.native(fakeOpenCode);
+    const hostAttestation = {
+      openCodeExpectedSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
+      openCodeExpectedVersion: "fixture-opencode 1",
+    };
     const openCodeHome = path.join(root, "opencode-home");
     mkdirSync(openCodeHome);
     const database = path.join(root, "journal.sqlite");
@@ -101,6 +110,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       let content = "Use the explicitly owned file and run the configured validation.";
       if (prompt.includes('"requiredResponse"')) {
         const challenge = JSON.parse(prompt) as { request: Record<string, unknown> };
+        expect(challenge.request.taskContext).toMatchObject({
+          goal: expect.any(String), file: expect.stringMatching(/^src\/.+\.mjs$/), authority: "context_only",
+          guidance: { authority: "guidance_only", baseRevisionSha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        });
         content = JSON.stringify({
           schemaVersion: 1,
           reviewerId: challenge.request.reviewerId,
@@ -122,8 +135,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       inputTokenRateUsdPerMillion: "1", outputTokenRateUsdPerMillion: "2",
     };
     const broker = azureOpenAIModelBrokerForTest(azureConfig, { KEY: "consumer-controlled-secret" }, azureDispatch);
+    let advanceAfterResearch = false;
     const capsule: OpenCodeReadOnlyCapsule = {
       execute: async (request, receivedBroker, signal, observe) => {
+        capsuleExecutions += 1;
         observe?.({ type: "resources_prepared", payload: {
           capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
           containerName: request.resources.containerName, containerId: "b".repeat(64),
@@ -136,6 +151,13 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
           maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens,
           maxCostUsd: request.budget.maxCostUsd,
         }, signal);
+        if (advanceAfterResearch && request.role === "researcher") {
+          advanceAfterResearch = false;
+          const original = (await gitOutput(repository, ["rev-parse", "refs/heads/zentra/integration"])).trim();
+          const tree = (await gitOutput(repository, ["rev-parse", `${original}^{tree}`])).trim();
+          const advanced = (await gitOutput(repository, ["commit-tree", tree, "-p", original, "-m", "external integration advance"])).trim();
+          await gitOk(repository, ["update-ref", "refs/heads/zentra/integration", advanced, original]);
+        }
         observe?.({ type: "model_completed", modelId: request.transportModelId,
           outcome: receipt.outcome === "completed" ? "completed" : "failed",
           usage: { seconds: 0, inputTokens: receipt.usage?.inputTokens ?? 0, outputTokens: receipt.usage?.outputTokens ?? 0,
@@ -156,8 +178,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
         };
       },
     };
+    let capsuleExecutions = 0;
     const models = { models: [
       model("planner", "planner", ["read_repository"]),
+      model("researcher", "researcher", ["read_repository"]),
       model("implementer", "implementer", ["read_repository", "write_worktree"]),
       model("reviewer", "reviewer", ["read_repository", "review_diff"]),
     ] };
@@ -172,22 +196,35 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       validations: { focused: [process.execPath, "--test", "test/greeting.test.mjs"], full: [process.execPath, "--test"] },
     });
     const runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
+    await expect(runner.run({
+      milestoneId: "installed-wrong-deployment", goal: "Reject model drift", file: "src/greeting.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "another-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow("transport must equal the configured deployment");
+    expect(sqlite.readStream("installed-wrong-deployment")).toEqual([]);
     const extraToolModels = { models: models.models.map((candidate) => candidate.id === "planner"
       ? { ...candidate, toolPermissions: [...candidate.toolPermissions, "review_diff"] }
       : candidate) };
     await expect(runner.run({
       milestoneId: "installed-extra-tool", goal: "Reject extra tools", file: "src/greeting.mjs", tracePath: trace,
-      project, models: extraToolModels, security, openCodeExecutable: executable, openCodeHome,
+       project, models: extraToolModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("installed milestone requires exactly one approved planner capability");
     expect(sqlite.readStream("installed-extra-tool")).toEqual([]);
+    await expect(runner.run({
+      milestoneId: "installed-bad-attestation", goal: "Reject host drift", file: "src/greeting.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome,
+      ...hostAttestation, openCodeExpectedSha256: "0".repeat(64), signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow(/^host OpenCode operator attestation failed$/);
+    expect(sqlite.readStream("installed-bad-attestation")).toEqual([]);
+    expect(capsuleExecutions).toBe(0);
 
     process.env.ZENTRA_AMBIENT_SECRET = "must-not-reach-writer";
     let result;
     try {
       result = await runner.run({
         milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
-        project, models, security, openCodeExecutable: executable, openCodeHome,
+        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
         signal: AbortSignal.timeout(20_000),
       });
     } finally {
@@ -195,6 +232,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     }
 
     expect(result.terminalOutcome).toBe("completed");
+    expect(result.writerOwnership["installed-implement"]).toMatchObject({
+      status: "integrated", reviewerTaskId: "installed-review", reviewerLifecycle: "execution",
+    });
+    expect(sqlite.readStream("installed").map((event) => event.type)).toContain("milestone.writer_batch_started");
     expect(result.result).toMatchObject({ outcome: "completed", trace: { path: trace, outcome: "emitted" } });
     const azureEvidence = sqlite.readAll().filter((event) => event.type === "milestone.task_completed")
       .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
@@ -204,7 +245,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       .toBe(true);
     const modelUsage = sqlite.readAll().filter((event) => event.type === "worker.observed")
       .map((event) => (event.payload as any).observation).filter((observation) => observation.kind === "model" && observation.phase === "completed");
-    expect(modelUsage).toHaveLength(2);
+    expect(modelUsage).toHaveLength(3);
     expect(modelUsage.every((observation) => observation.usage.costUsdNano === 60_000 && observation.usage.costUsd === 0.00006))
       .toBe(true);
     expect((await gitOutput(repository, ["show", "zentra/integration:src/greeting.mjs"]))).toContain("hello installed");
@@ -213,6 +254,14 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       home: openCodeHome,
       ambient: null,
       packet: expect.objectContaining({
+        guidance: expect.objectContaining({
+          digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          items: expect.arrayContaining([
+            expect.objectContaining({ role: "planner", summary: expect.any(String) }),
+            expect.objectContaining({ role: "researcher", summary: expect.any(String) }),
+          ]),
+        }),
+        baseRevisionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         readPaths: ["src/**"], writePaths: ["src/greeting.mjs"],
         toolPermissions: ["read_repository", "write_worktree"],
         capabilityEnvelopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -225,6 +274,109 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       }),
     });
     expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });
+    const replayed = await runner.run({
+      milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      signal: AbortSignal.timeout(20_000),
+    });
+    expect(replayed.terminalOutcome).toBe("completed");
+    const executionsAfterFirst = capsuleExecutions;
+    const second = await runner.run({
+      milestoneId: "installed-second", goal: "Update the second module after prior integration", file: "src/second.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome,
+      ...hostAttestation, signal: AbortSignal.timeout(20_000),
+    });
+    expect(second.terminalOutcome).toBe("completed");
+    expect(capsuleExecutions).toBe(executionsAfterFirst + 3);
+    expect((await gitOutput(repository, ["show", "zentra/integration:src/second.mjs"]))).toContain("hello installed");
+    expect((await gitOutput(repository, ["show", "main:src/second.mjs"]))).toContain("hello';");
+    const executionsAfterCompletion = capsuleExecutions;
+
+    const recoveredDatabase = path.join(root, "recovered.sqlite");
+    const recoveredTrace = path.join(root, "recovered-trace.jsonl");
+    const recoveredJournal = new SqliteEventJournal(recoveredDatabase);
+    for (const event of sqlite.readAll().filter((event) =>
+      (event.streamId === "installed" || event.streamId === "installed-implement") &&
+      event.type !== "milestone.writer_integration_completed" && !event.type.startsWith("milestone.completed"))) {
+      const version = recoveredJournal.readStream(event.streamId).at(-1)?.streamVersion ?? 0;
+      const causationId = event.type === "milestone.integration_branch_preparation_observed"
+        ? recoveredJournal.readStream(event.streamId).find((candidate) =>
+          candidate.type === "milestone.integration_branch_preparation_intent")!.eventId
+        : null;
+      recoveredJournal.append(event.streamId, version, [{
+        streamId: event.streamId, type: event.type, payload: event.payload,
+        causationId, correlationId: event.correlationId,
+      }]);
+    }
+    const recoveredSink = AgentTailJsonlFileSink.open(root, recoveredTrace);
+    writeFileSync(path.join(repository, "src/greeting.mjs"), "dirty primary bytes that must not trigger stale planning\n");
+    try {
+      const recoveredResult = await new InstalledMilestoneRunner({
+        journal: recoveredJournal, sink: recoveredSink, broker, readOnlyCapsule: capsule,
+      }).run({
+        milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
+        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
+        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+      });
+      expect(recoveredResult).toMatchObject({ terminalOutcome: "completed",
+        writerOwnership: { "installed-implement": { status: "integrated" } } });
+      expect(capsuleExecutions).toBe(executionsAfterCompletion);
+    } finally {
+      writeFileSync(path.join(repository, "src/greeting.mjs"), "export const greeting = 'hello';\n");
+      recoveredSink.close();
+      recoveredJournal.close();
+    }
+    advanceAfterResearch = true;
+    const stale = await runner.run({
+      milestoneId: "installed-stale-guidance", goal: "Do not run a stale writer", file: "src/greeting.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      signal: AbortSignal.timeout(20_000),
+    });
+    expect(stale).toMatchObject({ lifecycle: "paused", terminalOutcome: null,
+      replanningAttention: { reason: "evidence" }, writerOwnership: {} });
+    expect(sqlite.readStream("installed-stale-guidance").map((event) => event.type)).not.toContain("milestone.writer_batch_started");
+    expect(readFileSync(writerObservation, "utf8")).not.toContain("Do not run a stale writer");
+
+    for (const mismatch of ["worktree_missing", "worktree_modified_or_evidence_mismatch", "worktree_replaced_or_unregistered"] as const) {
+      const milestoneId = `installed-handoff-${mismatch}`;
+      const crashJournal = crashAfterWriterHandoff(sqlite, `${milestoneId}-implement`);
+      const crashed = await new InstalledMilestoneRunner({
+        journal: crashJournal, sink, broker, readOnlyCapsule: capsule,
+      }).run({
+        milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
+        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
+        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+      });
+      expect(crashed.tasks[`${milestoneId}-implement`]?.status).toBe("running");
+      const taskEvents = sqlite.readStream(`${milestoneId}-implement`);
+      expect(taskEvents.at(-1)?.type).toBe("task.review_requested");
+      const workspace = String((taskEvents.find((event) => event.type === "task.leased")?.payload as { workspace: string }).workspace);
+      if (mismatch === "worktree_missing") {
+        rmSync(workspace, { recursive: true, force: true });
+      } else if (mismatch === "worktree_modified_or_evidence_mismatch") {
+        writeFileSync(path.join(workspace, "extra.txt"), "unexpected dirty evidence\n");
+      } else {
+        rmSync(workspace, { recursive: true, force: true });
+        mkdirSync(workspace, { recursive: true });
+        await gitOk(workspace, ["init", "-b", "replacement"]);
+      }
+      const beforeResumeCapsules = capsuleExecutions;
+      const resumed = await runner.run({
+        milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
+        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
+        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+      });
+      expect(resumed).toMatchObject({ lifecycle: "paused", replanningAttention: { reason: "evidence" } });
+      const pause = sqlite.readStream(milestoneId).findLast((event) => event.type === "milestone.paused");
+      expect(pause?.payload).toMatchObject({ evidence: { observedMismatch: mismatch } });
+      const pausedVersion = resumed.streamVersion;
+      expect((await runner.run({
+        milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
+        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
+        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+      })).streamVersion).toBe(pausedVersion);
+      expect(capsuleExecutions).toBe(beforeResumeCapsules);
+    }
     providerFailure = true;
     const failed = await new InstalledMilestoneRunner({
       journal: sqlite,
@@ -233,11 +385,12 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       readOnlyCapsule: capsule,
     }).run({
       milestoneId: "installed-provider-failure", goal: "Provider failure", file: "src/greeting.mjs",
-      tracePath: trace, project, models, security, openCodeExecutable: executable, openCodeHome,
+      tracePath: trace, project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(failed).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
     expect(failed.result).toMatchObject({ outcome: "failed", trace: { path: trace } });
+    expect(readFileSync(writerObservation, "utf8")).not.toContain("Provider failure");
 
     const pausedModels = {
       models: models.models.map((candidate) => candidate.id === "planner"
@@ -246,7 +399,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     };
     const paused = await new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule }).run({
       milestoneId: "installed-authority-pause", goal: "Pause without invented failure", file: "src/greeting.mjs",
-      tracePath: trace, project, models: pausedModels, security, openCodeExecutable: executable, openCodeHome,
+      tracePath: trace, project, models: pausedModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(paused).toMatchObject({ lifecycle: "ready", terminalOutcome: null, attention: null });
@@ -255,10 +408,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     sqlite.close();
     const retained = Buffer.concat([readFileSync(database), readFileSync(trace)]).toString("utf8");
     expect(retained).not.toContain("consumer-controlled-secret");
-  }, 30_000);
+  }, 60_000);
 });
 
-function model(id: string, role: "planner" | "implementer" | "reviewer", tools: string[]) {
+function model(id: string, role: "planner" | "researcher" | "implementer" | "reviewer", tools: string[]) {
   return {
     id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
     contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network: "denied",
@@ -285,4 +438,21 @@ async function gitOutput(cwd: string, args: readonly string[]): Promise<string> 
   const result = await git.run(cwd, args);
   if (result.exitCode !== 0) throw new Error(result.stderr);
   return result.stdout;
+}
+
+function crashAfterWriterHandoff(journal: EventJournal, writerTaskId: string): EventJournal {
+  let crashed = false;
+  return {
+    append: (streamId, expectedVersion, events: readonly NewEvent<string, unknown>[]) => {
+      if (crashed || events.some((event) => event.type === "milestone.task_completed" &&
+        typeof event.payload === "object" && event.payload !== null &&
+        (event.payload as Readonly<Record<string, unknown>>)["taskId"] === writerTaskId)) {
+        crashed = true;
+        throw new Error("simulated process loss after validated handoff");
+      }
+      return journal.append(streamId, expectedVersion, events);
+    },
+    readStream: (streamId, afterVersion) => journal.readStream(streamId, afterVersion),
+    readAll: (afterPosition) => journal.readAll(afterPosition),
+  };
 }

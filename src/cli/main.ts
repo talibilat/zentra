@@ -211,6 +211,8 @@ interface MilestoneRunOptions extends ProjectOptions, Pick<DatabaseTaskOptions, 
   readonly provider: string;
   readonly opencode: string;
   readonly opencodeHome: string;
+  readonly opencodeSha256: string;
+  readonly opencodeVersion: string;
   readonly agentTailJsonl: string;
   readonly file: string;
 }
@@ -356,15 +358,17 @@ function createProgram(
   const milestone = program.command("milestone").description("Run and inspect installed OpenCode workflows.");
   milestone
     .command("run")
-    .description("Run an authenticated host OpenCode writer with user-OS provider transport and brokered review.")
+    .description("Run Azure-brokered OpenCode planning, research, and review around an authenticated host OpenCode writer.")
     .requiredOption("--goal <sentence>", "one natural-language goal; wording grants no authority")
     .requiredOption("--config <path>", "canonical project configuration file")
     .requiredOption("--database <path>", "canonical SQLite event journal path")
     .requiredOption("--model-sheet <path>", "canonical Markdown model sheet")
     .requiredOption("--security-sheet <path>", "canonical Markdown security sheet")
-    .requiredOption("--provider <path>", "canonical fixed-endpoint provider configuration")
+    .requiredOption("--provider <path>", "canonical Azure provider configuration")
     .requiredOption("--opencode <path>", "canonical host OpenCode executable; provider transport uses user OS network authority")
     .requiredOption("--opencode-home <path>", "canonical explicit OpenCode home for writer and probe")
+    .requiredOption("--opencode-sha256 <digest>", "operator-attested lowercase SHA-256 of the exact host OpenCode executable")
+    .requiredOption("--opencode-version <version>", "operator-attested exact bounded OpenCode --version output")
     .requiredOption("--agent-tail-jsonl <path>", "canonical new Agent Tail JSONL trace path")
     .requiredOption("--file <path>", "one explicit security-authorized relative file")
     .action(async (options: MilestoneRunOptions) => {
@@ -376,6 +380,9 @@ function createProgram(
       assertCanonicalInputFile(options.provider);
       assertCanonicalExecutable(options.opencode);
       assertCanonicalDirectory(options.opencodeHome);
+      if (!/^[a-f0-9]{64}$/.test(options.opencodeSha256) || !isBoundedVersion(options.opencodeVersion)) {
+        throw new CliFailure("INVALID_COMMAND");
+      }
       assertCanonicalOutputPath(options.database);
       assertCanonicalOutputPath(options.agentTailJsonl);
       const configs = loadProjects(options.config);
@@ -414,8 +421,11 @@ function createProgram(
           project,
           models,
           security,
+          azureDeployment: providerConfig.deployment,
           openCodeExecutable: options.opencode,
           openCodeHome: options.opencodeHome,
+          openCodeExpectedSha256: options.opencodeSha256,
+          openCodeExpectedVersion: options.opencodeVersion,
           signal,
         });
       } catch {
@@ -447,9 +457,11 @@ function createProgram(
           lifecycle: terminal.lifecycle,
           outcome,
           tracePath: trace.canonicalPath,
-          ...(terminal.attention === null ? {} : {
+          ...(terminal.attention !== null ? {
             attention: { reason: terminal.attention.reason, classification: terminal.attention.classification },
-          }),
+          } : terminal.replanningAttention !== null ? {
+            attention: { reason: "stale_evidence", classification: "bounded_replan" },
+          } : {}),
           trace: {
             path: trace.canonicalPath,
             outcome: projectionFailed ? "failed" : terminal.result?.trace.outcome ?? "not_observed",
@@ -1276,6 +1288,10 @@ function assertSafeTitle(title: string): void {
   if (title.length === 0 || Buffer.byteLength(title, "utf8") > MAX_TITLE_BYTES) {
     throw new CliFailure("INVALID_TITLE");
   }
+}
+
+function isBoundedVersion(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= 512 && !/[\r\n\u0000-\u001f\u007f]/.test(value);
 }
 
 function reviewPolicyTaskFromOptions(options: RunOptions): PlannedTask {

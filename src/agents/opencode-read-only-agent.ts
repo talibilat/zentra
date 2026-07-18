@@ -29,7 +29,8 @@ import {
   OpenCodeCleanupObservedPayloadSchema,
   OpenCodeResourceIntentPayloadSchema,
 } from "./opencode-agent-events.js";
-import { createReadOnlyRepositoryView } from "./read-only-repository-view.js";
+import { createReadOnlyRepositoryView, createReadOnlyRepositoryViewAtCommit } from "./read-only-repository-view.js";
+import { GitClient } from "../workspaces/git-client.js";
 import { openCodeResourceIdentity } from "./opencode-resource-identity.js";
 import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
 import { OpenCodeWorkerEventAdapter } from "./opencode-worker-event-adapter.js";
@@ -163,6 +164,9 @@ export interface OpenCodeReadOnlyAgentRequest {
   readonly budget: Omit<MilestoneBudget, "maxRetries">;
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
+  readonly repositoryRevision?: string;
+  readonly repositoryCommit?: string;
+  readonly deferMilestoneCompletion?: boolean;
   readonly admission: {
     readonly packet: OpenCodeAdmissionPacket;
     readonly digest: string;
@@ -321,18 +325,28 @@ export class OpenCodeReadOnlyAgent {
         if (decision.status !== "allowed") throw new Error(`review capability was not admitted: ${decision.reason}`);
       }
     }
-    let view: ReturnType<typeof createReadOnlyRepositoryView>;
+    let view: Awaited<ReturnType<typeof createReadOnlyRepositoryViewAtCommit>>;
     try {
-      view = createReadOnlyRepositoryView(
-        repositoryPath,
-        roleBinding === null ? task.ownedPaths : existingReadScopes(repositoryPath, roleBinding.access.readPaths),
-        roleBinding?.access.forbiddenPaths ?? task.forbiddenPaths,
-        identity.repositoryViewPath,
-      );
+      const configuredScopes = roleBinding === null ? task.ownedPaths : roleBinding.access.readPaths;
+      const readScopes = request.repositoryCommit === undefined
+        ? existingReadScopes(repositoryPath, configuredScopes)
+        : configuredScopes;
+      const forbidden = roleBinding?.access.forbiddenPaths ?? task.forbiddenPaths;
+      view = request.repositoryCommit === undefined
+        ? createReadOnlyRepositoryView(repositoryPath, readScopes, forbidden, identity.repositoryViewPath)
+        : await createReadOnlyRepositoryViewAtCommit(
+          new GitClient(), repositoryPath, request.repositoryCommit, readScopes, forbidden,
+          identity.repositoryViewPath, request.signal,
+        );
     } catch (error) {
       workers.cleanup(request.taskId, workerId, "completed");
       workers.terminate(request.taskId, workerId, "failed");
       throw error;
+    }
+    const repositoryRevision = request.repositoryRevision ?? view.revision;
+    if (!/^[a-f0-9]{64}$/.test(repositoryRevision)) throw new Error("OpenCode repository revision is invalid");
+    if (request.repositoryCommit !== undefined && repositoryRevision !== view.revision) {
+      throw new Error("OpenCode repository revision does not match the measured Git snapshot");
     }
     const packet = OpenCodeReadOnlyCapsuleRequestSchema.parse({
       capsuleId: identity.capsuleId,
@@ -361,7 +375,7 @@ export class OpenCodeReadOnlyAgent {
         shell: "none",
         readableScopes: view.readableScopes,
         forbiddenPaths: view.forbiddenPaths,
-        repositoryRevision: view.revision,
+        repositoryRevision,
       },
     });
     const runningPayload = OpenCodeMilestoneRunningPayloadSchema.parse({
@@ -506,7 +520,7 @@ export class OpenCodeReadOnlyAgent {
         imageName: identity.imageName,
         imageId: null,
         repositoryViewPath: identity.repositoryViewPath,
-        repositoryRevision: view.revision,
+        repositoryRevision,
         outcome: "uncertain",
         containerAbsent: false,
         imageAbsent: false,
@@ -527,7 +541,7 @@ export class OpenCodeReadOnlyAgent {
         harness: "opencode" as const,
         capabilityId: packet.capabilityId,
         transportModelId: result.model?.id ?? packet.transportModelId,
-        repositoryRevision: view.revision,
+        repositoryRevision,
         ...(result.model?.configurationDigest === undefined ? {} : {
           providerConfigurationDigest: result.model.configurationDigest,
         }),
@@ -583,12 +597,14 @@ export class OpenCodeReadOnlyAgent {
       });
     }
     this.journal.append(request.milestoneId, version, [{
-      streamId: request.milestoneId,
-      type: "milestone.task_completed",
-      payload: completedPayload,
-      causationId: null,
-      correlationId,
-    }]);
+        streamId: request.milestoneId,
+        type: request.deferMilestoneCompletion === true
+          ? "milestone.agent_execution_completed"
+          : "milestone.task_completed",
+        payload: completedPayload,
+        causationId: null,
+        correlationId,
+      }]);
     const trace = traceOutcome(this.journal);
     return Object.freeze({
       ...result,

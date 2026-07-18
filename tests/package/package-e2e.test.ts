@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -265,6 +266,7 @@ describe("publishable CLI package", () => {
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | planner | opencode | zentra-deployment | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| researcher | opencode | zentra-deployment | researcher | research | low | 128000 | 1 | read_repository | denied | none | 1/1 |
 | implementer | opencode | fixture/implementer | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
 | reviewer | opencode | zentra-deployment | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
@@ -304,6 +306,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       "--provider", milestoneProvider,
       "--opencode", realpathSync.native(milestoneOpenCode),
       "--opencode-home", realpathSync.native(milestoneOpenCodeHome),
+      "--opencode-sha256", createHash("sha256").update(readFileSync(milestoneOpenCode)).digest("hex"),
+      "--opencode-version", "package-opencode 1",
       "--agent-tail-jsonl", milestoneTrace,
       "--file", "greeting.txt",
     ], consumer, {
@@ -335,16 +339,18 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], milestoneProject.repository)).stdout)
       .toBe("hello from package\n");
 
-    const legacyProvider = path.join(milestoneRoot, "openrouter.json");
+    const legacyProvider = path.join(milestoneRoot, "unsupported-provider.json");
     const legacyDatabase = path.join(milestoneRoot, "legacy-provider.sqlite");
     const legacyTrace = path.join(milestoneRoot, "legacy-provider.jsonl");
-    writeFileSync(legacyProvider, '{"provider":"openrouter","credentialEnv":"UNAVAILABLE_OPENROUTER_KEY","timeoutMs":5000}\n', "utf8");
+    writeFileSync(legacyProvider, '{"provider":"unsupported","credentialEnv":"UNAVAILABLE_PROVIDER_KEY","timeoutMs":5000}\n', "utf8");
     const rejectedLegacy = await runNonzero(binary, [
       "milestone", "run", "--goal", "Reject legacy provider",
       "--config", milestoneProject.config, "--database", legacyDatabase,
       "--model-sheet", milestoneModels, "--security-sheet", milestoneProject.securitySheet,
       "--provider", legacyProvider, "--opencode", realpathSync.native(milestoneOpenCode),
       "--opencode-home", realpathSync.native(milestoneOpenCodeHome), "--agent-tail-jsonl", legacyTrace,
+      "--opencode-sha256", createHash("sha256").update(readFileSync(milestoneOpenCode)).digest("hex"),
+      "--opencode-version", "package-opencode 1",
       "--file", "greeting.txt",
     ], consumer, { ...subprocessEnvironment, NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}` });
     expect(rejectedLegacy.code).toBe(1);
@@ -365,6 +371,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       "--provider", milestoneProvider,
       "--opencode", realpathSync.native(milestoneOpenCode),
       "--opencode-home", realpathSync.native(milestoneOpenCodeHome),
+      "--opencode-sha256", createHash("sha256").update(readFileSync(milestoneOpenCode)).digest("hex"),
+      "--opencode-version", "package-opencode 1",
       "--file", "greeting.txt",
     ];
     const harnessEnvironment = {

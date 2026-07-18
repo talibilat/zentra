@@ -35,6 +35,31 @@ afterEach(() => {
 });
 
 describe("WriterWorktreeCapsule", () => {
+  it.each([
+    ["empty", ""],
+    ["plain", "process.stdout.write('plain output\\n');"],
+    ["malformed", "process.stdout.write('{not-json}\\n');"],
+    ["mixed", "process.stdout.write(JSON.stringify({ type: 'step_finish' }) + '\\nplain\\n');"],
+    ["incomplete", "process.stdout.write(JSON.stringify({ type: 'step_finish' }));"],
+    ["delegation", "process.stdout.write(JSON.stringify({ type: 'tool_use', tool: 'task' }) + '\\n');"],
+  ])("fails a successful process with %s OpenCode event output before validation", async (_name, output) => {
+    const fixture = await projectFixture();
+    const executable = fakeOpenCode(fixture.root, `
+      import { writeFileSync } from "node:fs";
+      import path from "node:path";
+      const args = process.argv.slice(2);
+      writeFileSync(path.join(args[9], "src/greeting.ts"), "changed but untrusted\\n");
+      ${output}
+    `);
+    const result = await capsule().run({
+      project: fixture.project, task: plannedTask(), model: writerModel(), security: security(fixture.repository),
+      executable, signal: AbortSignal.timeout(10_000),
+    });
+    expect(result).toMatchObject({ outcome: "failed", writer: {
+      outcome: "failed", protocolFailure: "invalid_native_event_stream", rawOutputPolicy: "not_retained",
+    } });
+  });
+
   it("gives OpenCode only the bounded writer packet and keeps the primary checkout clean", async () => {
     const fixture = await projectFixture();
     process.env.ZENTRA_WRITER_SECRET = "must-not-leak";
@@ -45,7 +70,7 @@ describe("WriterWorktreeCapsule", () => {
       if (process.env.ZENTRA_WRITER_SECRET) process.exit(91);
       if (args.slice(0, 9).join("|") !== "--pure|run|--format|json|--model|provider/model|--agent|zentra-writer|--dir") process.exit(92);
       const packet = JSON.parse(args[10]);
-      process.stdout.write(JSON.stringify({ packet }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "step_start", packet }) + "\\n");
       writeFileSync(path.join(args[9], "src/greeting.ts"), "export const greeting = 'hello from OpenCode';\\n");
       process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     `);
@@ -137,6 +162,7 @@ describe("WriterWorktreeCapsule", () => {
       import path from "node:path";
       const args = process.argv.slice(2);
       writeFileSync(path.join(args[9], "README.md"), "unauthorized\\n");
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     `);
 
     const result = await capsule().run({
@@ -167,6 +193,7 @@ describe("WriterWorktreeCapsule", () => {
       const args = process.argv.slice(2);
       mkdirSync(path.join(args[9], "cache"));
       writeFileSync(path.join(args[9], "cache/result.json"), "{}\\n");
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     `);
 
     const result = await capsule().run({
@@ -234,6 +261,7 @@ describe("WriterWorktreeCapsule", () => {
       writeFileSync(path.join(workspace, "README.md"), "committed unauthorized change\\n");
       execFileSync("git", ["add", "--", "README.md"], { cwd: workspace });
       execFileSync("git", ["commit", "-m", "unauthorized"], { cwd: workspace });
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     `);
 
     const result = await capsule().run({
@@ -293,6 +321,7 @@ describe("WriterWorktreeCapsule", () => {
       const workspace = args[9];
       execFileSync("git", ["checkout", "--detach"], { cwd: workspace });
       writeFileSync(path.join(workspace, "src/greeting.ts"), "detached change\\n");
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     `);
 
     const result = await capsule().run({

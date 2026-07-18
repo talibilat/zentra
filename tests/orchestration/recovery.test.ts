@@ -950,6 +950,32 @@ describe("RecoveryService", () => {
     });
   });
 
+  it.each([
+    ["before reviewer dispatch", false, "resume_preparation", /review has not been recorded/i],
+    ["after reviewer dispatch intent", true, "await_reconciliation", /dispatch intent.*reconcile/i],
+  ] as const)("classifies restart %s without retrying the writer", async (_name, dispatched, action, reason) => {
+    const testFixture = await fixture();
+    const { tasks, recovery } = openSystem(testFixture);
+    createTask(tasks);
+    const lease = await leaseTask(testFixture, tasks);
+    tasks.append("task-9", "task.started", { workerId: "worker-1" }, null);
+    writeFileSync(path.join(lease.path, "greeting.txt"), "changed\n", "utf8");
+    const { diff } = await testFixture.worktrees.inspect(lease);
+    const diffSha256 = sha256(diff);
+    tasks.append("task-9", "task.validation_started", {
+      patch: { type: "artifact.ready", path: "greeting.txt", sha256: sha256("changed\n") }, diffSha256,
+    }, null);
+    const validation = completedValidation(testFixture.project.validations.focused, "focused", {
+      invocationId: "focused-review-recovery", canonicalCwd: realpathSync(lease.path), subjectSha256: diffSha256,
+    });
+    tasks.append("task-9", "task.review_requested", { reviewerId: "reviewer-1", validation }, null);
+    if (dispatched) tasks.append("task-9", "task.review_dispatch_intent", {
+      schemaVersion: 1, reviewerId: "reviewer-1", diffSha256,
+      validationSha256: canonicalValidationDigest(validation), dispatchId: "00000000-0000-4000-8000-000000000001",
+    }, null);
+    await expect(recovery.inspect("task-9")).resolves.toMatchObject({ action, reason: expect.stringMatching(reason) });
+  });
+
   it("never retries a merge with an uncertain result", async () => {
     const testFixture = await fixture();
     const first = openSystem(testFixture);

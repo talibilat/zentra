@@ -17,6 +17,7 @@ import {
 } from "../contracts/uncertain-effect.js";
 import type { StopAndAskState } from "../contracts/milestone.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
+import { OpenCodeWriterEventChainSchema } from "../agents/opencode-writer-events.js";
 
 export interface TaskView {
   readonly taskId: string;
@@ -78,6 +79,7 @@ const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
     "task.denied",
   ],
   awaiting_review: [
+    "task.review_dispatch_intent",
     "task.review_approved",
     "task.denied",
     "task.cancelled",
@@ -117,6 +119,7 @@ const EVENT_TO_LIFECYCLE: Record<string, TaskLifecycleState | TerminalOutcome> =
   "task.validation_started": "validating",
   "task.validation_completed": "validating",
   "task.review_requested": "awaiting_review",
+  "task.review_dispatch_intent": "awaiting_review",
   "task.review_approved": "integration_ready",
   "task.review_policy_blocked": "integration_ready",
   "task.commit_observed": "integration_ready",
@@ -271,6 +274,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       event.type === "task.cleanup_observed" ||
       event.type === "task.cleanup_reconciled" ||
       event.type === "task.review_policy_blocked" ||
+      event.type === "task.review_dispatch_intent" ||
       event.type === "task.writer_completed" ||
       event.type === "task.validation_completed" ||
       event.type === "task.completed"
@@ -282,6 +286,25 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
 
     if (event.type === "task.writer_completed") {
+      const payload = event.payload as Readonly<Record<string, unknown>>;
+      if (payload["writerEvidenceVersion"] === 2) {
+        const chain = OpenCodeWriterEventChainSchema.parse(payload["eventChain"]);
+        if (payload["stdoutSha256"] !== chain.stdoutSha256 || payload["rawOutputPolicy"] !== "not_retained") {
+          throw new Error("writer event chain does not match retained output policy");
+        }
+        if (payload["outcome"] === "completed" &&
+          (chain.events.length === 0 || payload["protocolFailure"] !== null)) {
+          throw new Error("successful writer lacks a complete supported native event chain");
+        }
+        const denied = Array.isArray(payload["deniedToolRequests"]) ? payload["deniedToolRequests"] : [];
+        for (const raw of denied) {
+          const claim = raw as Readonly<Record<string, unknown>>;
+          if (!chain.events.some((native) => native.tool === claim["tool"] && native.pathSha256 === claim["pathSha256"] &&
+            (native.status === "denied" || native.type === "permission.denied" || native.type === "tool.denied"))) {
+            throw new Error("writer tool claim lacks a matching native event");
+          }
+        }
+      }
       writerCompletedOutcome = requirePayloadOutcome(event);
     } else if (event.type === "task.validation_completed") {
       validationCompletedOutcome = requirePayloadOutcome(event);

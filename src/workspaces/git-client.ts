@@ -10,6 +10,7 @@ const MAX_CAPTURED_BYTES_PER_STREAM = MAX_RETAINED_ARTIFACT_BYTES;
 
 export interface CommandResult {
   readonly stdout: string;
+  readonly stdoutBytes?: Buffer;
   readonly stderr: string;
   readonly exitCode: number;
   /** True when captured output exceeded the per-stream limit and was cut off. */
@@ -74,7 +75,11 @@ class BoundedCollector {
   }
 
   toString(): string {
-    return Buffer.concat(this.chunks).toString("utf8");
+    return this.toBuffer().toString("utf8");
+  }
+
+  toBuffer(): Buffer {
+    return Buffer.concat(this.chunks);
   }
 }
 
@@ -88,6 +93,7 @@ export class GitClient {
       if (options.signal?.aborted) {
         resolve({
           stdout: "",
+          stdoutBytes: Buffer.alloc(0),
           stderr: "Git execution cancelled before start",
           exitCode: -1,
           truncated: false,
@@ -153,6 +159,7 @@ export class GitClient {
         cleanup();
         resolve({
           stdout: stdout.toString(),
+          stdoutBytes: stdout.toBuffer(),
           stderr: stderr.toString(),
           exitCode: termination === null ? (code ?? -1) : -1,
           truncated: stdout.truncated || stderr.truncated,

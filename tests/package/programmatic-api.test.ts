@@ -31,7 +31,6 @@ describe("package-root programmatic API", () => {
     expect(SqliteEventJournal).toBeTypeOf("function");
     expect(LocalReleaseCoordinator).toBeTypeOf("function");
     expect("InstalledMilestoneRunner" in packageApi).toBe(false);
-    expect("OpenRouterModelBroker" in packageApi).toBe(false);
     expect("AzureOpenAIModelBroker" in packageApi).toBe(false);
     expect("azureOpenAIModelBrokerForTest" in packageApi).toBe(false);
     expect("nodeAzureOpenAITransportForTest" in packageApi).toBe(false);
