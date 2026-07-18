@@ -6,6 +6,7 @@ import { parseRoutingEventPayload } from "../routing/routing-events.js";
 import { MilestoneAuthorityEnvelopePayloadSchema, PlanRevisionPayloadSchema, ReplanningPausedPayloadSchema, ReplanningPolicyBoundPayloadSchema, ReplanningResolutionPayloadSchema } from "../contracts/replanning.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { parseReleaseEventPayload, ReleaseMilestoneTaskCompletedPayloadSchema } from "../release/release-events.js";
+import { parseWorkerEventPayload } from "../workers/worker-lifecycle.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -81,6 +82,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
       ? parseRoutingEventPayload(event.type, event.payload)
+    : event.type.startsWith("worker.")
+      ? parseWorkerEventPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
       ? parseOpenCodeMilestonePayload(event.type, event.payload)
       : event.payload;
@@ -147,6 +150,7 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
   if (event.type.startsWith("milestone.task_")) {
@@ -159,12 +163,23 @@ function spanIdFor(event: StoredEvent): string {
 }
 
 function parentSpanIdFor(event: StoredEvent): string | null {
+  if (event.type.startsWith("worker.")) {
+    const parent = payloadString(event.payload, "parentWorkerId");
+    if (parent !== null) return `worker:${parent}`;
+    const context = payloadRecord(event.payload, "taskContext");
+    return payloadString(context, "kind") === "milestone"
+      ? `milestone:${payloadString(context, "milestoneId")!}:task:${payloadString(event.payload, "taskId")!}`
+      : `task:${payloadString(event.payload, "taskId")!}`;
+  }
   return event.type.startsWith("milestone.task_") && payloadString(event.payload, "taskId") !== null
     ? `milestone:${event.streamId}`
     : null;
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("worker.")) {
+    return { id: payloadString(event.payload, "workerId")!, role: payloadString(event.payload, "role")! };
+  }
   if (event.type.startsWith("release.")) return { id: "zentra-local-release-runner", role: "verifier" };
   if (event.type === "milestone.paused") {
     const paused = parseMilestonePausedPayload(event.payload);
@@ -253,6 +268,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type.startsWith("worker.")) return "worker";
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
   if (event.type === "milestone.release_operation_bound") return "release_preparation";
   if (event.type === "milestone.paused") {
@@ -291,6 +307,12 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (type === "worker.bound") return "waiting";
+  if (type === "worker.started" || type === "worker.observed") return "running";
+  if (type === "worker.cleanup_observed") {
+    return payloadString(event.payload, "outcome") === "completed" ? "completed" : "waiting";
+  }
+  if (type === "worker.terminal") return payloadString(event.payload, "outcome") ?? "failed";
   if (type === "release.step_started" || type === "release.worktree_intent") return "running";
   if (type === "release.step_observed") return payloadString(event.payload, "outcome") ?? "failed";
   if (type === "release.failed") return "failed";

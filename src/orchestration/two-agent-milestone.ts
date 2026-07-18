@@ -90,6 +90,7 @@ export class TwoAgentMilestoneCoordinator {
     const result = await this.execution.run({
       ...request.execution,
       correlationId: milestone.traceId,
+      parentMilestoneId: request.milestoneId,
       onReviewReady: async (handoff) => {
         if (handoff.taskStreamId !== writer.taskId) {
           throw new Error("validated change handoff contradicts the writer task");

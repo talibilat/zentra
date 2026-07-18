@@ -24,6 +24,8 @@ import {
 } from "./opencode-agent-events.js";
 import { createReadOnlyRepositoryView } from "./read-only-repository-view.js";
 import { openCodeResourceIdentity } from "./opencode-resource-identity.js";
+import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
+import { OpenCodeWorkerEventAdapter } from "./opencode-worker-event-adapter.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
@@ -79,6 +81,14 @@ export const OpenCodeReadOnlyCapsuleResultSchema = z.strictObject({
   evidence: z.array(EvidenceSchema).max(128),
   cleanup: z.enum(["completed", "uncertain"]),
   brokerTransport: z.enum(["completed", "uncertain"]),
+  usage: z.strictObject({
+    seconds: z.number().nonnegative().max(86_400),
+    inputTokens: z.number().int().nonnegative().max(2_000_000),
+    outputTokens: z.number().int().nonnegative().max(2_000_000),
+    costUsd: z.number().nonnegative().max(10_000),
+    toolCalls: z.number().int().nonnegative().max(100_000),
+    modelTurns: z.number().int().nonnegative().max(100_000).optional(),
+  }).optional(),
 }).superRefine((result, context) => {
   if (result.outcome === "completed" && (
     result.cleanup !== "completed" || result.brokerTransport !== "completed" ||
@@ -112,7 +122,9 @@ export interface OpenCodeReadOnlyCapsule {
 
 export type OpenCodeCapsuleObservation =
   | { readonly type: "resources_prepared"; readonly payload: Omit<z.infer<typeof OpenCodeResourcesPreparedPayloadSchema>, "taskId"> }
-  | { readonly type: "cleanup_observed"; readonly payload: Omit<z.infer<typeof OpenCodeCleanupObservedPayloadSchema>, "taskId"> };
+  | { readonly type: "cleanup_observed"; readonly payload: Omit<z.infer<typeof OpenCodeCleanupObservedPayloadSchema>, "taskId"> }
+  | { readonly type: "model_started"; readonly modelId: string }
+  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly toolCalls: number; readonly modelTurns: number } };
 
 export interface OpenCodeReadOnlyAgentRequest {
   readonly milestoneId: string;
@@ -170,6 +182,39 @@ export class OpenCodeReadOnlyAgent {
     });
     if (pending !== undefined) throw new Error("OpenCode resource intent requires reconciliation before execution");
     const identity = openCodeResourceIdentity(request.milestoneId, request.taskId, resourceEvents.length + 1);
+    const workerId = identity.capsuleId;
+    const workers = new WorkerLifecycleService(this.journal);
+    const workerEvents = new OpenCodeWorkerEventAdapter();
+    workers.bind({
+      schemaVersion: 1,
+      workerId,
+      taskId: request.taskId,
+      rootTaskId: request.taskId,
+      parentWorkerId: null,
+      harness: "opencode",
+      role: request.role,
+      model: { capabilityId: model.id, modelId: model.model },
+      envelope: capabilityEnvelope({
+        role: request.role,
+        authority: task.risk.authority,
+        capabilities: request.role === "reviewer" ? ["read_repository", "review_diff"] : ["read_repository"],
+        network: "model_provider_only",
+        secrets: "none",
+        effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" },
+        resources: { repository: "read_only", paths: [...task.ownedPaths], forbiddenPaths: [...task.forbiddenPaths] },
+      }),
+      taskContext: { kind: "milestone", milestoneId: request.milestoneId },
+      budget: {
+        budgetId: `${request.milestoneId}/${request.taskId}`,
+        ...request.budget,
+        maxToolCalls: 10_000,
+        maxModelTurns: 32,
+        maxActiveWorkers: 1,
+        maxConcurrentTools: 1,
+        maxConcurrentModelTurns: 1,
+      },
+      trace: { traceId: correlationId, correlationId },
+    });
     const intentPayload = OpenCodeResourceIntentPayloadSchema.parse({ taskId: request.taskId, ...identity });
     const currentEvents = this.journal.readStream(request.milestoneId);
     const currentMilestone = projectMilestone(currentEvents);
@@ -188,9 +233,16 @@ export class OpenCodeReadOnlyAgent {
       streamId: request.milestoneId, type: "milestone.agent_resource_intent", payload: intentPayload,
       causationId: null, correlationId,
     }]).at(-1)!.streamVersion;
-    const view = createReadOnlyRepositoryView(
-      repositoryPath, task.ownedPaths, task.forbiddenPaths, identity.repositoryViewPath,
-    );
+    let view: ReturnType<typeof createReadOnlyRepositoryView>;
+    try {
+      view = createReadOnlyRepositoryView(
+        repositoryPath, task.ownedPaths, task.forbiddenPaths, identity.repositoryViewPath,
+      );
+    } catch (error) {
+      workers.cleanup(request.taskId, workerId, "completed");
+      workers.terminate(request.taskId, workerId, "failed");
+      throw error;
+    }
     const packet = OpenCodeReadOnlyCapsuleRequestSchema.parse({
       capsuleId: identity.capsuleId,
       repositoryPath: view.path,
@@ -237,8 +289,14 @@ export class OpenCodeReadOnlyAgent {
         causationId: null,
         correlationId,
       }]).at(-1)!.streamVersion;
+      workers.start(request.taskId, workerId);
     } catch (error) {
       rmSync(view.path, { recursive: true, force: true });
+      const worker = workers.inspect(request.taskId).workers[workerId];
+      if (worker?.status === "bound") {
+        workers.cleanup(request.taskId, workerId, "completed");
+        workers.terminate(request.taskId, workerId, "failed");
+      }
       throw error;
     }
 
@@ -253,8 +311,23 @@ export class OpenCodeReadOnlyAgent {
           observationState.cleanup = observation;
           return;
         }
+        if (observation.type === "model_started") {
+          workers.observe(request.taskId, workerId, {
+            kind: "model", name: observation.modelId, phase: "started", outcome: null,
+            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 },
+          });
+          return;
+        }
+        if (observation.type === "model_completed") {
+          workers.observe(request.taskId, workerId, {
+            kind: "model", name: observation.modelId, phase: "completed",
+            outcome: observation.outcome, usage: observation.usage,
+          });
+          return;
+        }
         const type = "milestone.agent_resources_prepared";
         const payload = OpenCodeResourcesPreparedPayloadSchema.parse({ taskId: request.taskId, ...observation.payload });
+        workers.observe(request.taskId, workerId, workerEvents.resourceObservation("read_only_capsule", "completed"));
         version = this.journal.append(request.milestoneId, version, [{
           streamId: request.milestoneId, type, payload, causationId: null, correlationId,
         }]).at(-1)!.streamVersion;
@@ -342,6 +415,21 @@ export class OpenCodeReadOnlyAgent {
       cleanup: result.cleanup,
       brokerTransport: result.brokerTransport,
     });
+    workers.observe(request.taskId, workerId, workerEvents.processObservation("opencode", outcome));
+    const uncertainWorker = result.cleanup === "uncertain" || result.brokerTransport === "uncertain";
+    if (uncertainWorker) workers.uncertain(request.taskId, workerId, "OpenCode transport or cleanup is uncertain");
+    workers.cleanup(request.taskId, workerId, result.cleanup);
+    if (!uncertainWorker) workers.terminate(request.taskId, workerId, outcome);
+    if (uncertainWorker) {
+      const trace = traceOutcome(this.journal);
+      return Object.freeze({
+        ...result, outcome, trace: Object.freeze({ outcome: trace }),
+        execution: Object.freeze({
+          milestoneId: request.milestoneId, taskId: request.taskId, capsuleId: packet.capsuleId,
+          actorId: packet.actorId, capabilityId: packet.capabilityId, transportModelId: packet.transportModelId,
+        }),
+      });
+    }
     this.journal.append(request.milestoneId, version, [{
       streamId: request.milestoneId,
       type: "milestone.task_completed",

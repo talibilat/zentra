@@ -106,6 +106,10 @@ export class TaskService {
     return this.journal.readStream(taskId);
   }
 
+  eventJournal(): EventJournal {
+    return this.journal;
+  }
+
   pauseForUncertainEffect(
     taskId: string,
     payload: UncertainEffectPayload,

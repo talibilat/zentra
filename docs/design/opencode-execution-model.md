@@ -2,7 +2,7 @@
 
 Date: 2026-07-18
 
-Status: Discussion draft
+Status: Approved
 
 ## Decision
 
@@ -66,6 +66,78 @@ An internal subagent must not create a new worktree, expand file scope, obtain s
 
 Independent implementation, review, or conflicting ownership requires separate Zentra-managed OpenCode workers.
 
+## Worker Contract Decisions
+
+The durable kernel uses harness-neutral `worker.*` events rather than OpenCode-native event names.
+
+Every top-level worker and descendant for one root task shares one deterministic `worker-task:<rootTaskId>` stream.
+
+Optimistic concurrency on that stream serializes parent state, descendant binding, active-worker and activity reservations, usage, cleanup, uncertainty, and terminal transitions.
+
+The binding records worker identity, task identity, `parentWorkerId: null`, harness, role, model capability and transport identity, capability-envelope digest, shared budget identity and limits, and trace and correlation identity.
+
+The lifecycle is `worker.bound`, `worker.started`, zero or more `worker.observed` events, `worker.cleanup_observed`, and exactly one canonical `worker.terminal` outcome.
+
+Accepted terminal outcomes remain `completed`, `cancelled`, `denied`, `timed_out`, and `failed`.
+
+The event journal remains the source of truth, and the worker projection is rebuilt by replay after restart.
+
+Every append is validated against the complete durable projection before persistence.
+
+Internal OpenCode agents use the same lifecycle with a non-null parent worker identity.
+
+A nested agent must reference an existing nonterminal parent, stay in the same task and trace, use the same root task budget identity, and receive equal or lower limits.
+
+Worker envelopes use closed role, authority, capability, network, secret, effect, repository-resource, and logical-path schemas.
+
+Nested authorities and capabilities must be subsets of the parent's envelope, logical paths must be semantically contained by a parent scope, and inherited forbidden paths cannot be removed.
+
+Authority uses an explicit partial order rather than a privilege rank.
+
+Independent categories such as `review` and `workspace_write` are incomparable, and a child may normally retain its authority or narrow to `read_only` with a matching role and capability set.
+
+Network authority may remain equal or narrow from `model_provider_only` to `denied`.
+
+Repository authority may remain equal or narrow from `assigned_worktree` to `read_only` or `none`, or from `read_only` to `none`.
+
+Inherited assigned-worktree authority requires the exact parent path scope plus matching read, write, resource, and worktree-effect fields.
+
+Nested agents cannot independently receive worktree creation, path expansion, secret acquisition, integration, release, or external-effect capabilities.
+
+Tool and model observations are accepted only for measured activity with explicit start reservations and completion usage.
+
+Model turns, tool calls, input tokens, output tokens, cost, elapsed time, active workers, concurrent tools, and concurrent model turns are charged to the shared root task budget.
+
+Process and resource observations are separate from model and tool usage and never fabricate token, cost, turn, or call measurements.
+
+A terminal event is accepted only after cleanup evidence.
+
+Completed cleanup requires every tool and model reservation to have a measured completion and all activity counters to be zero.
+
+Uncertain cleanup retains unresolved reservations and worker uncertainty.
+
+Cleanup reconciliation does not authorize redispatch, and any retained worker identity blocks a second OpenCode execution until a future explicit effect-reconciliation contract authorizes it.
+
+Unknown parents, self-cycles, duplicate worker identities, authority expansion, budget overrun, unsupported delegation, missing observations, and post-terminal events fail closed.
+
+OpenCode parsing and translation are isolated in `OpenCodeWorkerEventAdapter`.
+
+Local inspection on 2026-07-18 confirmed installed OpenCode 1.18.3 documents `run --format json` and agent selection but no stable nested-agent lifecycle or parent, budget, usage, and terminal protocol.
+
+Production OpenCode configurations therefore keep the `task` tool denied.
+
+Any measured `task` or `subagent` tool event fails explicitly, and Zentra does not claim production OpenCode nested-agent support.
+
+The generic nested contract is exercised with harness-neutral fixtures until OpenCode provides a stable observable protocol.
+
+The existing planner, researcher, writer, and reviewer journals and APIs remain intact while their executions also emit generic worker streams.
+
+Agent Tail projects generic workers as actor-specific spans, with nested workers parented to the worker that delegated them.
+
+The typed `web_research` capability and declared-web-research network mode are reserved but rejected by current admission.
+
+Web research policy and Azure provider configuration remain deferred to separate tickets.
+
 ## Example Workflows
 
 ### Research
@@ -126,11 +198,10 @@ Potentially effectful uncertain operations must never be retried automatically.
 
 ## Open Decisions
 
-1. Define the exact observability contract for OpenCode internal subagents.
-2. Define default web-research destinations and escalation behavior.
-3. Define how Azure credentials and deployments are configured without reading OpenCode's private auth files.
-4. Define which roles use one shared Azure deployment and which use specialized models.
-5. Decide when evidence justifies building a native Zentra writer harness.
+1. Define default web-research destinations and escalation behavior.
+2. Define how Azure credentials and deployments are configured without reading OpenCode's private auth files.
+3. Define which roles use one shared Azure deployment and which use specialized models.
+4. Decide when evidence justifies building a native Zentra writer harness.
 
 ## Proposed Tickets
 

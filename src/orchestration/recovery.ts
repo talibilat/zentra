@@ -14,6 +14,7 @@ import {
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
 import type { EventJournal } from "../journal/journal.js";
+import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { ProjectRegistry } from "../projects/project-registry.js";
 import {
@@ -236,6 +237,25 @@ export class RecoveryService {
         "record_failure",
         `diagnostic only: task ${taskId} was not found in the journal; no event append is implied`,
       );
+    }
+    try {
+      const worker = projectWorkerLifecycle(this.journal.readStream(workerStreamId(taskId)));
+      const states = Object.values(worker.workers);
+      if (states.some((candidate) => candidate.status === "uncertain")) {
+        return decision(taskId, "await_reconciliation", "generic worker has an uncertain post-effect result; redispatch is forbidden");
+      }
+      if (states.some((candidate) => candidate.status === "running")) {
+        return decision(taskId, "await_reconciliation", "generic worker start has no durable terminal observation; redispatch is forbidden");
+      }
+      const terminalFailure = states.find((candidate) => candidate.status === "terminal" && candidate.terminalOutcome !== "completed");
+      if (terminalFailure !== undefined) {
+        return decision(taskId, "record_failure", `generic worker ended with ${terminalFailure.terminalOutcome}`);
+      }
+      if (states.some((candidate) => candidate.status === "bound" || candidate.status === "cleaned")) {
+        return decision(taskId, "record_failure", "generic worker did not start or terminalize and is safe to fail without redispatch");
+      }
+    } catch (error) {
+      return decision(taskId, "record_failure", `generic worker event chain is invalid: ${errorMessage(error)}`);
     }
 
     const hasUncertainEffect = events.some((event) =>

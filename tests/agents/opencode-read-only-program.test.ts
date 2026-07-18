@@ -66,14 +66,14 @@ describe("OpenCodeReadOnlyProgram", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(brokerExecute).not.toHaveBeenCalled();
     expect(journal.readStream("milestone-model-boundary").map((event) => event.type)).toEqual([
-      "milestone.created", "milestone.plan_created", "milestone.paused",
+      "milestone.created", "milestone.plan_created",
     ]);
     sink.close();
     journal.close();
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("durably pauses a disallowed canonical repository before capsule or broker effects", async () => {
+  it("purely rejects a disallowed canonical repository before journal, capsule, or broker effects", async () => {
     const allowed = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-allowed-")));
     const requested = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-disallowed-")));
     mkdirSync(path.join(requested, "src"));
@@ -110,7 +110,7 @@ describe("OpenCodeReadOnlyProgram", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(brokerExecute).not.toHaveBeenCalled();
     expect(journal.readStream("milestone-repository").map((event) => event.type)).toEqual([
-      "milestone.created", "milestone.plan_created", "milestone.paused",
+      "milestone.created", "milestone.plan_created",
     ]);
     sink.close();
     journal.close();
@@ -118,8 +118,8 @@ describe("OpenCodeReadOnlyProgram", () => {
     rmSync(requested, { recursive: true, force: true });
   });
 
-  it.each([[false, "emitted"], [true, "failed"]] as const)(
-    "durably pauses before every agent effect when the trace sink is closed=%s",
+  it.each([[false, "emitted"], [true, "emitted"]] as const)(
+    "purely rejects before every agent effect when the trace sink is closed=%s",
     async (sinkClosed, traceOutcome) => {
       const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-boundary-")));
       mkdirSync(path.join(root, "src"));
@@ -166,12 +166,11 @@ describe("OpenCodeReadOnlyProgram", () => {
       expect(execute).not.toHaveBeenCalled();
       expect(brokerExecute).not.toHaveBeenCalled();
       expect(journal.readStream("milestone-boundary").map((event) => event.type)).toEqual([
-        "milestone.created", "milestone.plan_created", "milestone.task_ready", "milestone.paused",
+        "milestone.created", "milestone.plan_created", "milestone.task_ready",
       ]);
       if (!sinkClosed) {
         sink.close();
-        const tail = JSON.parse((await import("node:fs")).readFileSync(path.join(root, "boundary.jsonl"), "utf8"));
-        expect(tail).toMatchObject({ kind: "milestone.paused", operation: { name: "authority_boundary", status: "waiting" } });
+        expect((await import("node:fs")).readFileSync(path.join(root, "boundary.jsonl"), "utf8")).toBe("");
       }
       journal.close();
       rmSync(root, { recursive: true, force: true });
@@ -332,15 +331,69 @@ describe("OpenCodeReadOnlyProgram", () => {
     const firstIntent = journal.readStream("milestone-reconcile").at(-1)!;
     expect(firstIntent.type).toBe("milestone.agent_resource_intent");
     expect(await program.reconcile({ milestoneId: "milestone-reconcile", taskId: "task-reconcile" })).toEqual({ outcome: "uncertain", trace: "emitted" });
-    await expect(program.run(runRequest)).rejects.toThrow("requires reconciliation");
+    await expect(program.run(runRequest)).rejects.toThrow("retained durable worker state");
     expect(await program.reconcile({ milestoneId: "milestone-reconcile", taskId: "task-reconcile" })).toEqual({ outcome: "completed", trace: "emitted" });
     expect(journal.readStream("milestone-reconcile").at(-1)?.type).toBe("milestone.agent_cleanup_observed");
-    await expect(program.run(runRequest)).rejects.toThrow("does not exist");
-    expect(journal.readStream("milestone-reconcile").at(-1)?.type).toBe("milestone.agent_resource_intent");
+    await expect(program.run(runRequest)).rejects.toThrow("retained durable worker state");
+    expect(journal.readStream("milestone-reconcile").at(-1)?.type).toBe("milestone.agent_cleanup_observed");
     expect(reconciliations).toBe(2);
 
     sink.close();
     journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("never redispatches an uncertain worker after cleanup reconciliation, including after restart", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-uncertain-restart-")));
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(path.join(root, "src/context.ts"), "context\n");
+    const database = path.join(root, "events.sqlite");
+    const journal = new SqliteEventJournal(database);
+    new MilestoneRegistry(journal).register({
+      milestoneId: "milestone-uncertain", projectId: "zentra", title: "Uncertain", correlationId: "trace-uncertain",
+      plan: { milestoneId: "milestone-uncertain", projectId: "zentra", goal: "Research", tasks: [{
+        taskId: "task-uncertain", title: "Research", description: "Research.", dependencies: [], ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Evidence."],
+        roleAssignment: { role: "researcher", agentId: "approved-researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      }] },
+    });
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const execute = vi.fn(async (request, _broker, _signal, observe) => {
+      observe?.({ type: "resources_prepared", payload: {
+        capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: "b".repeat(64),
+        imageName: request.resources.imageName, imageId: `sha256:${"c".repeat(64)}`,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+      } });
+      observe?.({ type: "cleanup_observed", payload: {
+        capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: "b".repeat(64),
+        imageName: request.resources.imageName, imageId: `sha256:${"c".repeat(64)}`,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "uncertain", containerAbsent: false, imageAbsent: false, repositoryViewAbsent: false,
+      } });
+      return { outcome: "failed" as const, openCode: null, model: null, evidence: [], cleanup: "uncertain" as const, brokerTransport: "uncertain" as const };
+    });
+    const capsule = {
+      execute,
+      reconcile: async () => ({ outcome: "completed" as const, containerId: "b".repeat(64), imageId: `sha256:${"c".repeat(64)}`, containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true }),
+    };
+    const models = { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+    const request = { milestoneId: "milestone-uncertain", taskId: "task-uncertain", repositoryPath: root, role: "researcher" as const, rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 1_000, signal: new AbortController().signal };
+    const first = new OpenCodeReadOnlyProgram(journal, sink, { execute: vi.fn() }, models, { ...security, allowedRepositories: [root] }, capsule);
+    await expect(first.run(request)).resolves.toMatchObject({ status: "executed", outcome: "failed" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    await expect(first.reconcile({ milestoneId: "milestone-uncertain", taskId: "task-uncertain" })).resolves.toMatchObject({ outcome: "completed" });
+    await expect(first.run(request)).rejects.toThrow("retained durable worker state");
+    journal.close();
+
+    const restartedJournal = new SqliteEventJournal(database);
+    const restarted = new OpenCodeReadOnlyProgram(restartedJournal, sink, { execute: vi.fn() }, models, { ...security, allowedRepositories: [root] }, capsule);
+    await expect(restarted.run(request)).rejects.toThrow("retained durable worker state");
+    expect(execute).toHaveBeenCalledTimes(1);
+    sink.close();
+    restartedJournal.close();
     rmSync(root, { recursive: true, force: true });
   });
 });

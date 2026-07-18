@@ -370,6 +370,19 @@ export class MilestoneRegistry {
     throw new Error("task admission did not converge");
   }
 
+  previewTaskAdmission(
+    milestoneId: string,
+    taskId: string,
+    security: SecuritySheet,
+    context: OpenCodeTaskAdmissionContext,
+    modelSheet?: ModelSheet,
+  ): TaskAdmissionResult {
+    const events = this.journal.readStream(milestoneId);
+    if (events.length === 0) throw new Error(`milestone ${milestoneId} does not exist`);
+    const preview = new PreviewEventJournal(events);
+    return new MilestoneRegistry(preview).admitTask(milestoneId, taskId, security, context, modelSheet);
+  }
+
   replacePlan(input: ReplaceMilestonePlanInput): MilestoneRecord {
     const events = this.journal.readStream(input.milestoneId);
     const view = projectMilestone(events);
@@ -1003,6 +1016,36 @@ function canonicalDirectory(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   if (!statSync(canonical).isDirectory()) throw new Error("admission repository must be a directory");
   return canonical;
+}
+
+class PreviewEventJournal implements EventJournal {
+  private events: StoredEvent[];
+
+  constructor(events: readonly StoredEvent[]) {
+    this.events = [...events];
+  }
+
+  append(streamId: string, expectedVersion: number, events: readonly NewEvent<string, unknown>[]): readonly StoredEvent[] {
+    const stream = this.readStream(streamId);
+    if (stream.length !== expectedVersion) throw new Error(`expected version ${expectedVersion}, actual ${stream.length}`);
+    const stored = events.map((event, index): StoredEvent => ({
+      ...event,
+      eventId: `preview-${this.events.length + index + 1}`,
+      streamVersion: expectedVersion + index + 1,
+      globalPosition: this.events.length + index + 1,
+      recordedAt: "2000-01-01T00:00:00.000Z",
+    }));
+    this.events.push(...stored);
+    return stored;
+  }
+
+  readStream(streamId: string, afterVersion = 0): readonly StoredEvent[] {
+    return this.events.filter((event) => event.streamId === streamId && event.streamVersion > afterVersion);
+  }
+
+  readAll(afterPosition = 0): readonly StoredEvent[] {
+    return this.events.filter((event) => event.globalPosition > afterPosition);
+  }
 }
 
 function candidateStoredEvent(event: NewEvent<string, unknown>, streamVersion: number): StoredEvent {

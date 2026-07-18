@@ -207,6 +207,7 @@ export class MultiWriterOwnershipScheduler {
         const executionRequest = authorizeScheduledTracerRequest({
           ...scheduled.execution,
           correlationId: milestone.traceId,
+          parentMilestoneId: milestone.milestoneId,
           onReviewReady: async (handoff: ValidatedChangeHandoff) => {
             if (handoff.taskStreamId !== writer.taskId) throw new Error("validated handoff contradicts its writer claim");
             this.milestones.completeTask(request.milestoneId, writer.taskId, "completed", { ...handoff });
