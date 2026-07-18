@@ -28,6 +28,8 @@ import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
+import { RoleCapabilityEnvelopeService, buildRoleCapabilityBinding, roleToolPermissions } from "../../src/workers/role-capability-envelope.js";
+import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../../src/contracts/capability-boundary.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -959,6 +961,39 @@ describe("Zentra CLI", () => {
         },
       },
     });
+  });
+
+  it("reports durable capability attention status without inventing a terminal outcome", async () => {
+    const testFixture = await fixture();
+    const journal = new SqliteEventJournal(testFixture.databasePath);
+    const tasks = new TaskService(journal);
+    tasks.create({ taskId: "task-capability-attention", projectId: "fixture-project", title: "Pause safely", correlationId: "trace-capability" });
+    const binding = buildRoleCapabilityBinding({
+      milestoneId: "milestone-capability-attention", taskId: "task-capability-attention", projectId: "fixture-project", correlationId: "trace-capability",
+      role: "implementer", actorId: "writer", repository: testFixture.repositoryPath,
+      planDigest: "a".repeat(64), securityDigest: "b".repeat(64), admissionDigest: "c".repeat(64),
+      model: { capabilityId: "writer", transportModelId: "provider/model", digest: "d".repeat(64), harness: "opencode", roles: ["implementer"], toolPermissions: roleToolPermissions("implementer"), network: "denied" },
+      budget: { maxSeconds: 10 }, configuredReadPaths: ["**"], ownedPaths: ["auth.ts"], forbiddenPaths: [".env"],
+    });
+    const policy = new RoleCapabilityEnvelopeService(journal);
+    policy.accept(binding);
+    const decision = policy.evaluate(binding, { kind: "external_effect" });
+    const occurrence = createCapabilityBoundaryOccurrence({ binding, decision,
+      evaluationEvent: policy.evaluationEvent(binding, decision.decisionId), phase: "pre_effect",
+      taskHead: capabilityTaskHead(tasks.readStream(binding.taskId)) });
+    const source = journal.append(binding.milestoneId, 0, [
+      { streamId: binding.milestoneId, type: "milestone.created", payload: { projectId: binding.projectId, title: "Capability authority" }, causationId: null, correlationId: binding.correlationId },
+      { streamId: binding.milestoneId, type: "milestone.capability_boundary_paused", payload: { occurrence, evidence: null }, causationId: null, correlationId: binding.correlationId },
+    ])[1]!;
+    tasks.pauseForCapabilityBoundary(binding.taskId, { occurrence, evidence: null }, source.eventId);
+    journal.close();
+
+    const status = await invoke(["task", "status", "--database", testFixture.databasePath, "--task-id", binding.taskId]);
+    expect(status).toMatchObject({ code: 0, json: { command: "task.status", task: {
+      paused: true, terminalOutcome: null,
+      capabilityBoundary: { status: "attention", reason: "forbidden_effect", phase: "pre_effect" },
+    } } });
+    expect(JSON.stringify(status.json)).not.toContain('"terminalOutcome":"denied"');
   });
 
   it("denies an adversarial diff that passes focused validation without committing it", async () => {

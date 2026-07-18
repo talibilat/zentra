@@ -12,6 +12,7 @@ import {
   type OpenCodeTaskAdmissionContext,
 } from "../contracts/authority-attention.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
+import { roleModelSupports } from "../workers/role-capability-envelope.js";
 
 export type PlanReadinessStatus = "executable" | "blocked" | "requires_approval";
 
@@ -140,12 +141,10 @@ function assessAuthority(
   ) {
     return stopped(packet, "undeclared_network", "hard_stop", security);
   }
-  const expectedTools = packet.role === "reviewer"
-    ? ["read_repository", "review_diff"]
-    : packet.role === "implementer"
-      ? ["read_repository", "write_worktree"]
-      : ["read_repository"];
-  if (!sameCanonicalSet(context.toolPermissions, expectedTools)) {
+  if (packet.role === "validator" || packet.role === "integrator" || packet.role === "verifier") {
+    return stopped(packet, "plan_not_ready", "hard_stop", security);
+  }
+  if (!roleModelSupports(packet.role, context)) {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }
   if (context.requestedBudget.maxInputTokens + context.requestedBudget.maxOutputTokens > context.contextTokens) {

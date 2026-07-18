@@ -80,7 +80,8 @@ const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") { writeFileSync(${JSON.stringify(probeObservation)}, JSON.stringify({ home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null })); process.stdout.write("fixture-opencode 1\\n"); process.exit(0); }
 const workspace = args[9];
 const packet = JSON.parse(args[10]);
-writeFileSync(${JSON.stringify(writerObservation)}, JSON.stringify({ brief: packet.brief, home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null }));
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+writeFileSync(${JSON.stringify(writerObservation)}, JSON.stringify({ brief: packet.brief, home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null, packet, permission: config.agent["zentra-writer"].permission }));
 const target = path.join(workspace, packet.ownedPaths[0]);
 writeFileSync(target, readFileSync(target, "utf8").replace("hello", "hello installed"));
 process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
@@ -165,6 +166,15 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       validations: { focused: [process.execPath, "--test", "test/greeting.test.mjs"], full: [process.execPath, "--test"] },
     });
     const runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
+    const extraToolModels = { models: models.models.map((candidate) => candidate.id === "planner"
+      ? { ...candidate, toolPermissions: [...candidate.toolPermissions, "review_diff"] }
+      : candidate) };
+    await expect(runner.run({
+      milestoneId: "installed-extra-tool", goal: "Reject extra tools", file: "src/greeting.mjs", tracePath: trace,
+      project, models: extraToolModels, security, openCodeExecutable: executable, openCodeHome,
+      signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow("installed milestone requires exactly one approved planner capability");
+    expect(sqlite.readStream("installed-extra-tool")).toEqual([]);
 
     process.env.ZENTRA_AMBIENT_SECRET = "must-not-reach-writer";
     let result;
@@ -185,6 +195,17 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       brief: expect.stringContaining("Update the exact greeting"),
       home: openCodeHome,
       ambient: null,
+      packet: expect.objectContaining({
+        readPaths: ["src/**"], writePaths: ["src/greeting.mjs"],
+        toolPermissions: ["read_repository", "write_worktree"],
+        capabilityEnvelopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      permission: expect.objectContaining({
+        read: { "*": "deny", "src/**": "allow" },
+        glob: { "*": "deny", "src/**": "allow" },
+        grep: { "*": "deny", "src/**": "allow" },
+        edit: { "*": "deny", "src/greeting.mjs": "allow" }, bash: "deny", webfetch: "deny",
+      }),
     });
     expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });
     const failed = await new InstalledMilestoneRunner({

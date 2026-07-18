@@ -28,6 +28,7 @@ import {
   authorizeScheduledTracerRequest,
 } from "./opencode-single-file-tracer-bullet.js";
 import { WriterWorktreeCapsule } from "./writer-worktree-capsule.js";
+import { roleModelSupports } from "../workers/role-capability-envelope.js";
 
 export interface InstalledMilestonePlanInput {
   readonly milestoneId: string;
@@ -127,9 +128,9 @@ export class InstalledMilestoneRunner {
       request.security.forbiddenPaths.some((scope) => scopesOverlap(scope, request.file))) {
       throw new Error("installed milestone file is outside explicit security authority");
     }
-    const planner = exactRole(request.models, "planner", ["read_repository"]);
-    const implementer = exactRole(request.models, "implementer", ["read_repository", "write_worktree"]);
-    const reviewer = exactRole(request.models, "reviewer", ["read_repository", "review_diff"]);
+    const planner = exactRole(request.models, "planner");
+    const implementer = exactRole(request.models, "implementer");
+    const reviewer = exactRole(request.models, "reviewer");
     if (implementer.id === reviewer.id) throw new Error("installed milestone reviewer must be independent");
     const plan = createInstalledMilestonePlan({
       milestoneId: request.milestoneId,
@@ -267,9 +268,8 @@ export class InstalledMilestoneRunner {
   }
 }
 
-function exactRole(models: ModelSheet, role: "planner" | "implementer" | "reviewer", tools: readonly string[]): ModelCapability {
-  const matches = models.models.filter((model) => model.harness === "opencode" && model.roles.includes(role) &&
-    model.network === "denied" && tools.every((tool) => model.toolPermissions.includes(tool)));
+function exactRole(models: ModelSheet, role: "planner" | "implementer" | "reviewer"): ModelCapability {
+  const matches = models.models.filter((model) => roleModelSupports(role, model));
   if (matches.length !== 1) throw new Error(`installed milestone requires exactly one approved ${role} capability`);
   return matches[0]!;
 }

@@ -252,7 +252,8 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
 
   it("runs an OpenCode reviewer with review authority inside the read-only capsule boundary", async () => {
     const journal = new SqliteEventJournal(":memory:");
-    const admission = readyMilestone(journal, "milestone-reviewer", "reviewer");
+    const security = admissionSecurity(process.cwd(), ["docs/**", "src/**"]);
+    const admission = readyMilestone(journal, "milestone-reviewer", "reviewer", 1_000, security.allowedFileScopes);
     const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
       expect(request.role).toBe("reviewer");
       expect(request).not.toHaveProperty("worktree");
@@ -261,6 +262,8 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         credentials: "none",
         shell: "none",
       });
+      expect(request.securityBoundary.readableScopes).toEqual(["src/**"]);
+      expect(existsSync(path.join(request.repositoryPath, "docs"))).toBe(false);
       observe?.({ type: "cleanup_observed", payload: {
         capsuleId: request.capsuleId,
         resourceLabel: request.resources.resourceLabel,
@@ -290,6 +293,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       { execute },
       { execute: vi.fn() },
       modelSheet("reviewer"),
+      security,
     ).run({
       milestoneId: "milestone-reviewer",
       taskId: "task-1",
@@ -300,6 +304,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       timeoutMs: 1_000,
       signal: new AbortController().signal,
       admission,
+      reviewEvidence: { workerId: "writer-1", diffSha256: "a".repeat(64), validationSha256: "b".repeat(64) },
     });
 
     expect(result.outcome).toBe("completed");
@@ -507,6 +512,7 @@ function readyMilestone(
   milestoneId: string,
   roleOrRepository: "researcher" | "reviewer" | string = "researcher",
   timeoutMs = 1_000,
+  scopes: readonly string[] = ["src/**"],
 ) {
   const role = roleOrRepository === "researcher" || roleOrRepository === "reviewer"
     ? roleOrRepository
@@ -542,7 +548,7 @@ function readyMilestone(
   const result = new MilestoneRegistry(journal).admitTask(
     milestoneId,
     "task-1",
-    admissionSecurity(repositoryPath, ["src/**"]),
+    admissionSecurity(repositoryPath, scopes),
     admissionContext(repositoryPath, role === "reviewer" ? "opencode-reviewer" : "opencode-researcher", role, {
       maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs,
     }),

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, realpathSync, rmSync, statSync } from "node:fs";
 
 import { z } from "zod";
 
@@ -15,6 +15,7 @@ import type { EventJournal } from "../journal/journal.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
 import type { ModelBroker } from "../capsule/model-broker.js";
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
+import type { SecuritySheet } from "../policy/security-sheet.js";
 import {
   OpenCodeMilestoneCompletedPayloadSchema,
   OpenCodeMilestoneRunningPayloadSchema,
@@ -26,6 +27,12 @@ import { createReadOnlyRepositoryView } from "./read-only-repository-view.js";
 import { openCodeResourceIdentity } from "./opencode-resource-identity.js";
 import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
 import { OpenCodeWorkerEventAdapter } from "./opencode-worker-event-adapter.js";
+import {
+  RoleCapabilityEnvelopeService,
+  buildRoleCapabilityBinding,
+  roleModelSupports,
+  type RoleCapabilityBinding,
+} from "../workers/role-capability-envelope.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
@@ -139,6 +146,11 @@ export interface OpenCodeReadOnlyAgentRequest {
     readonly packet: OpenCodeAdmissionPacket;
     readonly digest: string;
   };
+  readonly reviewEvidence?: {
+    readonly workerId: string;
+    readonly diffSha256: string;
+    readonly validationSha256: string;
+  };
 }
 
 export class OpenCodeReadOnlyAgent {
@@ -147,6 +159,7 @@ export class OpenCodeReadOnlyAgent {
     private readonly capsule: OpenCodeReadOnlyCapsule,
     private readonly broker: ModelBroker,
     private readonly models: ModelSheet,
+    private readonly security?: SecuritySheet,
   ) {}
 
   async run(request: OpenCodeReadOnlyAgentRequest): Promise<OpenCodeReadOnlyAgentResult> {
@@ -170,6 +183,36 @@ export class OpenCodeReadOnlyAgent {
     assertBudget(request, task.budget);
     const repositoryPath = canonicalDirectory(request.repositoryPath);
     const correlationId = events[0]!.correlationId;
+    let roleBinding: RoleCapabilityBinding | null = null;
+    if (this.security !== undefined) {
+      roleBinding = buildRoleCapabilityBinding({
+        milestoneId: request.milestoneId,
+        taskId: request.taskId,
+        projectId: milestone.projectId,
+        correlationId,
+        role: request.role,
+        actorId: task.roleAssignment.agentId,
+        repository: repositoryPath,
+        planDigest: digestCanonical(milestone.plan),
+        securityDigest: digestCanonical(this.security),
+        model: {
+          capabilityId: model.id,
+          transportModelId: model.model,
+          digest: digestCanonical(model),
+          harness: model.harness,
+          roles: model.roles,
+          toolPermissions: model.toolPermissions,
+          network: model.network,
+        },
+        budget: { ...request.budget, timeoutMs: request.timeoutMs },
+        admissionDigest: request.admission.digest,
+        configuredReadPaths: request.role === "reviewer" ? task.ownedPaths : this.security.allowedFileScopes,
+        ownedPaths: task.ownedPaths,
+        forbiddenPaths: [...new Set([...task.forbiddenPaths, ...this.security.forbiddenPaths])],
+        ...(request.reviewEvidence === undefined ? {} : { review: request.reviewEvidence }),
+      });
+      new RoleCapabilityEnvelopeService(this.journal).accept(roleBinding);
+    }
     let version = events.at(-1)!.streamVersion;
     const resourceEvents = events.filter((event) => event.type === "milestone.agent_resource_intent" &&
       objectString(event.payload, "taskId") === request.taskId);
@@ -194,7 +237,7 @@ export class OpenCodeReadOnlyAgent {
       harness: "opencode",
       role: request.role,
       model: { capabilityId: model.id, modelId: model.model },
-      envelope: capabilityEnvelope({
+      envelope: roleBinding?.envelope ?? capabilityEnvelope({
         role: request.role,
         authority: task.risk.authority,
         capabilities: request.role === "reviewer" ? ["read_repository", "review_diff"] : ["read_repository"],
@@ -233,10 +276,29 @@ export class OpenCodeReadOnlyAgent {
       streamId: request.milestoneId, type: "milestone.agent_resource_intent", payload: intentPayload,
       causationId: null, correlationId,
     }]).at(-1)!.streamVersion;
+    if (roleBinding !== null) {
+      const rolePolicy = new RoleCapabilityEnvelopeService(this.journal);
+      rolePolicy.verify(roleBinding, {
+        planDigest: digestCanonical(currentMilestone.plan),
+        securityDigest: digestCanonical(this.security!),
+        modelDigest: digestCanonical(model),
+        repositoryDigest: digestCanonical(repositoryPath),
+        ownershipDigest: roleBinding.ownershipDigest,
+        budgetDigest: digestCanonical({ ...request.budget, timeoutMs: request.timeoutMs }),
+        admissionDigest: request.admission.digest,
+      });
+      if (request.role === "reviewer" && request.reviewEvidence !== undefined) {
+        const decision = rolePolicy.evaluate(roleBinding, { kind: "review", ...request.reviewEvidence });
+        if (decision.status !== "allowed") throw new Error(`review capability was not admitted: ${decision.reason}`);
+      }
+    }
     let view: ReturnType<typeof createReadOnlyRepositoryView>;
     try {
       view = createReadOnlyRepositoryView(
-        repositoryPath, task.ownedPaths, task.forbiddenPaths, identity.repositoryViewPath,
+        repositoryPath,
+        roleBinding === null ? task.ownedPaths : existingReadScopes(repositoryPath, roleBinding.access.readPaths),
+        roleBinding?.access.forbiddenPaths ?? task.forbiddenPaths,
+        identity.repositoryViewPath,
       );
     } catch (error) {
       workers.cleanup(request.taskId, workerId, "completed");
@@ -504,21 +566,10 @@ function approvedModel(
 ): ModelCapability {
   const model = sheet.models.find((candidate) => candidate.id === assignedId);
   if (
-    model === undefined || model.harness !== "opencode" || !model.roles.includes(role) ||
-    !approvedTools(model, role) ||
-    model.network !== "denied" || model.contextTokens < budget.maxInputTokens + budget.maxOutputTokens
+    model === undefined || !roleModelSupports(role, model) ||
+    model.contextTokens < budget.maxInputTokens + budget.maxOutputTokens
   ) throw new Error("OpenCode model assignment is not approved for the read-only role");
   return model;
-}
-
-function approvedTools(model: ModelCapability, role: OpenCodeReadOnlyAgentRequest["role"]): boolean {
-  if (role === "reviewer") {
-    return model.toolPermissions.includes("review_diff") &&
-      model.toolPermissions.includes("read_repository") &&
-      model.toolPermissions.every((permission) =>
-        permission === "review_diff" || permission === "read_repository");
-  }
-  return model.toolPermissions.length === 1 && model.toolPermissions[0] === "read_repository";
 }
 
 function traceOutcome(journal: EventJournal): "emitted" | "failed" | "not_configured" {
@@ -557,4 +608,13 @@ function canonicalDirectory(candidate: string): string {
     throw new Error("OpenCode repository must be a canonical directory");
   }
   return canonical;
+}
+
+function pathForScope(repository: string, scope: string): string {
+  return `${repository}/${scope.endsWith("/**") ? scope.slice(0, -3) : scope}`;
+}
+
+function existingReadScopes(repository: string, scopes: readonly string[]): readonly string[] {
+  const existing = scopes.filter((scope) => scope === "**" || existsSync(pathForScope(repository, scope)));
+  return existing.length > 0 ? existing : scopes;
 }

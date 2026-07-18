@@ -244,7 +244,7 @@ export type ReplanningModelCapabilitySnapshot = z.infer<typeof ReplanningModelCa
 export type PublicReplanningSecuritySnapshot = z.infer<typeof PublicReplanningSecuritySnapshotSchema>;
 export type TaskRevisionState = {
   readonly taskId: string;
-  readonly status: "planned" | "ready" | "running" | "blocked" | "completed";
+  readonly status: "planned" | "ready" | "running" | "blocked" | "superseded" | "completed";
   readonly terminalOutcome: "completed" | "cancelled" | "denied" | "timed_out" | "failed" | null;
 };
 
@@ -410,7 +410,14 @@ export function revisionBoundaryViolation(input: {
     const state = input.taskStates[taskId];
     const definition = latestDefinition(input.planHistory, taskId);
     const candidate = candidateById.get(taskId);
-    if (state === undefined || definition === undefined || state.status !== "completed") return "active_effect";
+    if (state === undefined || definition === undefined) return "active_effect";
+    if (state.status === "superseded") {
+      const replacementId = supersessions.get(taskId);
+      if (candidate !== undefined || replacementId === undefined || replacementId === taskId || !candidateById.has(replacementId) ||
+        historicalTaskIds.has(replacementId) || input.taskStates[replacementId] !== undefined) return "executed_task";
+      continue;
+    }
+    if (state.status !== "completed") return "active_effect";
     if (state.terminalOutcome === "completed") {
       if (candidate === undefined || digestCanonical(candidate) !== digestCanonical(definition) || supersessions.has(taskId)) return "executed_task";
       continue;

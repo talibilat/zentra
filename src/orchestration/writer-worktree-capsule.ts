@@ -17,6 +17,8 @@ import type {
   WorkspaceLease,
   WorktreeManager,
 } from "../workspaces/worktree-manager.js";
+import { assertRoleModelCapability } from "../workers/role-capability-envelope.js";
+import { RoleCapabilityBindingSchema, type RoleCapabilityBinding } from "../workers/role-capability-envelope.js";
 
 export interface WriterCapsuleObserver {
   onWorktreeCreationStarted?(intent: WorkspaceCreationIntent): void | Promise<void>;
@@ -41,6 +43,7 @@ export interface WriterCapsuleRequest {
   readonly openCodeHome?: string;
   readonly signal: AbortSignal;
   readonly observer?: WriterCapsuleObserver;
+  readonly capabilityBinding?: RoleCapabilityBinding;
 }
 
 export interface WriterCapsuleResult {
@@ -70,7 +73,7 @@ export class WriterWorktreeCapsule {
       { signal: request.signal },
       request.observer?.onWorktreeCreationStarted,
     );
-    const packet = writerPacket(request.task, request.security);
+    const packet = writerPacket(request.task, request.security, request.capabilityBinding);
     const baseCommit = await this.gitRead(lease.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
     if (await this.symbolicRef(
       request.project.repositoryPath,
@@ -87,6 +90,7 @@ export class WriterWorktreeCapsule {
       model: request.model,
       workspace: lease,
       packet,
+      ...(request.capabilityBinding === undefined ? {} : { capabilityEnvelope: request.capabilityBinding.envelope }),
       timeoutMs: request.task.budget.maxSeconds * 1_000,
       ...(request.executableSha256 === undefined
         ? {}
@@ -171,15 +175,11 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   if (!security.allowedRepositories.includes(project.repositoryPath)) {
     throw new Error("writer repository is not allowed by the security sheet");
   }
+  assertRoleModelCapability("implementer", model);
   if (
     task.roleAssignment.role !== "implementer" ||
     task.roleAssignment.harness !== "opencode" ||
     task.roleAssignment.agentId !== model.id ||
-    model.harness !== "opencode" ||
-    !model.roles.includes("implementer") ||
-    !model.toolPermissions.includes("read_repository") ||
-    !model.toolPermissions.includes("write_worktree") ||
-    model.network !== "denied" ||
     task.risk.authority !== "workspace_write"
   ) {
     throw new Error("writer assignment is outside approved OpenCode authority");
@@ -197,11 +197,21 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   }
 }
 
-function writerPacket(task: PlannedTask, security: SecuritySheet): WriterTaskPacket {
+function writerPacket(task: PlannedTask, security: SecuritySheet, rawBinding?: RoleCapabilityBinding): WriterTaskPacket {
+  const binding = rawBinding === undefined ? null : RoleCapabilityBindingSchema.parse(rawBinding);
+  if (binding !== null && (binding.taskId !== task.taskId || binding.role !== "implementer")) {
+    throw new Error("writer task does not match the accepted capability binding");
+  }
   return Object.freeze({
     brief: task.description,
     ownedPaths: Object.freeze([...task.ownedPaths]),
     forbiddenPaths: Object.freeze([...new Set([...task.forbiddenPaths, ...security.forbiddenPaths])]),
+    ...(binding === null ? {} : {
+      readPaths: binding.access.readPaths,
+      writePaths: binding.access.writePaths,
+      toolPermissions: binding.envelope.capabilities,
+      capabilityEnvelopeDigest: binding.envelope.digest,
+    }),
     acceptanceCriteria: Object.freeze([...task.acceptanceCriteria]),
     budget: Object.freeze({ ...task.budget }),
     securityBoundary: Object.freeze({
@@ -212,6 +222,7 @@ function writerPacket(task: PlannedTask, security: SecuritySheet): WriterTaskPac
       modelToolNetwork: "denied",
       harnessProviderTransport: "user_os_network_authority",
       parentSecretInheritance: "denied",
+      runtimeIsolation: "trusted_project_policy_not_os_sandbox",
     }),
   });
 }

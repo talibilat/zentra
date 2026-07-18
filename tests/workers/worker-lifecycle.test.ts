@@ -97,6 +97,29 @@ describe("generic worker lifecycle", () => {
     journal.close();
   });
 
+  it("durably distinguishes broad reads from narrow writes and checks both for descendants", () => {
+    const canonical = capabilityEnvelope({
+      role: "implementer", authority: "workspace_write", capabilities: ["read_repository", "write_worktree"],
+      network: "denied", secrets: "none",
+      effects: { worktree: "assigned", pathExpansion: "none", integration: "none", release: "none", external: "none" },
+      resources: { repository: "assigned_worktree", readPaths: ["docs/**", "src/**"], writePaths: ["src/owned.ts"], forbiddenPaths: [".env"] },
+    });
+    expect(canonical.resources).toMatchObject({ readPaths: ["docs/**", "src/**"], writePaths: ["src/owned.ts"] });
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new WorkerLifecycleService(journal);
+    service.bind(binding("parent", { envelope: canonical }));
+    expect(() => service.bind(binding("read-expansion", {
+      parentWorkerId: "parent",
+      role: "researcher",
+      envelope: capabilityEnvelope({ role: "researcher", authority: "read_only", capabilities: ["read_repository"], network: "denied", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", readPaths: ["test/**"], writePaths: [], forbiddenPaths: [".env"] } }),
+    }))).toThrow(/read path expansion/i);
+    expect(() => service.bind(binding("read-child", {
+      parentWorkerId: "parent", role: "researcher",
+      envelope: capabilityEnvelope({ role: "researcher", authority: "read_only", capabilities: ["read_repository"], network: "denied", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", readPaths: ["docs/design/**"], writePaths: [], forbiddenPaths: [".env"] } }),
+    }))).not.toThrow();
+    journal.close();
+  });
+
   it.each([
     ["unknown parent", binding("child", { parentWorkerId: "missing", envelope: readEnvelope("researcher", ["src/**"]) })],
     ["self cycle", binding("child", { parentWorkerId: "child", envelope: readEnvelope("researcher", ["src/**"]) })],

@@ -26,7 +26,18 @@ const TaskContextSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("milestone"), milestoneId: IdSchema }),
 ]);
 
-const EnvelopeBodySchema = z.strictObject({
+const LegacyResourcesSchema = z.strictObject({
+  repository: z.enum(["none", "read_only", "assigned_worktree"]),
+  paths: SortedPathsSchema,
+  forbiddenPaths: SortedPathsSchema,
+});
+const CanonicalResourcesSchema = z.strictObject({
+  repository: z.enum(["none", "read_only", "assigned_worktree"]),
+  readPaths: SortedPathsSchema,
+  writePaths: SortedPathsSchema,
+  forbiddenPaths: SortedPathsSchema,
+});
+const EnvelopeBaseShape = {
   role: MilestoneRoleSchema,
   authority: AuthorityLevelSchema,
   capabilities: CapabilitySetSchema,
@@ -39,14 +50,15 @@ const EnvelopeBodySchema = z.strictObject({
     release: z.enum(["none", "zentra_only"]),
     external: z.literal("none"),
   }),
-  resources: z.strictObject({
-    repository: z.enum(["none", "read_only", "assigned_worktree"]),
-    paths: SortedPathsSchema,
-    forbiddenPaths: SortedPathsSchema,
-  }),
-});
+} as const;
+const LegacyEnvelopeBodySchema = z.strictObject({ ...EnvelopeBaseShape, resources: LegacyResourcesSchema });
+const CanonicalEnvelopeBodySchema = z.strictObject({ ...EnvelopeBaseShape, resources: CanonicalResourcesSchema });
+const EnvelopeBodySchema = z.union([CanonicalEnvelopeBodySchema, LegacyEnvelopeBodySchema]);
 
-export const CapabilityEnvelopeSchema = EnvelopeBodySchema.extend({ digest: DigestSchema }).superRefine((value, context) => {
+export const CapabilityEnvelopeSchema = z.union([
+  CanonicalEnvelopeBodySchema.extend({ digest: DigestSchema }),
+  LegacyEnvelopeBodySchema.extend({ digest: DigestSchema }),
+]).superRefine((value, context) => {
   if (value.digest !== envelopeDigest(value)) context.addIssue({ code: "custom", message: "capability envelope digest mismatch" });
   if (value.network === "declared_web_research" && !value.capabilities.includes("web_research")) {
     context.addIssue({ code: "custom", message: "declared web research requires its reserved capability" });
@@ -69,9 +81,13 @@ export const CapabilityEnvelopeSchema = EnvelopeBodySchema.extend({ digest: Dige
   if ((value.resources.repository === "read_only" || value.resources.repository === "assigned_worktree") !== value.capabilities.includes("read_repository")) {
     context.addIssue({ code: "custom", message: "repository resource and read capability do not match" });
   }
-  if (value.resources.repository === "none" && (value.resources.paths.length !== 0 || value.capabilities.includes("read_repository") || value.capabilities.includes("write_worktree"))) {
+  const readPaths = envelopeReadPaths(value);
+  const writePaths = envelopeWritePaths(value);
+  if (value.resources.repository === "none" && (readPaths.length !== 0 || writePaths.length !== 0 || value.capabilities.includes("read_repository") || value.capabilities.includes("write_worktree"))) {
     context.addIssue({ code: "custom", message: "repository none cannot retain paths or repository capabilities" });
   }
+  if (value.resources.repository !== "assigned_worktree" && writePaths.length !== 0) context.addIssue({ code: "custom", message: "only an assigned worktree may retain write paths" });
+  if (value.resources.repository === "assigned_worktree" && writePaths.length === 0) context.addIssue({ code: "custom", message: "assigned worktree requires write paths" });
   if (value.capabilities.includes("review_diff") && value.authority !== "review") context.addIssue({ code: "custom", message: "review capability requires review authority" });
   if (value.capabilities.includes("run_validation") && value.authority !== "validation") context.addIssue({ code: "custom", message: "validation capability requires validation authority" });
 });
@@ -144,14 +160,13 @@ export interface WorkerLifecycleView {
 const ZERO: WorkerUsage = Object.freeze({ seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 });
 
 export function capabilityEnvelope(raw: z.input<typeof EnvelopeBodySchema>): CapabilityEnvelope {
+  const resources = "paths" in raw.resources
+    ? { ...raw.resources, paths: [...new Set(raw.resources.paths)].sort(), forbiddenPaths: [...new Set(raw.resources.forbiddenPaths)].sort() }
+    : { ...raw.resources, readPaths: [...new Set(raw.resources.readPaths)].sort(), writePaths: [...new Set(raw.resources.writePaths)].sort(), forbiddenPaths: [...new Set(raw.resources.forbiddenPaths)].sort() };
   const body = EnvelopeBodySchema.parse({
     ...raw,
     capabilities: [...new Set(raw.capabilities)].sort(),
-    resources: {
-      ...raw.resources,
-      paths: [...new Set(raw.resources.paths)].sort(),
-      forbiddenPaths: [...new Set(raw.resources.forbiddenPaths)].sort(),
-    },
+    resources,
   });
   return CapabilityEnvelopeSchema.parse({ ...body, digest: envelopeDigest(body) });
 }
@@ -262,10 +277,15 @@ function assertNested(binding: WorkerBinding, parent: MutableWorker): void {
   if (!networkCanNarrow(parent.envelope.network, binding.envelope.network)) throw new Error("nested worker network expansion");
   if (!repositoryCanNarrow(parent.envelope.resources.repository, binding.envelope.resources.repository)) throw new Error("nested worker repository expansion");
   if (!effectsCanNarrow(parent.envelope.effects, binding.envelope.effects)) throw new Error("nested worker effect expansion");
+  const parentReads = envelopeReadPaths(parent.envelope);
+  const childReads = envelopeReadPaths(binding.envelope);
+  const parentWrites = envelopeWritePaths(parent.envelope);
+  const childWrites = envelopeWritePaths(binding.envelope);
+  if (!childReads.every((child) => parentReads.some((scope) => pathContains(scope, child)))) throw new Error("nested worker read path expansion");
   const exactAssignedScope = binding.envelope.resources.repository === "assigned_worktree";
   if (exactAssignedScope
-    ? JSON.stringify(binding.envelope.resources.paths) !== JSON.stringify(parent.envelope.resources.paths)
-    : !binding.envelope.resources.paths.every((child) => parent.envelope.resources.paths.some((scope) => pathContains(scope, child)))) throw new Error("nested worker path expansion");
+    ? JSON.stringify(childWrites) !== JSON.stringify(parentWrites)
+    : !childWrites.every((child) => parentWrites.some((scope) => pathContains(scope, child)))) throw new Error("nested worker write path expansion");
   if (!parent.envelope.resources.forbiddenPaths.every((scope) => binding.envelope.resources.forbiddenPaths.includes(scope))) throw new Error("nested worker removed forbidden paths");
   if (binding.envelope.secrets !== "none" || binding.envelope.effects.integration !== "none" || binding.envelope.effects.release !== "none" || binding.envelope.effects.external !== "none") throw new Error("nested worker effect authority is forbidden");
 }
@@ -319,6 +339,13 @@ export function effectCanNarrow(parent: "none" | "assigned" | "zentra_only", chi
 }
 export function capabilitiesCanNarrow(parent: readonly z.infer<typeof WorkerCapabilitySchema>[], child: readonly z.infer<typeof WorkerCapabilitySchema>[]): boolean {
   return subset(child, parent);
+}
+export function envelopeReadPaths(envelope: CapabilityEnvelope): readonly string[] {
+  return "readPaths" in envelope.resources ? envelope.resources.readPaths : envelope.resources.paths;
+}
+export function envelopeWritePaths(envelope: CapabilityEnvelope): readonly string[] {
+  if ("writePaths" in envelope.resources) return envelope.resources.writePaths;
+  return envelope.resources.repository === "assigned_worktree" ? envelope.resources.paths : [];
 }
 function pathContains(parent: string, child: string): boolean { if (parent === child || parent === "**") return true; return parent.endsWith("/**") && child.startsWith(parent.slice(0, -3) + "/"); }
 function add(a: WorkerUsage, b: WorkerUsage): WorkerUsage { return { seconds: a.seconds + b.seconds, inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd, toolCalls: a.toolCalls + b.toolCalls, modelTurns: a.modelTurns + b.modelTurns }; }

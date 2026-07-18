@@ -55,8 +55,16 @@ import type {
   WriterCapsuleResult,
   WriterWorktreeCapsule,
 } from "./writer-worktree-capsule.js";
-import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
+import { WorkerLifecycleService } from "../workers/worker-lifecycle.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
+import { digestCanonical } from "../contracts/authority-attention.js";
+import { projectMilestone } from "../milestones/milestone-projection.js";
+import { MilestoneRegistry } from "../milestones/milestone-registry.js";
+import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../contracts/capability-boundary.js";
+import {
+  RoleCapabilityEnvelopeService,
+  buildRoleCapabilityBinding,
+} from "../workers/role-capability-envelope.js";
 
 export interface OpenCodeSingleFileTracerRequest {
   readonly project: ProjectConfig;
@@ -144,9 +152,40 @@ export class OpenCodeSingleFileTracerBullet {
     let observedWorkspace: string | null = null;
     let capsule: WriterCapsuleResult;
     const workers = new WorkerLifecycleService(this.tasks.eventJournal());
+    const roleCapabilities = new RoleCapabilityEnvelopeService(this.tasks.eventJournal());
     const workerEvents = new OpenCodeWorkerEventAdapter();
     const workerId = `writer-${createHash("sha256").update(`${request.task.taskId}\0${request.model.id}`, "utf8").digest("hex")}`;
     assertWriterAdmission(request, changedPath);
+    const parentMilestone = request.parentMilestoneId === undefined
+      ? null
+      : projectMilestone(this.tasks.eventJournal().readStream(request.parentMilestoneId));
+    const admissionDigest = parentMilestone?.tasks[request.task.taskId]?.admissionDigest ??
+      digestCanonical({ taskId: request.task.taskId, mode: "standalone" });
+    const roleBinding = roleCapabilities.accept(buildRoleCapabilityBinding({
+      milestoneId: request.parentMilestoneId ?? request.task.taskId,
+      taskId: request.task.taskId,
+      projectId: request.project.projectId,
+      correlationId: request.correlationId ?? request.task.taskId,
+      role: "implementer",
+      actorId: request.model.id,
+      repository: request.project.repositoryPath,
+      planDigest: digestCanonical(parentMilestone?.plan ?? request.task),
+      securityDigest: digestCanonical(request.security),
+      model: {
+        capabilityId: request.model.id,
+        transportModelId: request.model.model,
+        digest: digestCanonical(request.model),
+        harness: request.model.harness,
+        roles: request.model.roles,
+        toolPermissions: request.model.toolPermissions,
+        network: request.model.network,
+      },
+      budget: request.task.budget,
+      admissionDigest,
+      configuredReadPaths: request.security.allowedFileScopes,
+      ownedPaths: request.task.ownedPaths,
+      forbiddenPaths: [...new Set([...request.task.forbiddenPaths, ...request.security.forbiddenPaths])],
+    }));
     workers.bind({
       schemaVersion: 1,
       workerId,
@@ -156,15 +195,7 @@ export class OpenCodeSingleFileTracerBullet {
       harness: "opencode",
       role: request.task.roleAssignment.role,
       model: { capabilityId: request.model.id, modelId: request.model.model },
-      envelope: capabilityEnvelope({
-        role: request.task.roleAssignment.role,
-        authority: request.task.risk.authority,
-        capabilities: ["read_repository", "write_worktree"],
-        network: "model_provider_only",
-        secrets: "none",
-        effects: { worktree: "assigned", pathExpansion: "none", integration: "none", release: "none", external: "none" },
-        resources: { repository: "assigned_worktree", paths: [...request.task.ownedPaths], forbiddenPaths: [...request.task.forbiddenPaths] },
-      }),
+      envelope: roleBinding.envelope,
       taskContext: request.parentMilestoneId === undefined
         ? { kind: "standalone" }
         : { kind: "milestone", milestoneId: request.parentMilestoneId },
@@ -186,8 +217,40 @@ export class OpenCodeSingleFileTracerBullet {
       },
     });
     try {
+      roleCapabilities.verify(roleBinding, {
+        planDigest: digestCanonical(parentMilestone?.plan ?? request.task),
+        securityDigest: digestCanonical(request.security),
+        modelDigest: digestCanonical(request.model),
+        repositoryDigest: digestCanonical(request.project.repositoryPath),
+        ownershipDigest: roleBinding.ownershipDigest,
+        budgetDigest: digestCanonical(request.task.budget),
+        admissionDigest,
+      });
+      const launchDecisions = [
+        ...roleBinding.access.readPaths.flatMap((scope) => [
+          roleCapabilities.evaluate(roleBinding, { kind: "read", path: scope }),
+          roleCapabilities.evaluate(roleBinding, { kind: "search", path: scope }),
+        ]),
+        ...roleBinding.access.writePaths.map((scope) => roleCapabilities.evaluate(roleBinding, { kind: "write", path: scope })),
+      ];
+      if (launchDecisions.some((decision) => decision.status !== "allowed")) {
+        const decision = launchDecisions.find((candidate) => candidate.status !== "allowed")!;
+        workers.cleanup(request.task.taskId, workerId, "completed");
+        workers.terminate(request.task.taskId, workerId, "denied");
+        const occurrence = createCapabilityBoundaryOccurrence({
+          binding: roleBinding,
+          decision,
+          evaluationEvent: roleCapabilities.evaluationEvent(roleBinding, decision.decisionId),
+          phase: "pre_effect",
+          taskHead: capabilityTaskHead(this.tasks.readStream(request.task.taskId)),
+        });
+        if (request.parentMilestoneId === undefined) throw new Error("capability boundary pause requires an authoritative milestone");
+        new MilestoneRegistry(this.tasks.eventJournal()).pauseForCapabilityBoundary(request.parentMilestoneId, occurrence, null);
+        return this.tasks.get(request.task.taskId)!;
+      }
       capsule = await this.capsule.run({
         ...request,
+        capabilityBinding: roleBinding,
         executable: request.probe.executable!,
         executableSha256: request.probe.executableSha256!,
         observer: {
@@ -266,6 +329,44 @@ export class OpenCodeSingleFileTracerBullet {
       }, null);
     }
 
+    const changedPathDecisions = (capsule.ownership?.changedPaths ?? [])
+      .map((changed) => roleCapabilities.evaluate(roleBinding, { kind: "write", path: changed }));
+    const deniedToolDecisions = (capsule.writer?.deniedToolRequests ?? []).map((denied) => {
+      try {
+        if (denied.path !== null && (denied.tool === "edit" || denied.tool === "write" || denied.tool === "apply_patch")) {
+          const decision = roleCapabilities.evaluate(roleBinding, { kind: "write", path: denied.path });
+          return decision.status === "allowed" ? roleCapabilities.evaluate(roleBinding, { kind: "external_effect" }) : decision;
+        }
+        if (denied.path !== null && (denied.tool === "read" || denied.tool === "glob" || denied.tool === "grep")) {
+          const decision = roleCapabilities.evaluate(roleBinding, { kind: denied.tool === "grep" ? "search" : "read", path: denied.path });
+          return decision.status === "allowed" ? roleCapabilities.evaluate(roleBinding, { kind: "external_effect" }) : decision;
+        }
+      } catch {
+        // An unsafe native path is itself outside the typed envelope.
+      }
+      return roleCapabilities.evaluate(roleBinding, { kind: "external_effect" });
+    });
+    if (changedPathDecisions.some((decision) => decision.status !== "allowed") || deniedToolDecisions.length > 0) {
+      const decision = [...changedPathDecisions, ...deniedToolDecisions].find((candidate) => candidate.status !== "allowed")!;
+      const evidence = {
+        deniedToolRequests: capsule.writer?.deniedToolRequests ?? [],
+        writer: capsule.writer === null ? null : writerSummary(capsule.writer),
+        ownership: capsule.ownership,
+        workspace: capsule.lease?.path ?? null,
+      };
+      const occurrence = createCapabilityBoundaryOccurrence({
+        binding: roleBinding,
+        decision,
+        evaluationEvent: roleCapabilities.evaluationEvent(roleBinding, decision.decisionId),
+        phase: "post_worker",
+        taskHead: capabilityTaskHead(this.tasks.readStream(request.task.taskId)),
+        workerSettlement: { workerId, cleanup: "completed", terminalOutcome: capsule.writer?.outcome ?? "failed" },
+        evidence,
+      });
+      if (request.parentMilestoneId === undefined) throw new Error("capability boundary pause requires an authoritative milestone");
+      new MilestoneRegistry(this.tasks.eventJournal()).pauseForCapabilityBoundary(request.parentMilestoneId, occurrence, evidence);
+      return this.tasks.get(request.task.taskId)!;
+    }
     if (capsule.outcome !== "completed") {
       return this.tasks.append(request.task.taskId, `task.${capsule.outcome}`, {
         stage: capsule.outcome === "denied" ? "ownership" : "writer",
@@ -946,5 +1047,6 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): obje
     stderrSha256: report.stderrSha256,
     startedAt: report.startedAt,
     finishedAt: report.finishedAt,
+    deniedToolRequests: report.deniedToolRequests,
   };
 }
