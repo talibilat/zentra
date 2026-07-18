@@ -83,7 +83,8 @@ describe("WriterWorktreeCapsule", () => {
         validationAuthority: "zentra_named_validations_only",
         integrationAuthority: "none",
         shellAuthority: "none",
-        network: "denied",
+        modelToolNetwork: "denied",
+        harnessProviderTransport: "user_os_network_authority",
         parentSecretInheritance: "denied",
       },
     });

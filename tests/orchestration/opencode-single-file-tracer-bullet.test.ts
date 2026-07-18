@@ -89,6 +89,12 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     expect(result.trace.find((event) => event.kind === "task.writer_completed")).toMatchObject({
       actor: { id: "writer-model", role: "worker" },
       operation: { name: "writer", status: "completed" },
+      payload: {
+        networkBoundary: {
+          modelTools: "denied",
+          harnessProviderTransport: "user_os_network_authority",
+        },
+      },
     });
     expect(result.trace.find((event) => event.kind === "task.started")).toMatchObject({
       actor: { id: "writer-model", role: "worker" },

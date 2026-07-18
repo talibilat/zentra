@@ -1890,9 +1890,20 @@ describe("built CLI help", () => {
     expect(result.stdout).toMatch(/\bproject\b/);
     expect(result.stdout).toMatch(/\btask\b/);
     expect(result.stdout).toMatch(/\brecover\b/);
+    expect(result.stdout).toContain("bounded local software-development workflows");
     const milestone = await execFileAsync(process.execPath, ["dist/src/cli/main.js", "milestone", "--help"], { cwd: root });
     expect(milestone.stderr).toBe("");
     expect(milestone.stdout).toMatch(/\brun\b/);
+    expect(milestone.stdout).toContain("installed OpenCode workflows");
+    const milestoneRun = await execFileAsync(
+      process.execPath,
+      ["dist/src/cli/main.js", "milestone", "run", "--help"],
+      { cwd: root },
+    );
+    expect(milestoneRun.stderr).toBe("");
+    expect(milestoneRun.stdout).toContain("authenticated host OpenCode writer");
+    expect(milestoneRun.stdout).toMatch(/user-OS provider transport and\s+brokered review/);
+    expect(milestoneRun.stdout).toMatch(/provider\s+transport uses user OS network authority/);
   });
 
   it("supports the documented pnpm start help invocation", async () => {

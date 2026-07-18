@@ -867,6 +867,7 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): obje
     argv: report.argv,
     cwd: report.cwd,
     packetSha256: report.packetSha256,
+    networkBoundary: report.networkBoundary,
     stdoutSha256: report.stdoutSha256,
     stderrSha256: report.stderrSha256,
     startedAt: report.startedAt,
