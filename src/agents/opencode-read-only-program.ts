@@ -200,7 +200,8 @@ export class OpenCodeReadOnlyProgram {
     this.projected.append(request.milestoneId, events.at(-1)!.streamVersion, [{
       streamId: request.milestoneId,
       type: "milestone.agent_trace_observed",
-      payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: observedTraceOutcome }),
+      payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: observedTraceOutcome,
+        deferredCompletion: request.deferMilestoneCompletion === true }),
       causationId: null,
       correlationId,
     }]);
@@ -209,7 +210,8 @@ export class OpenCodeReadOnlyProgram {
       this.projected.append(request.milestoneId, corrected.at(-1)!.streamVersion, [{
         streamId: request.milestoneId,
         type: "milestone.agent_trace_observed",
-        payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: "failed" }),
+        payload: OpenCodeTraceObservedPayloadSchema.parse({ taskId: request.taskId, outcome: "failed",
+          deferredCompletion: request.deferMilestoneCompletion === true }),
         causationId: corrected.at(-1)!.eventId,
         correlationId,
       }]);

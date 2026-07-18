@@ -3,6 +3,9 @@ import type { WorkerObservation } from "../workers/worker-lifecycle.js";
 // OpenCode 1.18.3 documents JSON output but no stable nested-agent lifecycle.
 // Production keeps the task tool denied and accepts only measured top-level evidence.
 export class OpenCodeWorkerEventAdapter {
+  private readonly supportedTopLevelTypes = new Set([
+    "step_start", "step_finish", "text", "tool_use", "tool_result", "permission.denied", "tool.denied",
+  ]);
   processObservation(name: string, outcome: "completed" | "cancelled" | "denied" | "timed_out" | "failed" | "uncertain"): WorkerObservation {
     return { kind: "process", name, outcome };
   }
@@ -24,6 +27,23 @@ export class OpenCodeWorkerEventAdapter {
         : null;
       const tool = typeof record["tool"] === "string" ? record["tool"] : typeof part?.["tool"] === "string" ? part["tool"] : null;
       if (tool === "task" || tool === "subagent") this.rejectDelegation(tool);
+    }
+  }
+
+  assertSupportedTopLevelEvents(events: readonly unknown[]): void {
+    if (events.length === 0) throw new Error("OpenCode writer produced no supported native events");
+    this.assertNoDelegation(events);
+    for (const event of events) {
+      if (typeof event !== "object" || event === null || Array.isArray(event)) {
+        throw new Error("OpenCode writer produced an unsupported native event");
+      }
+      const record = event as Readonly<Record<string, unknown>>;
+      const part = typeof record["part"] === "object" && record["part"] !== null && !Array.isArray(record["part"])
+        ? record["part"] as Readonly<Record<string, unknown>> : null;
+      const type = typeof record["type"] === "string" ? record["type"] : typeof part?.["type"] === "string" ? part["type"] : null;
+      if (type === null || !this.supportedTopLevelTypes.has(type)) {
+        throw new Error("OpenCode writer produced an unsupported native event");
+      }
     }
   }
 }

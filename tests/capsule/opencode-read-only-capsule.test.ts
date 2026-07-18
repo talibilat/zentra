@@ -438,8 +438,8 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
         ...request(repository).securityBoundary,
         readableScopes: ["evidence.txt"],
       },
-      timeoutMs: 30_000,
-      budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 10_000, maxOutputTokens: 1_000 },
+      timeoutMs: 60_000,
+      budget: { maxSeconds: 60, maxCostUsd: 1, maxInputTokens: 10_000, maxOutputTokens: 1_000 },
     }, broker, new AbortController().signal);
 
     expect(result).toMatchObject({

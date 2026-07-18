@@ -216,6 +216,15 @@ export class WorktreeManager {
     return { taskId: intent.taskId, branch: intent.branch, path: intent.path };
   }
 
+  async verifyRetained(
+    project: ProjectConfig,
+    intent: WorkspaceCreationIntent,
+    options: GitRunOptions = {},
+  ): Promise<void> {
+    await this.assertSafeGitConfiguration(project.repositoryPath, options);
+    await this.verifyExactCreation(project, intent, options);
+  }
+
   async resume(
     project: ProjectConfig,
     intent: WorkspaceCreationIntent,
@@ -377,6 +386,24 @@ export class WorktreeManager {
         evidence,
         "ticket worktree registration is not exact",
       );
+    }
+    const sourceCommon = await this.run(project.repositoryPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"], options);
+    const retainedCommon = await this.run(intent.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"], options);
+    const retainedHead = await this.run(intent.path, ["rev-parse", "--verify", "HEAD^{commit}"], options);
+    const retainedBranch = await this.run(intent.path, ["symbolic-ref", "--quiet", "HEAD"], options);
+    if ([sourceCommon, retainedCommon, retainedHead, retainedBranch].some((result) =>
+      result.termination !== null || result.exitCode !== 0 || result.truncated)) {
+      throw new WorkspaceCreationUncertainError(evidence, "retained worktree identity could not be read");
+    }
+    let exactCommon = false;
+    try {
+      exactCommon = realpathSync(sourceCommon.stdout.trim()) === realpathSync(retainedCommon.stdout.trim());
+    } catch {
+      exactCommon = false;
+    }
+    if (!exactCommon || retainedHead.stdout.trim() !== intent.baseCommit ||
+      retainedBranch.stdout.trim() !== `refs/heads/${intent.branch}`) {
+      throw new WorkspaceCreationUncertainError(evidence, "retained worktree identity is not exact");
     }
     let branchHead: CommandResult;
     try {

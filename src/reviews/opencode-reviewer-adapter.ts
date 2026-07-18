@@ -7,6 +7,7 @@ import type {
   OpenCodeReadOnlyProgramResult,
 } from "../agents/opencode-read-only-program.js";
 import type { MilestoneBudget } from "../contracts/milestone.js";
+import { UntrustedEvidenceHandoffSchema, type UntrustedEvidenceHandoff } from "../orchestration/untrusted-evidence-handoff.js";
 import {
   canonicalValidationDigest,
   ReviewDecisionSchema,
@@ -17,6 +18,13 @@ import {
 } from "./reviewer-adapter.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const OpenCodeReviewerTaskContextSchema = z.strictObject({
+  goal: z.string().min(1).refine((value) => Buffer.byteLength(value, "utf8") <= 512),
+  file: z.string().min(1).refine((value) => Buffer.byteLength(value, "utf8") <= 4_096),
+  guidance: UntrustedEvidenceHandoffSchema.optional(),
+  authority: z.literal("context_only"),
+});
+export type OpenCodeReviewerTaskContext = z.infer<typeof OpenCodeReviewerTaskContextSchema>;
 const OpenCodeReviewResponseSchema = z.strictObject({
   schemaVersion: z.literal(1),
   reviewerId: z.string().min(1).max(256),
@@ -39,6 +47,7 @@ export interface OpenCodeReviewerAssignment {
   readonly reviewerId: string;
   readonly budget: Omit<MilestoneBudget, "maxRetries">;
   readonly timeoutMs: number;
+  readonly taskContext?: OpenCodeReviewerTaskContext;
 }
 
 export class OpenCodeReviewerUncertainError extends Error {
@@ -65,10 +74,16 @@ export class OpenCodeReviewerUncertainError extends Error {
 }
 
 export class OpenCodeReviewerAdapter implements ReviewerAdapter {
+  private readonly taskContext: OpenCodeReviewerTaskContext | undefined;
+
   constructor(
     private readonly program: OpenCodeReviewerProgram,
     private readonly assignment: OpenCodeReviewerAssignment,
-  ) {}
+  ) {
+    this.taskContext = assignment.taskContext === undefined
+      ? undefined
+      : OpenCodeReviewerTaskContextSchema.parse(assignment.taskContext);
+  }
 
   async review(input: ReviewInput, signal: AbortSignal): Promise<ReviewDecision> {
     if (input.workerId === input.reviewerId) {
@@ -88,6 +103,7 @@ export class OpenCodeReviewerAdapter implements ReviewerAdapter {
       validation: input.validation,
       diffSha256: sha256(input.diff),
       validationSha256: canonicalValidationDigest(input.validation),
+      ...(this.taskContext === undefined ? {} : { taskContext: this.taskContext }),
     };
     const requestSha256 = sha256(JSON.stringify(challenged));
     const rolePrompt = JSON.stringify({
@@ -121,6 +137,7 @@ export class OpenCodeReviewerAdapter implements ReviewerAdapter {
         diffSha256: challenged.diffSha256,
         validationSha256: challenged.validationSha256,
       },
+      deferMilestoneCompletion: true,
       signal,
     });
     if (result.status === "paused") {

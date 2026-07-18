@@ -63,6 +63,16 @@ afterEach(() => {
 });
 
 describe("OpenCodeSingleFileTracerBullet", () => {
+  it("retains protocol failure and never validates a changed file without supported JSON events", async () => {
+    const fixture = await fixtureProject("unused");
+    const result = await runTracer(fixture, "__PLAIN_PROTOCOL__");
+    expect(result.view).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
+    expect(result.events.map((event) => event.type)).not.toContain("task.validation_started");
+    expect(result.events.find((event) => event.type === "task.writer_completed")?.payload).toMatchObject({
+      outcome: "failed", protocolFailure: "invalid_native_event_stream", rawOutputPolicy: "not_retained",
+    });
+  }, 15_000);
+
   it("records a real OpenCode source edit, configured validation, and complete Agent Tail trace", async () => {
     const fixture = await fixtureProject("hello from OpenCode");
     const result = await runTracer(fixture, "hello from OpenCode");
@@ -675,7 +685,7 @@ const current = readFileSync(source, "utf8");
 writeFileSync(source, current.replace("hello", ${JSON.stringify(replacement)}));
 ${replacement === "__OUTSIDE__" ? 'writeFileSync(path.join(workspace, "README.md"), "outside scope\\n");' : ""}
 ${replacement === "__DENIED_TOOL__" ? 'process.stdout.write(JSON.stringify({ type: "tool.denied", tool: "webfetch", status: "denied" }) + "\\n");' : ""}
-process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+${replacement === "__PLAIN_PROTOCOL__" ? 'process.stdout.write("plain protocol output\\n");' : 'process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");'}
 `, { mode: 0o755 });
   return realpathSync.native(executable);
 }

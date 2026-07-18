@@ -12,9 +12,14 @@ The current MVP runs on one local machine for one user and executes one bounded 
 
 The `task run` command retains the bundled deterministic tracer bullet for local contract verification.
 
-The `milestone run` command is the installed real-harness workflow: a brokered Azure OpenAI planner, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered Azure OpenAI reviewer, and validated candidate integration.
+The `milestone run` command is the installed real-harness workflow: brokered Azure OpenAI planner and researcher roles, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered Azure OpenAI reviewer, and validated candidate integration.
 
-The planner and reviewer run OpenCode in short-lived Docker capsules with sanitized read-only repository views and model turns brokered by the host.
+The planner, researcher, and reviewer run attested OpenCode 1.18.3 in short-lived Docker capsules with sanitized read-only repository views and model turns brokered by the host.
+Zentra creates or verifies the configured integration branch before planning, and installed planner and researcher views are materialized from immutable blobs at that exact integration head.
+Every blob identity is recomputed before exposure, so mutable primary-checkout bytes are never labeled as the accepted integration commit and a normal later milestone starts from prior integrated work.
+Before any integration-ref creation, Zentra durably registers the exact milestone authority and journals a preparation intent bound to canonical repository and Git-common-directory paths plus their filesystem device/inode identities, the full ref, intended base commit, project, milestone, and correlation identity.
+Repository and common-directory identity are remeasured through hardened Git before every ref inspection, mutation, and observation; same-path replacement pauses without touching the replacement repository.
+Restart records an exact existing ref without repeating the effect, creates it again only after proving the prior intent had no effect, and pauses with uncertain-effect evidence for contradictory or partial ref state.
 
 The writer runs the exact operator-supplied OpenCode executable on the host with a dedicated explicit home and authority to edit only the configured owned file in its assigned worktree.
 Its model tools have no web or general network authority, but OpenCode's own provider transport uses the user's operating-system network authority and is not sandboxed in Trusted-Project mode.
@@ -241,7 +246,8 @@ The registry canonicalizes the requested repository, requires an exact security-
 OpenCode admission requires the assigned model harness to be exactly `opencode` and binds its canonical roles, tool permissions, network declaration, and positive context-token capacity into the packet digest.
 Requested input and output tokens must fit within that bound capacity, and the complete snapshot is checked again immediately before resource intent.
 Direct callers of `MilestoneRegistry.admitTask()` must provide its complete `OpenCodeTaskAdmissionContext`; there is no context-free readiness API.
-The milestone must already exist in the supplied journal, and an executable task assignment must name an approved OpenCode capability with only `read_repository` tool authority and denied direct network access.
+The milestone must already exist in the supplied journal, and an executable task assignment must name an approved OpenCode capability matching the exact canonical role tools and network mode.
+Planner and researcher roles may add only brokered `web_research` when the model and security sheets both admit its bounded destination policy.
 When no valid plan exists yet, admission records bounded `plan_not_ready` attention instead of starting work.
 `stopAndAskConditions` records the configured escalation vocabulary but never disables mandatory repository, file, authority, network, release, or budget stops.
 The current OpenCode admission packet has no optional advisory condition beyond those mandatory checks.
@@ -256,7 +262,7 @@ After an interrupted attempt, `program.reconcile({ milestoneId, taskId, capsuleI
 The built-in `DisabledModelBroker` performs no provider transport and no provider credentials are invented or passed into the capsule.
 Policy files, journals, command results, and Agent Tail JSONL must never contain credentials.
 
-Run one fixed planner-to-implementer-to-reviewer milestone from a natural-language goal.
+Run one fixed planner-to-researcher-to-implementer-to-reviewer milestone from a natural-language goal.
 
 ```bash
 zentra milestone run \
@@ -268,6 +274,8 @@ zentra milestone run \
   --provider /canonical/path/azure.json \
   --opencode /canonical/path/opencode \
   --opencode-home /canonical/path/opencode-home \
+  --opencode-sha256 <operator-measured-lowercase-sha256> \
+  --opencode-version "<exact-opencode-version-output>" \
   --agent-tail-jsonl /canonical/path/zentra.jsonl \
   --file src/greeting.ts
 ```
@@ -308,12 +316,17 @@ The per-million input and output rates are bounded decimal strings containing at
 Zentra requires streamed token usage, computes cost in integer nanodollars with conservative rounding, and rejects any configured or task token, tool, response-byte, timeout, or computed-cost excess.
 `costUsdNano` is the authoritative measured and aggregated cost in broker receipts, worker observations, shared root-task budgets, replayed projections, and Agent Tail payloads.
 `costUsd` remains display metadata, must exactly correspond to `costUsdNano` when both are present, and is never used to authorize measured budget consumption.
-Planner and reviewer model turns use this host broker.
+Planner, researcher, and reviewer model turns use this host broker.
 The host OpenCode writer remains a separate boundary and may use auth already configured inside the exact canonical `--opencode-home` directory.
 The writer and probe receive that directory as their minimal `HOME`; they do not inherit ambient `HOME`, arbitrary parent secrets, or the raw broker credential.
 Use a dedicated authenticated OpenCode home created for this workflow rather than a general interactive home containing unrelated configuration or credentials.
+Before milestone registration, Zentra hashes the canonical host OpenCode executable and invokes its exact `--version` command in the minimal configured home.
+The required digest and version are operator consistency attestations that detect substitution or drift; they are not a vendor signature, provenance guarantee, or independent statement that the executable is trustworthy.
+The runtime capability probe repeats the version check and executable digest measurement, and the writer rechecks the executable digest immediately before execution.
+The environment-gated installed live conformance path uses an actual operator-configured host OpenCode executable and is the acceptance path reserved for issue #75.
+Package fixtures attest only their controlled fake executable and are not described as real OpenCode conformance.
 The implementer model in `MODELS.md` must be a model identity understood by that OpenCode installation and authenticated home.
-The planner and reviewer model values must equal the exact configured Azure deployment identity.
+The planner, researcher, and reviewer model values must equal the exact configured Azure deployment identity.
 The receipt retains that requested deployment as its transport identity, records the allowlisted provider-reported underlying model separately, exposes exact nanodollar cost, and binds the complete non-secret provider configuration through a SHA-256 digest.
 That provider-configuration digest is copied into durable evidence provenance.
 Cancellation proven before POST dispatch is `cancelled`.
@@ -322,12 +335,19 @@ After POST dispatch begins, transport rejection, timeout, cancellation, response
 A complete Azure JSON error response for HTTP `4xx`, including authentication, policy, and rate-limit rejection, is `failed` because the provider response proves rejection; a truncated or malformed `4xx` body remains `uncertain`.
 Redirects, fully received malformed responses, model drift, invalid tool arguments, disallowed tools, and budget excess are `failed`.
 
-The fixed plan has exactly one planner, one implementer, and one independent reviewer selected from unambiguous approved model-sheet capabilities.
+The fixed plan has exactly one planner, one researcher, one implementer, and one independent reviewer selected from unambiguous approved model-sheet capabilities.
 Only the explicit `--file`, project validations, configured integration branch, security sheet, and model sheet grant authority.
 Goal wording cannot add files, tools, network destinations, credentials, commands, approval, integration targets, or release authority.
 The Model Sheet `network: denied` value and durable admission packet describe model tool and web-research authority.
 They do not claim that the host OpenCode process lacks provider transport or operating-system network access.
 Durable `task.writer_completed` evidence records this split as denied model tools and `user_os_network_authority` harness provider transport.
+It also retains a bounded normalized native-event chain with event order, types, digests, byte counts, and cumulative stdout digests.
+Raw OpenCode stdout and stderr are explicitly non-retained; diff and validation artifacts remain authoritative effect evidence, and no model or tool activity is inferred without a corresponding native event.
+An exit-zero writer must produce at least one complete supported JSON event line; empty, plain, malformed, mixed, incomplete, or delegation output fails before validation or integration.
+After a validated handoff, Zentra records an exact reviewer dispatch intent immediately before invoking the reviewer.
+Restart before that intent resumes only review, commit, and integration from the retained worktree, diff, and validation evidence without rerunning the writer.
+Restart after reviewer, resource, or worker intent produces durable uncertain-effect attention and never retries automatically.
+If a safely resumable handoff has a missing, replaced, unregistered, or modified worktree, Zentra retains bounded expected and observed evidence in idempotent `stale_evidence` replanning attention instead of throwing or retrying.
 The command always retains Agent Tail JSONL and streams the same JSONL on stdout while running.
 Its final compact replay-backed JSON is written to stderr and contains only the command, milestone and project identities, canonical terminal outcome, and trace path/outcome.
 Standard output bytes are the retained trace bytes, so consumers can validate JSONL incrementally and compare the completed stream byte-for-byte with `--agent-tail-jsonl`.

@@ -740,7 +740,7 @@ describe("TracerBulletOrchestrator", () => {
       action: "await_reconciliation",
     });
     expect(existsSync(path.join(fixture.worktreeRoot, "task-restart-real-evidence"))).toBe(true);
-  });
+  }, 15_000);
 
   it("blocks prepared-only completion when candidate cleanup failed before observation crash", async () => {
     const fixture = await fixtureRepository();

@@ -48,6 +48,12 @@ import {
 } from "../contracts/milestone-result.js";
 import { ReleaseOperationBoundPayloadSchema, type ReleaseOperationBoundPayload } from "../release/release-events.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
+import {
+  IntegrationBranchPreparationIntentSchema,
+  IntegrationBranchPreparationObservedSchema,
+  type IntegrationBranchPreparationIntent,
+  type IntegrationBranchPreparationObserved,
+} from "../contracts/integration-branch-preparation.js";
 
 export type PlannedTaskStatus = "planned" | "ready" | "running" | "blocked" | "superseded" | "completed";
 
@@ -90,12 +96,17 @@ export interface MilestoneView {
   readonly maxConcurrentWriters: number | null;
   readonly result: MilestoneTerminalResult | null;
   readonly releaseOperation: ReleaseOperationBoundPayload | null;
+  readonly integrationBranchPreparation?: {
+    readonly intent: IntegrationBranchPreparationIntent;
+    readonly observed: IntegrationBranchPreparationObserved | null;
+  } | null;
 }
 
 export interface WriterOwnershipView {
   readonly batchId: string;
   readonly writerTaskId: string;
   readonly reviewerTaskId: string;
+  readonly reviewerLifecycle: "scheduler" | "execution";
   readonly actorId: string;
   readonly capabilityId: string;
   readonly transportModelId: string;
@@ -147,6 +158,7 @@ interface MilestoneState {
   writerBatchIds: Set<string>;
   result: MilestoneTerminalResult | null;
   releaseOperation: ReleaseOperationBoundPayload | null;
+  integrationBranchPreparation: { intent: IntegrationBranchPreparationIntent; observed: IntegrationBranchPreparationObserved | null } | null;
 }
 
 const TERMINAL_EVENTS = new Map<string, TerminalOutcome>([
@@ -198,6 +210,7 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     writerBatchIds: new Set(),
     result: null,
     releaseOperation: null,
+    integrationBranchPreparation: null,
   };
 
   for (const event of events.slice(1)) {
@@ -257,6 +270,12 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       case "milestone.replanning_policy_bound":
         applyReplanningPolicyBound(state, event);
         break;
+      case "milestone.integration_branch_preparation_intent":
+        applyIntegrationBranchPreparationIntent(state, event);
+        break;
+      case "milestone.integration_branch_preparation_observed":
+        applyIntegrationBranchPreparationObserved(state, event);
+        break;
       case "milestone.task_ready":
         updateTask(state, event, "ready");
         state.lifecycle = state.lifecycle === "planning" ? "ready" : state.lifecycle;
@@ -272,6 +291,9 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       case "milestone.task_completed":
         observeOpenCodeCompleted(state, event);
         updateTask(state, event, "completed");
+        break;
+      case "milestone.agent_execution_completed":
+        observeOpenCodeCompleted(state, event);
         break;
       case "milestone.writer_batch_started":
         applyWriterBatchStarted(state, event);
@@ -401,6 +423,7 @@ function applyWriterBatchStarted(state: MilestoneState, event: StoredEvent): voi
       batchId: payload.batchId,
       writerTaskId: claim.writerTaskId,
       reviewerTaskId: claim.reviewerTaskId,
+      reviewerLifecycle: claim.reviewerLifecycle,
       actorId: claim.actorId,
       capabilityId: claim.capabilityId,
       transportModelId: claim.transportModelId,
@@ -482,6 +505,30 @@ function observeOpenCodeRunning(state: MilestoneState, event: StoredEvent): void
     transportModelId: parsed.requestedModel.transportModelId,
     repositoryRevision: parsed.securityBoundary.repositoryRevision,
   });
+}
+
+function applyIntegrationBranchPreparationIntent(state: MilestoneState, event: StoredEvent): void {
+  const intent = IntegrationBranchPreparationIntentSchema.parse(event.payload);
+  if (state.plan === null || state.authorityEnvelope === null || state.replanningPolicy === null ||
+    state.integrationBranchPreparation !== null || state.startedTasks.size > 0 ||
+    intent.milestoneId !== state.milestoneId || intent.projectId !== state.projectId ||
+    intent.correlationId !== event.correlationId) {
+    throw new Error("integration branch preparation intent is out of order or contradicts milestone authority");
+  }
+  state.integrationBranchPreparation = { intent, observed: null };
+}
+
+function applyIntegrationBranchPreparationObserved(state: MilestoneState, event: StoredEvent): void {
+  const observed = IntegrationBranchPreparationObservedSchema.parse(event.payload);
+  const preparation = state.integrationBranchPreparation;
+  const intentEvent = state.seenEvents.find((candidate) =>
+    candidate.type === "milestone.integration_branch_preparation_intent");
+  if (preparation === null || preparation.observed !== null || intentEvent === undefined ||
+    event.causationId !== intentEvent.eventId || observed.intentDigest !== preparation.intent.intentDigest ||
+    observed.fullRef !== preparation.intent.fullRef || observed.observedCommit !== preparation.intent.intendedBaseCommit) {
+    throw new Error("integration branch preparation observation contradicts its intent");
+  }
+  preparation.observed = observed;
 }
 
 function observeOpenCodeCompleted(state: MilestoneState, event: StoredEvent): void {
@@ -568,7 +615,10 @@ function assertCleanupReconciliation(previous: Record<string, unknown>, complete
 
 function observeTrace(state: MilestoneState, event: StoredEvent): void {
   const parsed = OpenCodeTraceObservedPayloadSchema.parse(objectPayload(event));
-  if (state.tasks.get(parsed.taskId)?.status !== "completed") throw new Error("OpenCode trace observation requires task completion");
+  const taskStatus = state.tasks.get(parsed.taskId)?.status;
+  if (taskStatus !== "completed" && !(parsed.deferredCompletion && taskStatus === "running")) {
+    throw new Error("OpenCode trace observation requires task completion");
+  }
   const prior = state.traceOutcomes.get(parsed.taskId);
   if (prior !== undefined && !(prior === "emitted" && parsed.outcome === "failed")) {
     throw new Error("duplicate OpenCode trace observation");
@@ -915,6 +965,9 @@ function updateTask(
 
 function assertSuccessfulMilestoneCompletion(state: MilestoneState): void {
   if (state.plan === null) throw new Error("successful milestone completion requires a plan");
+  if (state.integrationBranchPreparation !== null && state.integrationBranchPreparation.observed === null) {
+    throw new Error("successful milestone completion requires observed integration branch preparation");
+  }
   for (const task of state.plan.tasks) {
     const view = state.tasks.get(task.taskId);
     if (view?.terminalOutcome !== "completed") {
@@ -995,7 +1048,8 @@ function freezeView(state: MilestoneState): MilestoneView {
     revisions: Object.freeze([...state.revisions]),
     planHistory: Object.freeze([...state.planHistory]),
     executedTaskIds: Object.freeze([...state.startedTasks].sort()),
-    hasActiveEffects: state.openCodeRuns.size > 0 || [...state.resources.values()].some((resource) => resource.cleanup === null),
+    hasActiveEffects: state.openCodeRuns.size > 0 || [...state.resources.values()].some((resource) => resource.cleanup === null) ||
+      (state.integrationBranchPreparation !== null && state.integrationBranchPreparation.observed === null),
     hasUncertainEffects: [...state.resources.values()].some((resource) => resource.cleanup?.["outcome"] === "uncertain"),
     hasTraceFailure: [...state.traceOutcomes.values()].some((outcome) => outcome === "failed"),
     replanningAttentionHistory: Object.freeze([...state.replanningAttentionHistory]),
@@ -1006,6 +1060,10 @@ function freezeView(state: MilestoneState): MilestoneView {
     maxConcurrentWriters: state.maxConcurrentWriters,
     result: state.result,
     releaseOperation: state.releaseOperation,
+    integrationBranchPreparation: state.integrationBranchPreparation === null ? null : Object.freeze({
+      intent: state.integrationBranchPreparation.intent,
+      observed: state.integrationBranchPreparation.observed,
+    }),
   });
 }
 

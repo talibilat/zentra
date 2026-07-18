@@ -196,6 +196,7 @@ export const MilestoneCompletedPayloadSchema = z.strictObject({
 export const WriterBatchClaimSchema = z.strictObject({
   writerTaskId: IdentitySchema,
   reviewerTaskId: IdentitySchema,
+  reviewerLifecycle: z.enum(["scheduler", "execution"]).default("scheduler"),
   actorId: IdentitySchema,
   capabilityId: IdentitySchema,
   transportModelId: IdentitySchema,

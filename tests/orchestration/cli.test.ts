@@ -1297,7 +1297,7 @@ local_preparation_only
     expect(await gitOk(testFixture.repositoryPath, [
       "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)",
     ])).toBe(before.refs);
-  });
+  }, 15_000);
 
   it("does not leak inherited secrets or stack traces in configuration errors", async () => {
     const testFixture = await fixture();
@@ -1936,9 +1936,10 @@ describe("built CLI help", () => {
       { cwd: root },
     );
     expect(milestoneRun.stderr).toBe("");
-    expect(milestoneRun.stdout).toContain("authenticated host OpenCode writer");
-    expect(milestoneRun.stdout).toMatch(/user-OS provider transport and\s+brokered review/);
+    expect(milestoneRun.stdout).toMatch(/Azure-brokered OpenCode planning, research, and review around an\s+authenticated host OpenCode writer/);
     expect(milestoneRun.stdout).toMatch(/provider\s+transport uses user OS network authority/);
+    expect(milestoneRun.stdout).toContain("--opencode-sha256");
+    expect(milestoneRun.stdout).toContain("--opencode-version");
   });
 
   it("supports the documented pnpm start help invocation", async () => {

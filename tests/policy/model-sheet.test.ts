@@ -25,7 +25,7 @@ const validSheet = `# Zentra Model Sheet
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
 | opencode-planner | opencode | anthropic/claude-sonnet-4 | planner,researcher | planning,research | medium | 200000 | 2 | read_repository,web_research | declared | opencode-general | 8/10 |
-| opencode-general | opencode | openrouter/qwen3-coder | planner,researcher,implementer,reviewer | coding,review | low | 128000 | 4 | read_repository,write_worktree,review_diff | denied | none | 3/4 |
+| opencode-general | opencode | azure/general-deployment | planner,researcher,implementer,reviewer | coding,review | low | 128000 | 4 | read_repository,write_worktree,review_diff | denied | none | 3/4 |
 `;
 
 describe("model sheet parser", () => {

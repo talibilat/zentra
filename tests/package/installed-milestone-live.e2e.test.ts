@@ -129,6 +129,7 @@ describe.skipIf(!liveGateEnabled)(
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | live-planner | opencode | ${live.azureDeployment} | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| live-researcher | opencode | ${live.azureDeployment} | researcher | research | low | 128000 | 1 | read_repository | denied | none | 1/1 |
 | live-implementer | opencode | ${live.implementerModel} | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
 | live-reviewer | opencode | ${live.azureDeployment} | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
@@ -200,6 +201,10 @@ local_preparation_only
         live.openCodeExecutable,
         "--opencode-home",
         live.openCodeHome,
+        "--opencode-sha256",
+        live.expectedSha256,
+        "--opencode-version",
+        live.expectedVersion,
         "--agent-tail-jsonl",
         trace,
         "--file",

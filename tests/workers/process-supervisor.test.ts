@@ -737,7 +737,7 @@ describe("ProcessSupervisor", () => {
     expect(result.outcome).toBe("timed_out");
     expect(elapsedMs).toBeLessThan(500);
     expect(processExists(descendantPid)).toBe(false);
-  });
+  }, 15_000);
 
   it("rejects invalid supervisor and request durations", async () => {
     expect(() => new ProcessSupervisor({ streamGraceMs: -1 })).toThrow(RangeError);

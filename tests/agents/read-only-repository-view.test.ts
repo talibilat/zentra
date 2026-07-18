@@ -1,11 +1,13 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createReadOnlyRepositoryView } from "../../src/agents/read-only-repository-view.js";
+import { createReadOnlyRepositoryView, createReadOnlyRepositoryViewAtCommit } from "../../src/agents/read-only-repository-view.js";
 import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
+import { GitClient } from "../../src/workspaces/git-client.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -53,7 +55,43 @@ describe("createReadOnlyRepositoryView", () => {
     expect(() => createReadOnlyRepositoryView(root, ["src/**"], ["src/**"], viewPath(root, 5))).toThrow("overlaps");
     expect(() => createReadOnlyRepositoryView(root, ["missing.txt"], [], viewPath(root, 6))).toThrow("does not exist");
   });
+
+  it("materializes immutable committed blobs despite checkout mutation and ref races", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-exact-read-view-")));
+    roots.push(root);
+    const git = new GitClient();
+    await gitOk(git, root, ["init", "-b", "main"]);
+    await gitOk(git, root, ["config", "user.name", "Zentra Test"]);
+    await gitOk(git, root, ["config", "user.email", "test@zentra.local"]);
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(path.join(root, "src/value.txt"), "committed bytes\n");
+    await gitOk(git, root, ["add", "--", "."]);
+    await gitOk(git, root, ["commit", "-m", "snapshot"]);
+    const commit = (await git.run(root, ["rev-parse", "HEAD"])).stdout.trim();
+    let raced = false;
+    const racingGit = {
+      run: async (cwd: string, args: readonly string[], options?: Parameters<GitClient["run"]>[2]) => {
+        if (!raced && args[0] === "cat-file") {
+          raced = true;
+          writeFileSync(path.join(root, "src/value.txt"), "mutable checkout bytes\n");
+          await gitOk(git, root, ["commit", "--allow-empty", "-m", "advanced ref"]);
+        }
+        return git.run(cwd, args, options);
+      },
+    } as GitClient;
+    const view = await createReadOnlyRepositoryViewAtCommit(
+      racingGit, root, commit, ["src/**"], [], viewPath(root, 7), AbortSignal.timeout(10_000),
+    );
+    roots.push(view.path);
+    expect(readFileSync(path.join(view.path, "src/value.txt"), "utf8")).toBe("committed bytes\n");
+    expect(view.revision).toBe(createHash("sha256").update(commit, "utf8").digest("hex"));
+  });
 });
+
+async function gitOk(git: GitClient, cwd: string, args: readonly string[]): Promise<void> {
+  const result = await git.run(cwd, args);
+  if (result.exitCode !== 0) throw new Error(result.stderr);
+}
 
 function fixture(): string {
   const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-read-view-source-")));

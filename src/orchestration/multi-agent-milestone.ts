@@ -19,6 +19,7 @@ export interface MultiAgentMilestoneRequest {
   readonly milestoneId: string;
   readonly readOnlyTasks: readonly ScheduledReadOnlyTask[];
   readonly writerSchedule: MultiWriterScheduleRequest;
+  readonly prepareWriterSchedule?: () => Promise<MultiWriterScheduleRequest | null>;
 }
 
 export class MultiAgentMilestoneCoordinator {
@@ -99,7 +100,11 @@ export class MultiAgentMilestoneCoordinator {
       }
     }
 
-    let milestone = await this.writers.run({ ...request.writerSchedule, milestoneId: request.milestoneId });
+    const preparedSchedule = request.prepareWriterSchedule === undefined
+      ? request.writerSchedule
+      : await request.prepareWriterSchedule();
+    if (preparedSchedule === null) return this.requireMilestone(request.milestoneId);
+    let milestone = await this.writers.run({ ...preparedSchedule, milestoneId: request.milestoneId });
     if (milestone.lifecycle === "paused" || milestone.lifecycle === "terminal" ||
       milestone.hasActiveEffects || milestone.hasUncertainEffects ||
       Object.values(milestone.writerOwnership).some((ownership) => ownership.status === "claimed")) {

@@ -33,8 +33,8 @@ describe("installed provider configuration", () => {
     }, controller.signal)).resolves.toMatchObject({ outcome: "cancelled" });
   });
 
-  it("rejects OpenRouter from installed configuration before broker construction", () => {
-    expect(() => writeAndLoad({ provider: "openrouter", credentialEnv: "LEGACY_KEY", timeoutMs: 5_000 })).toThrow();
+  it("rejects a non-Azure provider before broker construction", () => {
+    expect(() => writeAndLoad({ provider: "unsupported", credentialEnv: "LEGACY_KEY", timeoutMs: 5_000 })).toThrow();
   });
 });
 

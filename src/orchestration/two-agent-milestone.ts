@@ -16,6 +16,7 @@ export interface TwoAgentExecutionRequest extends OpenCodeIntegratedSingleFileTr
 
 export interface TwoAgentExecution {
   run(request: TwoAgentExecutionRequest): Promise<TaskView>;
+  resumeValidatedHandoff?(request: TwoAgentExecutionRequest): Promise<TaskView>;
 }
 
 export interface TwoAgentMilestoneRequest {

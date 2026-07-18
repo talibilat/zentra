@@ -5,7 +5,9 @@ import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
+import type { UntrustedEvidenceHandoff } from "../orchestration/untrusted-evidence-handoff.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
+import { createOpenCodeWriterEventChain, type OpenCodeWriterEventChain } from "../agents/opencode-writer-events.js";
 import {
   CapabilityEnvelopeSchema,
   envelopeReadPaths,
@@ -15,6 +17,8 @@ import {
 
 export interface WriterTaskPacket {
   readonly brief: string;
+  readonly guidance?: UntrustedEvidenceHandoff;
+  readonly baseRevisionSha256?: string;
   readonly ownedPaths: readonly string[];
   readonly readPaths?: readonly string[];
   readonly writePaths?: readonly string[];
@@ -62,6 +66,10 @@ export interface OpenCodeWriterReport {
   };
   readonly stdoutSha256: string;
   readonly stderrSha256: string;
+  readonly eventChain: OpenCodeWriterEventChain;
+  readonly rawOutputPolicy: "not_retained";
+  readonly protocolFailure: "invalid_native_event_stream" | null;
+  /** Transient process output. Callers must not journal or otherwise retain it. */
   readonly stdout: string;
   readonly stderr: string;
   readonly startedAt: string;
@@ -112,8 +120,16 @@ export class OpenCodeWriter {
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
       },
     }, signal, "opencode_writer");
-    new OpenCodeWorkerEventAdapter().assertNoDelegation(result.events);
-    return report(request, executable, cwd, argv, packet, result, startedAt);
+    let eventChain: OpenCodeWriterEventChain;
+    let protocolFailure = false;
+    try {
+      eventChain = createOpenCodeWriterEventChain(result.rawStdout, result.events);
+      if (result.outcome === "completed") new OpenCodeWorkerEventAdapter().assertSupportedTopLevelEvents(result.events);
+    } catch {
+      eventChain = createOpenCodeWriterEventChain(result.rawStdout, []);
+      protocolFailure = true;
+    }
+    return report(request, executable, cwd, argv, packet, result, eventChain, protocolFailure, startedAt);
   }
 }
 
@@ -124,10 +140,12 @@ function report(
   argv: readonly string[],
   packet: string,
   result: WorkerResult,
+  eventChain: OpenCodeWriterEventChain,
+  protocolFailure: boolean,
   startedAt: string,
 ): OpenCodeWriterReport {
   return Object.freeze({
-    outcome: result.outcome,
+    outcome: protocolFailure && result.outcome === "completed" ? "failed" : result.outcome,
     exitCode: result.exitCode,
     executable,
     modelId: request.model.id,
@@ -139,13 +157,16 @@ function report(
       modelTools: request.packet.securityBoundary.modelToolNetwork,
       harnessProviderTransport: request.packet.securityBoundary.harnessProviderTransport,
     }),
-    stdoutSha256: sha256(result.rawStdout),
+    stdoutSha256: eventChain.stdoutSha256,
     stderrSha256: sha256(result.stderr),
+    eventChain,
+    rawOutputPolicy: "not_retained",
+    protocolFailure: protocolFailure ? "invalid_native_event_stream" : null,
     stdout: result.rawStdout,
     stderr: result.stderr,
     startedAt,
     finishedAt: new Date().toISOString(),
-    deniedToolRequests: Object.freeze(deniedToolRequests(result.events)),
+    deniedToolRequests: Object.freeze(protocolFailure ? [] : deniedToolRequests(result.events)),
   });
 }
 
@@ -200,6 +221,10 @@ function writerConfiguration(model: ModelCapability, packet: WriterTaskPacket): 
 }
 
 function assertCapabilityPacket(request: OpenCodeWriterRequest): void {
+  if (request.packet.guidance !== undefined &&
+    request.packet.baseRevisionSha256 !== request.packet.guidance.baseRevisionSha256) {
+    throw new Error("OpenCode writer packet base does not match its guidance");
+  }
   if (request.capabilityEnvelope === undefined) return;
   const envelope = CapabilityEnvelopeSchema.parse(request.capabilityEnvelope);
   const packetTools = [...(request.packet.toolPermissions ?? [])].sort();

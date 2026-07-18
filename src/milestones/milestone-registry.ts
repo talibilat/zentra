@@ -50,6 +50,7 @@ import {
 import type { TerminalOutcome } from "../contracts/task.js";
 import { modelSheetSha256 } from "../routing/model-router.js";
 import { projectTask } from "../tasks/task-projection.js";
+import { uncertainEffectPayload } from "../contracts/uncertain-effect.js";
 import { ReviewDecisionSchema } from "../reviews/reviewer-adapter.js";
 import { canonicalValidationDigest } from "../reviews/reviewer-adapter.js";
 import { ValidationReportSchema } from "../capabilities/validation-runner.js";
@@ -104,10 +105,20 @@ export interface MilestoneRecord extends MilestoneView {
   readonly tracePath: string | null;
 }
 
+export interface WriterRecoveryState {
+  readonly task: ReturnType<typeof projectTask>;
+  readonly safeValidatedHandoff: boolean;
+  readonly uncertain: boolean;
+  readonly workspace: { readonly path: string; readonly branch: string } | null;
+  readonly evidence: Readonly<Record<string, string>>;
+}
+
 export interface StartWriterBatchInput {
   readonly batchId: string;
   readonly maxConcurrentWriters: number;
-  readonly writers: readonly WriterBatchClaim[];
+  readonly writers: readonly (Omit<WriterBatchClaim, "reviewerLifecycle"> & {
+    readonly reviewerLifecycle?: WriterBatchClaim["reviewerLifecycle"];
+  })[];
 }
 
 export type TaskAdmissionResult =
@@ -740,6 +751,145 @@ export class MilestoneRegistry {
     return this.reconcileCapabilityTaskProjection(paused) ? this.inspect(milestoneId)! : paused;
   }
 
+  pauseForStaleEvidence(milestoneId: string, candidateDigest: string): MilestoneRecord {
+    return this.pauseForReplanningReason(milestoneId, candidateDigest, "evidence", "stale-evidence");
+  }
+
+  pauseForStaleHandoff(
+    milestoneId: string,
+    writerTaskId: string,
+    evidence: Readonly<Record<string, string>>,
+  ): MilestoneRecord {
+    return this.pauseForReplanningReason(
+      milestoneId,
+      digestCanonical({ writerTaskId, evidence }),
+      "evidence",
+      "stale-handoff",
+      evidence,
+    );
+  }
+
+  pauseForIntegrationBranchUncertainty(
+    milestoneId: string,
+    evidence: Readonly<Record<string, string>>,
+  ): MilestoneRecord {
+    return this.pauseForReplanningReason(
+      milestoneId,
+      digestCanonical({ operation: "integration_branch_preparation", evidence }),
+      "uncertain_effect",
+      "uncertain-integration-branch",
+      evidence,
+    );
+  }
+
+  inspectWriterRecovery(milestoneId: string, writerTaskId: string, reviewerTaskId: string): WriterRecoveryState {
+    const milestoneEvents = this.journal.readStream(milestoneId);
+    const milestone = projectMilestone(milestoneEvents);
+    if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
+    const taskEvents = this.journal.readStream(writerTaskId);
+    const task = projectTask(taskEvents);
+    const dispatch = taskEvents.find((event) => event.type === "task.review_dispatch_intent");
+    const reviewerEffects = milestoneEvents.filter((event) => {
+      if (event.type !== "milestone.agent_resource_intent" && event.type !== "milestone.task_running") return false;
+      return typeof event.payload === "object" && event.payload !== null &&
+        (event.payload as Readonly<Record<string, unknown>>)["taskId"] === reviewerTaskId;
+    });
+    const reviewerWorkers = Object.values(projectWorkerLifecycle(
+      this.journal.readStream(workerStreamId(reviewerTaskId)),
+    ).workers);
+    const writerWorkers = Object.values(projectWorkerLifecycle(
+      this.journal.readStream(workerStreamId(writerTaskId)),
+    ).workers).filter((worker) => worker.status !== "terminal");
+    const reviewerState = milestone.tasks[reviewerTaskId];
+    const writerRunning = milestone.tasks[writerTaskId]?.status === "running" &&
+      (task === null || (task.lifecycle !== "awaiting_review" && task.lifecycle !== "integration_ready" && task.lifecycle !== "integrating"));
+    const uncertain = dispatch !== undefined || reviewerEffects.length > 0 || reviewerWorkers.length > 0 ||
+      reviewerState?.status === "running" || writerWorkers.length > 0 || writerRunning;
+    const lease = taskEvents.find((event) => event.type === "task.leased");
+    const workspacePath = objectPayloadString(lease?.payload, "workspace");
+    const evidenceEvents = [dispatch, ...reviewerEffects].filter((event): event is StoredEvent => event !== undefined);
+    const evidence: Record<string, string> = {
+      writerTaskId,
+      reviewerTaskId,
+      reviewerStatus: reviewerState?.status ?? "missing",
+      reviewerWorkerCount: String(reviewerWorkers.length),
+      writerWorkerCount: String(writerWorkers.length),
+    };
+    for (let index = 0; index < evidenceEvents.length && index < 8; index += 1) {
+      const event = evidenceEvents[index]!;
+      evidence[`event${index + 1}`] = `${event.streamId}:${event.streamVersion}:${event.type}:${digestCanonical(event.payload)}`;
+    }
+    return Object.freeze({
+      task,
+      safeValidatedHandoff: task?.lifecycle === "awaiting_review" && dispatch === undefined && !uncertain,
+      uncertain,
+      workspace: workspacePath === null ? null : { path: workspacePath, branch: `ticket/${writerTaskId}` },
+      evidence: Object.freeze(evidence),
+    });
+  }
+
+  pauseForUncertainReviewer(milestoneId: string, writerTaskId: string, state: WriterRecoveryState): MilestoneRecord {
+    const tasks = new TaskService(this.journal);
+    let current = tasks.get(writerTaskId);
+    if (current === null) {
+      const milestone = this.inspect(milestoneId);
+      const planned = milestone?.plan?.tasks.find((task) => task.taskId === writerTaskId);
+      if (milestone === null || planned === undefined) throw new Error("uncertain reviewer recovery lacks its writer task stream");
+      current = tasks.create({ taskId: writerTaskId, projectId: milestone.projectId, title: planned.title,
+        correlationId: milestone.traceId });
+    }
+    if (current.uncertainEffect === null) {
+      tasks.pauseForUncertainEffect(writerTaskId, uncertainEffectPayload({
+        boundary: state.task?.lifecycle === "awaiting_review" ? "review" : "worker",
+        operation: state.task?.lifecycle === "awaiting_review" ? "independent reviewer dispatch" : "OpenCode writer process",
+        reason: "A durable process or reviewer intent may have dispatched before restart; automatic retry is forbidden.",
+        requestedBy: "zentra-recovery-controller",
+        workspace: state.workspace,
+        evidence: state.evidence,
+      }));
+    }
+    return this.pauseForReplanningReason(
+      milestoneId,
+      digestCanonical({ writerTaskId, evidence: state.evidence }),
+      "uncertain_effect",
+      "uncertain-reviewer",
+    );
+  }
+
+  private pauseForReplanningReason(
+    milestoneId: string,
+    candidateDigest: string,
+    reason: ReplanningReason,
+    revisionPrefix: string,
+    evidence: Readonly<Record<string, string>> = {},
+  ): MilestoneRecord {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const events = this.journal.readStream(milestoneId);
+      const view = projectMilestone(events);
+      if (view === null || view.plan === null) throw new Error(`milestone ${milestoneId} does not exist`);
+      const attention = createReplanningAttention({
+        milestoneId,
+        revisionId: `${revisionPrefix}-${candidateDigest.slice(0, 32)}`,
+        priorPlanDigest: digestCanonical(view.plan),
+        candidateDigest,
+        reason,
+      });
+      if (view.lifecycle === "paused") {
+        if (view.replanningAttention?.attentionId === attention.attentionId) return withTrace(view, events);
+        throw new Error(`milestone ${milestoneId} is paused`);
+      }
+      const next = this.newMilestoneEvent(events, milestoneId, "milestone.paused", { attention, evidence });
+      try {
+        projectMilestone([...events, candidateStoredEvent(next, view.streamVersion + 1)]);
+        this.journal.append(milestoneId, view.streamVersion, [next]);
+        return this.inspect(milestoneId)!;
+      } catch (error) {
+        if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      }
+    }
+    throw new Error("recovery attention did not converge");
+  }
+
   resolveCapabilityBoundary(input: {
     readonly milestoneId: string;
     readonly attentionId: string;
@@ -1272,6 +1422,12 @@ function canonicalPayload(payload: unknown): unknown {
   const serialized = JSON.stringify(payload);
   if (serialized === undefined) throw new Error("event payload must be JSON-serializable");
   return JSON.parse(serialized) as unknown;
+}
+
+function objectPayloadString(payload: unknown, key: string): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const value = (payload as Readonly<Record<string, unknown>>)[key];
+  return typeof value === "string" ? value : null;
 }
 
 function assessRevision(
