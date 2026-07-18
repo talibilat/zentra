@@ -39,6 +39,7 @@ import {
   roleModelSupports,
   type RoleCapabilityBinding,
 } from "../workers/role-capability-envelope.js";
+import { CostUsdNanoSchema, costFieldsAgree, usdNumberToNano } from "../contracts/cost.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
@@ -50,7 +51,21 @@ const ModelMetadataSchema = z.strictObject({
   id: z.string().min(1).max(256),
   provider: z.string().min(1).max(128),
   name: z.string().min(1).max(256),
+  configurationDigest: DigestSchema.optional(),
 });
+const OpenCodeUsageSchema = z.strictObject({
+  seconds: z.number().nonnegative().max(86_400),
+  inputTokens: z.number().int().nonnegative().max(2_000_000),
+  outputTokens: z.number().int().nonnegative().max(2_000_000),
+  costUsd: z.number().nonnegative().max(10_000),
+  costUsdNano: CostUsdNanoSchema.optional(),
+  toolCalls: z.number().int().nonnegative().max(100_000),
+  modelTurns: z.number().int().nonnegative().max(100_000).optional(),
+}).superRefine((usage, context) => {
+  if (usage.costUsdNano !== undefined && !costFieldsAgree(usage.costUsd, usage.costUsdNano)) {
+    context.addIssue({ code: "custom", message: "OpenCode usage cost fields disagree" });
+  }
+}).transform((usage) => ({ ...usage, costUsdNano: usage.costUsdNano ?? usdNumberToNano(usage.costUsd) }));
 
 export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
   capsuleId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
@@ -98,14 +113,7 @@ export const OpenCodeReadOnlyCapsuleResultSchema = z.strictObject({
   evidence: z.array(EvidenceSchema).max(128),
   cleanup: z.enum(["completed", "uncertain"]),
   brokerTransport: z.enum(["completed", "uncertain"]),
-  usage: z.strictObject({
-    seconds: z.number().nonnegative().max(86_400),
-    inputTokens: z.number().int().nonnegative().max(2_000_000),
-    outputTokens: z.number().int().nonnegative().max(2_000_000),
-    costUsd: z.number().nonnegative().max(10_000),
-    toolCalls: z.number().int().nonnegative().max(100_000),
-    modelTurns: z.number().int().nonnegative().max(100_000).optional(),
-  }).optional(),
+  usage: OpenCodeUsageSchema.optional(),
 }).superRefine((result, context) => {
   if (result.outcome === "completed" && (
     result.cleanup !== "completed" || result.brokerTransport !== "completed" ||
@@ -142,7 +150,7 @@ export type OpenCodeCapsuleObservation =
   | { readonly type: "resources_prepared"; readonly payload: Omit<z.infer<typeof OpenCodeResourcesPreparedPayloadSchema>, "taskId"> }
   | { readonly type: "cleanup_observed"; readonly payload: Omit<z.infer<typeof OpenCodeCleanupObservedPayloadSchema>, "taskId"> }
   | { readonly type: "model_started"; readonly modelId: string }
-  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly toolCalls: number; readonly modelTurns: number } }
+  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly costUsdNano: number; readonly toolCalls: number; readonly modelTurns: number } }
   | { readonly type: "research_started"; readonly requestId: string }
   | { readonly type: "research_completed"; readonly requestId: string; readonly result: WebResearchResult };
 
@@ -270,6 +278,7 @@ export class OpenCodeReadOnlyAgent {
       budget: {
         budgetId: `${request.milestoneId}/${request.taskId}`,
         ...request.budget,
+        maxCostUsdNano: usdNumberToNano(request.budget.maxCostUsd),
         maxToolCalls: 10_000,
         maxModelTurns: 32,
         maxActiveWorkers: 1,
@@ -519,6 +528,9 @@ export class OpenCodeReadOnlyAgent {
         capabilityId: packet.capabilityId,
         transportModelId: result.model?.id ?? packet.transportModelId,
         repositoryRevision: view.revision,
+        ...(result.model?.configurationDigest === undefined ? {} : {
+          providerConfigurationDigest: result.model.configurationDigest,
+        }),
       }),
     }));
     const completedPayload = OpenCodeMilestoneCompletedPayloadSchema.parse({

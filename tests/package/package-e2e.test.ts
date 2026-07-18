@@ -252,11 +252,11 @@ describe("publishable CLI package", () => {
     mkdirSync(milestoneRoot);
     const milestoneProject = await initializeProject(milestoneRoot);
     const milestoneModels = path.join(milestoneRoot, "MODELS.md");
-    const milestoneProvider = path.join(milestoneRoot, "openrouter.json");
+    const milestoneProvider = path.join(milestoneRoot, "azure.json");
     const milestoneTrace = path.join(milestoneRoot, "milestone.jsonl");
     const milestoneOpenCode = path.join(milestoneRoot, "opencode");
     const milestoneOpenCodeHome = path.join(milestoneRoot, "opencode-home");
-    const milestonePreload = path.join(milestoneRoot, "intercept-openrouter.mjs");
+    const milestonePreload = path.join(milestoneRoot, "intercept-azure.mjs");
     const milestoneWriterObservation = path.join(milestoneRoot, "writer-observation.json");
     mkdirSync(milestoneOpenCodeHome);
     writeFileSync(milestoneModels, `# Models
@@ -264,11 +264,17 @@ describe("publishable CLI package", () => {
 ## Models
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| planner | opencode | fixture/planner | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| planner | opencode | zentra-deployment | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
 | implementer | opencode | fixture/implementer | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
-| reviewer | opencode | fixture/reviewer | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
+| reviewer | opencode | zentra-deployment | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
-    writeFileSync(milestoneProvider, '{"provider":"openrouter","credentialEnv":"ZENTRA_TEST_OPENROUTER_KEY","timeoutMs":5000}\n', "utf8");
+    writeFileSync(milestoneProvider, JSON.stringify({
+      provider: "azure", endpoint: "https://zentra-test.openai.azure.com", deployment: "zentra-deployment",
+      apiVersion: "2025-04-01-preview", credentialEnv: "ZENTRA_TEST_AZURE_OPENAI_API_KEY", timeoutMs: 5000,
+      maxResponseBytes: 1048576, maxInputTokens: 100000, maxOutputTokens: 10000, maxToolCalls: 4,
+      expectedProviderModels: ["provider-model"],
+      inputTokenRateUsdPerMillion: "1", outputTokenRateUsdPerMillion: "2",
+    }) + "\n", "utf8");
     writeFileSync(milestoneOpenCode, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -284,19 +290,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       'import { createHash } from "node:crypto";',
       'import { registerHooks } from "node:module";',
       'registerHooks({ load(url, context, nextLoad) {',
+      '  if (url.endsWith("/dist/src/providers/azure-openai-model-broker.js")) return { format: "module", shortCircuit: true, source: `import { createHash } from "node:crypto"; export const AzureOpenAIProviderConfigSchema={parse(value){if(value?.provider!=="azure")throw new Error("invalid provider");return value}}; export class AzureOpenAIModelBroker { static create(config,environment){if(!environment[config.credentialEnv])throw new Error("credential unavailable");return new AzureOpenAIModelBroker(config)} constructor(config){this.config=config} async execute(request,signal){if(signal.aborted)return{outcome:"cancelled",response:null,model:null,usage:null};if(process.env.ZENTRA_TEST_PROVIDER_FAILURE==="1")return{outcome:"failed",response:null,model:null,usage:null};let content="Use only the explicitly owned file.";if(request.prompt.includes("requiredResponse")){const challenge=JSON.parse(request.prompt);content=JSON.stringify({schemaVersion:1,reviewerId:challenge.request.reviewerId,decision:"approve",requestSha256:createHash("sha256").update(JSON.stringify(challenge.request),"utf8").digest("hex"),diffSha256:challenge.request.diffSha256,validationSha256:challenge.request.validationSha256,decidedAt:"2026-07-17T12:00:00.000Z",reason:"The installed package exact diff is approved."})}const configurationDigest=createHash("sha256").update(JSON.stringify(this.config),"utf8").digest("hex");return{outcome:"completed",response:{type:"text",text:content},model:{id:this.config.deployment,provider:"azure",name:"provider-model",configurationDigest},usage:{inputTokens:20,outputTokens:20,costUsd:0.00006,costUsdNano:60000}}} }` };',
       '  if (!url.endsWith("/dist/src/capsule/opencode-read-only-capsule.js")) return nextLoad(url, context);',
       '  return { format: "module", shortCircuit: true, source: `export class DockerOpenCodeReadOnlyCapsule { async execute(request, broker, signal, observe) { observe?.({ type: "resources_prepared", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision } }); const receipt = await broker.execute({ modelId: request.transportModelId, prompt: request.rolePrompt, maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens, maxCostUsd: request.budget.maxCostUsd }, signal); observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } }); return { outcome: receipt.outcome === "completed" ? "completed" : "failed", openCode: { version: "1.18.3", executableSha256: "d".repeat(64) }, model: receipt.model, evidence: receipt.response?.type === "text" ? [{ kind: request.role === "reviewer" ? "review" : "plan", summary: receipt.response.text }] : [], cleanup: "completed", brokerTransport: receipt.outcome === "uncertain" ? "uncertain" : "completed" }; } } export function parseOpenCodeFinalAssistantText() { throw new Error("not used by external test capsule"); }` };',
       '} });',
-      'const strings = (value) => typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];',
-      'globalThis.fetch = async (input, init) => {',
-      '  if (String(input) !== "https://openrouter.ai/api/v1/chat/completions") throw new Error("unexpected test transport destination");',
-      '  if (process.env.ZENTRA_TEST_PROVIDER_FAILURE === "1") return new Response(null, { status: 500 });',
-      '  const body = JSON.parse(String(init.body)); const prompt = body.messages[0].content;',
-      '  let content = "Use only the explicitly owned file.";',
-      '  const challengeText = strings(body.messages).find((value) => value.startsWith("{") && value.includes("\\\"requiredResponse\\\""));',
-      '  if (challengeText) { const challenge = JSON.parse(challengeText); content = JSON.stringify({ schemaVersion: 1, reviewerId: challenge.request.reviewerId, decision: "approve", requestSha256: createHash("sha256").update(JSON.stringify(challenge.request), "utf8").digest("hex"), diffSha256: challenge.request.diffSha256, validationSha256: challenge.request.validationSha256, decidedAt: "2026-07-17T12:00:00.000Z", reason: "The installed package exact diff is approved." }); }',
-      '  return Response.json({ model: body.model, choices: [{ message: { content, tool_calls: [] } }], usage: { prompt_tokens: 20, completion_tokens: 20, cost: 0.01 } });',
-      '};',
     ].join("\n"), "utf8");
     const installedMilestone = await run(binary, [
       "milestone", "run", "--goal", "Update the package greeting",
@@ -312,7 +309,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     ], consumer, {
       ...subprocessEnvironment,
       NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}`,
-      ZENTRA_TEST_OPENROUTER_KEY: "package-provider-secret",
+      ZENTRA_TEST_AZURE_OPENAI_API_KEY: "package-provider-secret",
       ZENTRA_AMBIENT_SECRET: "must-not-reach-writer",
     });
     expect(installedMilestone.stdout).toContain('"kind":"milestone.created"');
@@ -338,12 +335,29 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], milestoneProject.repository)).stdout)
       .toBe("hello from package\n");
 
+    const legacyProvider = path.join(milestoneRoot, "openrouter.json");
+    const legacyDatabase = path.join(milestoneRoot, "legacy-provider.sqlite");
+    const legacyTrace = path.join(milestoneRoot, "legacy-provider.jsonl");
+    writeFileSync(legacyProvider, '{"provider":"openrouter","credentialEnv":"UNAVAILABLE_OPENROUTER_KEY","timeoutMs":5000}\n', "utf8");
+    const rejectedLegacy = await runNonzero(binary, [
+      "milestone", "run", "--goal", "Reject legacy provider",
+      "--config", milestoneProject.config, "--database", legacyDatabase,
+      "--model-sheet", milestoneModels, "--security-sheet", milestoneProject.securitySheet,
+      "--provider", legacyProvider, "--opencode", realpathSync.native(milestoneOpenCode),
+      "--opencode-home", realpathSync.native(milestoneOpenCodeHome), "--agent-tail-jsonl", legacyTrace,
+      "--file", "greeting.txt",
+    ], consumer, { ...subprocessEnvironment, NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}` });
+    expect(rejectedLegacy.code).toBe(1);
+    expect(JSON.parse(rejectedLegacy.stderr)).toMatchObject({ error: { code: "INVALID_PROVIDER_CONFIG" } });
+    expect(existsSync(legacyDatabase)).toBe(false);
+    expect(existsSync(legacyTrace)).toBe(false);
+
     const pauseModels = path.join(milestoneRoot, "PAUSE-MODELS.md");
     const pauseDatabase = path.join(milestoneRoot, "pause.sqlite");
     const pauseTrace = path.join(milestoneRoot, "pause.jsonl");
     writeFileSync(pauseModels, readFileSync(milestoneModels, "utf8").replace(
-      "fixture/planner | planner | planning | low | 128000",
-      "fixture/planner | planner | planning | low | 100",
+      "zentra-deployment | planner | planning | low | 128000",
+      "zentra-deployment | planner | planning | low | 100",
     ), "utf8");
     const baseMilestoneArgs = [
       "--config", milestoneProject.config,
@@ -356,7 +370,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     const harnessEnvironment = {
       ...subprocessEnvironment,
       NODE_OPTIONS: `--import=${pathToFileURL(milestonePreload).href}`,
-      ZENTRA_TEST_OPENROUTER_KEY: "package-provider-secret",
+      ZENTRA_TEST_AZURE_OPENAI_API_KEY: "package-provider-secret",
     };
     const pausedRun = await runNonzero(binary, [
       "milestone", "run", "--goal", "Pause at exact authority", ...baseMilestoneArgs,

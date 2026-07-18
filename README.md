@@ -12,7 +12,7 @@ The current MVP runs on one local machine for one user and executes one bounded 
 
 The `task run` command retains the bundled deterministic tracer bullet for local contract verification.
 
-The `milestone run` command is the installed real-harness workflow: a brokered OpenRouter planner, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered reviewer, and validated candidate integration.
+The `milestone run` command is the installed real-harness workflow: a brokered Azure OpenAI planner, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered Azure OpenAI reviewer, and validated candidate integration.
 
 The planner and reviewer run OpenCode in short-lived Docker capsules with sanitized read-only repository views and model turns brokered by the host.
 
@@ -265,7 +265,7 @@ zentra milestone run \
   --database /canonical/path/zentra.sqlite \
   --model-sheet /canonical/path/MODELS.md \
   --security-sheet /canonical/path/SECURITY-SHEET.md \
-  --provider /canonical/path/openrouter.json \
+  --provider /canonical/path/azure.json \
   --opencode /canonical/path/opencode \
   --opencode-home /canonical/path/opencode-home \
   --agent-tail-jsonl /canonical/path/zentra.jsonl \
@@ -279,24 +279,48 @@ The provider configuration is strict JSON:
 
 ```json
 {
-  "provider": "openrouter",
-  "credentialEnv": "ZENTRA_OPENROUTER_KEY",
-  "timeoutMs": 30000
+  "provider": "azure",
+  "endpoint": "https://resource-name.openai.azure.com",
+  "deployment": "gpt-5-mini-prod",
+  "apiVersion": "2025-04-01-preview",
+  "credentialEnv": "ZENTRA_AZURE_OPENAI_API_KEY",
+  "timeoutMs": 30000,
+  "maxResponseBytes": 4194304,
+  "maxInputTokens": 128000,
+  "maxOutputTokens": 16000,
+  "maxToolCalls": 4,
+  "expectedProviderModels": ["gpt-5-mini-2025-01-01"],
+  "inputTokenRateUsdPerMillion": "1.25",
+  "outputTokenRateUsdPerMillion": "10"
 }
 ```
 
-Production model transport uses only `https://openrouter.ai/api/v1/chat/completions`, rejects redirects, sends the exact model selected by the model sheet, and permits only bounded text or `read`, `glob`, and `grep` tool calls.
+The endpoint must be one canonical HTTPS origin with exactly one Azure resource label under `.openai.azure.com` or `.cognitiveservices.azure.com`.
+User information, paths, queries, fragments, custom ports, IP literals, localhost, private names, arbitrary headers, and non-Azure suffixes are rejected.
+Azure sovereign-cloud suffixes, including `.azure.us`, `.azure.cn`, and `.microsoftazure.de`, are unsupported until a separate typed provider configuration explicitly admits their cloud boundary.
+Zentra constructs the exact `/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}` URL internally and does not accept a caller-supplied request path or query.
+Production model transport performs bounded DNS resolution before dispatch, rejects any private resolution, pins one selected public address, verifies TLS with the Azure hostname as SNI, checks the connected peer, and only then sends the API key and one streaming POST.
+It rejects redirects, requires fatal UTF-8 and strict Azure/OpenAI SSE records, and permits only bounded text or envelope-authorized `read`, `glob`, `grep`, and brokered web-research tool calls.
 The configured environment credential name must be an uppercase environment identifier and cannot name ambient process-control variables such as `PATH`, `HOME`, or `NODE_OPTIONS`.
 The credential is resolved only by the host broker and is not written to the journal, trace, command output, model prompt, or OpenCode capsule.
+The expected provider-model list is sorted, nonempty, and exact; a response model outside that allowlist fails even when the requested deployment still matches.
+The per-million input and output rates are bounded decimal strings containing at most nine fractional digits and are operator-approved configuration, not provider-reported billing data.
+Zentra requires streamed token usage, computes cost in integer nanodollars with conservative rounding, and rejects any configured or task token, tool, response-byte, timeout, or computed-cost excess.
+`costUsdNano` is the authoritative measured and aggregated cost in broker receipts, worker observations, shared root-task budgets, replayed projections, and Agent Tail payloads.
+`costUsd` remains display metadata, must exactly correspond to `costUsdNano` when both are present, and is never used to authorize measured budget consumption.
 Planner and reviewer model turns use this host broker.
 The host OpenCode writer remains a separate boundary and may use auth already configured inside the exact canonical `--opencode-home` directory.
 The writer and probe receive that directory as their minimal `HOME`; they do not inherit ambient `HOME`, arbitrary parent secrets, or the raw broker credential.
 Use a dedicated authenticated OpenCode home created for this workflow rather than a general interactive home containing unrelated configuration or credentials.
 The implementer model in `MODELS.md` must be a model identity understood by that OpenCode installation and authenticated home.
-The planner and reviewer model values must be exact OpenRouter transport model identities.
+The planner and reviewer model values must equal the exact configured Azure deployment identity.
+The receipt retains that requested deployment as its transport identity, records the allowlisted provider-reported underlying model separately, exposes exact nanodollar cost, and binds the complete non-secret provider configuration through a SHA-256 digest.
+That provider-configuration digest is copied into durable evidence provenance.
 Cancellation proven before POST dispatch is `cancelled`.
-After POST dispatch begins, transport rejection, timeout, or cancellation is `uncertain` because remote completion and usage are unknown, and it is never retried automatically.
-Redirects, malformed or oversized received responses, model drift, invalid tool arguments, disallowed tools, and budget excess are `failed`.
+An expired DNS or connection deadline before dispatch is `timed_out`.
+After POST dispatch begins, transport rejection, timeout, cancellation, response-size termination, HTTP `408`, HTTP `5xx`, or a `200` stream missing `[DONE]`, usage, or a finish reason is `uncertain` because remote completion or usage is unknown, and it is never retried automatically.
+A complete Azure JSON error response for HTTP `4xx`, including authentication, policy, and rate-limit rejection, is `failed` because the provider response proves rejection; a truncated or malformed `4xx` body remains `uncertain`.
+Redirects, fully received malformed responses, model drift, invalid tool arguments, disallowed tools, and budget excess are `failed`.
 
 The fixed plan has exactly one planner, one implementer, and one independent reviewer selected from unambiguous approved model-sheet capabilities.
 Only the explicit `--file`, project validations, configured integration branch, security sheet, and model sheet grant authority.
@@ -312,7 +336,7 @@ The production CLI owns and closes both the trace sink and SQLite journal on eve
 The package root does not export the CLI runtime, provider transport, broker implementation, credential-bearing Fetch seam, or capsule-construction seam.
 Hermetic packed tests invoke the installed binary with test-only interception to exercise failure paths without provider traffic.
 The separate live package smoke test forbids preload, fetch, capsule, and OpenCode substitution and exercises the real fixed endpoint, Docker capsule, OpenCode executable, and authenticated OpenCode home.
-There is no product option for a provider URL, arbitrary headers, transport, or capsule implementation.
+There is no product option for an arbitrary provider URL, headers, transport, or capsule implementation.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
@@ -459,18 +483,22 @@ Run the Docker-gated OpenCode capsule test when Docker Desktop and the approved 
 ZENTRA_OPENCODE_DOCKER_E2E=1 pnpm test -- tests/capsule/opencode-read-only-capsule.test.ts
 ```
 
-Run the final installed-package smoke only with a real OpenRouter credential, a canonical OpenCode executable, a dedicated canonical authenticated OpenCode home, operator-attested executable identity, and explicit models for all three roles.
+Run the final installed-package smoke only with a real Azure OpenAI deployment and credential, a canonical OpenCode executable, a dedicated canonical authenticated OpenCode home, operator-attested executable identity, and an explicit implementer model.
 
 ```bash
 ZENTRA_LIVE_OPENCODE_E2E=1 \
-ZENTRA_LIVE_OPENROUTER_KEY='<redacted>' \
+ZENTRA_LIVE_AZURE_OPENAI_API_KEY='<redacted>' \
+ZENTRA_LIVE_AZURE_OPENAI_ENDPOINT=https://resource-name.openai.azure.com \
+ZENTRA_LIVE_AZURE_OPENAI_DEPLOYMENT=gpt-5-mini-prod \
+ZENTRA_LIVE_AZURE_OPENAI_API_VERSION=2025-04-01-preview \
+ZENTRA_LIVE_AZURE_OPENAI_EXPECTED_PROVIDER_MODELS=gpt-5-mini-2025-01-01 \
+ZENTRA_LIVE_AZURE_OPENAI_INPUT_TOKEN_RATE_USD_PER_MILLION=1.25 \
+ZENTRA_LIVE_AZURE_OPENAI_OUTPUT_TOKEN_RATE_USD_PER_MILLION=10 \
 ZENTRA_LIVE_OPENCODE_EXECUTABLE=/canonical/path/to/opencode \
 ZENTRA_LIVE_OPENCODE_HOME=/canonical/path/to/dedicated-opencode-home \
 ZENTRA_LIVE_OPENCODE_SHA256='<redacted-lowercase-sha256>' \
 ZENTRA_LIVE_OPENCODE_VERSION='<redacted-exact-version-line>' \
-ZENTRA_LIVE_PLANNER_MODEL=provider/planner-model \
 ZENTRA_LIVE_IMPLEMENTER_MODEL=opencode-provider/implementer-model \
-ZENTRA_LIVE_REVIEWER_MODEL=provider/reviewer-model \
 pnpm test -- tests/package/installed-milestone-live.e2e.test.ts
 ```
 

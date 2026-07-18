@@ -74,9 +74,9 @@ import { ProcessSupervisor } from "../workers/process-supervisor.js";
 import { GitClient } from "../workspaces/git-client.js";
 import { WorktreeManager } from "../workspaces/worktree-manager.js";
 import {
-  OpenRouterModelBroker,
-  loadProviderConfig,
-} from "../providers/openrouter-model-broker.js";
+  createInstalledModelBroker,
+  loadInstalledProviderConfig,
+} from "../providers/provider-config.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
 const REVIEWER_ID = "zentra-deterministic-reviewer";
@@ -385,11 +385,11 @@ function createProgram(
       const security = loadSecuritySheetForCli(options.securitySheet);
       let providerConfig;
       try {
-        providerConfig = loadProviderConfig(options.provider);
+        providerConfig = loadInstalledProviderConfig(options.provider);
       } catch {
         throw new CliFailure("INVALID_PROVIDER_CONFIG");
       }
-      const broker = new OpenRouterModelBroker(providerConfig);
+      const broker = createInstalledModelBroker(providerConfig);
       const milestoneId = `milestone-${createHash("sha256")
         .update(`${project.projectId}\0${options.goal}\0${options.file}`, "utf8")
         .digest("hex").slice(0, 16)}`;

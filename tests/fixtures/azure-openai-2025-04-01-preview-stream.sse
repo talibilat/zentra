@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-spec","object":"chat.completion.chunk","created":1740000000,"model":"gpt-5-mini-2025-01-01","system_fingerprint":null,"prompt_filter_results":[{"prompt_index":0,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"jailbreak":{"filtered":false,"detected":false},"profanity":{"filtered":false,"detected":false},"self_harm":{"filtered":false,"severity":"safe"},"sexual":{"filtered":false,"severity":"safe"},"violence":{"filtered":false,"severity":"safe"}}}],"choices":[{"index":0,"delta":{"role":"assistant","content":"Bounded "},"finish_reason":null,"logprobs":null,"content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"self_harm":{"filtered":false,"severity":"safe"},"sexual":{"filtered":false,"severity":"safe"},"violence":{"filtered":false,"severity":"safe"}}}],"usage":null}
+
+data: {"id":"chatcmpl-spec","object":"chat.completion.chunk","created":1740000000,"model":"gpt-5-mini-2025-01-01","choices":[{"index":0,"delta":{"content":"result"},"finish_reason":"stop","logprobs":null,"content_filter_offsets":{"check_offset":14,"start_offset":0,"end_offset":14}}],"usage":null}
+
+data: {"id":"chatcmpl-spec","object":"chat.completion.chunk","created":1740000000,"model":"gpt-5-mini-2025-01-01","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0},"completion_tokens_details":null}}
+
+data: [DONE]

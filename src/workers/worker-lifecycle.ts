@@ -6,6 +6,7 @@ import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import { AuthorityLevelSchema, MilestoneRoleSchema } from "../contracts/milestone.js";
 import { TerminalOutcomeSchema, type TerminalOutcome } from "../contracts/task.js";
 import type { EventJournal } from "../journal/journal.js";
+import { CostUsdNanoSchema, costFieldsAgree, nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
 
 const IdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -93,10 +94,11 @@ export const CapabilityEnvelopeSchema = z.union([
   if (value.capabilities.includes("run_validation") && value.authority !== "validation") context.addIssue({ code: "custom", message: "validation capability requires validation authority" });
 });
 
-export const WorkerBudgetSchema = z.strictObject({
+const WorkerBudgetInputSchema = z.strictObject({
   budgetId: IdSchema,
   maxSeconds: z.number().nonnegative().max(86_400),
   maxCostUsd: z.number().nonnegative().max(10_000),
+  maxCostUsdNano: CostUsdNanoSchema.optional(),
   maxInputTokens: z.number().int().nonnegative().max(2_000_000),
   maxOutputTokens: z.number().int().nonnegative().max(2_000_000),
   maxToolCalls: z.number().int().nonnegative().max(100_000),
@@ -105,15 +107,32 @@ export const WorkerBudgetSchema = z.strictObject({
   maxConcurrentTools: z.number().int().positive().max(1_000),
   maxConcurrentModelTurns: z.number().int().positive().max(1_000),
 });
+export const WorkerBudgetSchema = WorkerBudgetInputSchema.superRefine((budget, context) => {
+  if (budget.maxCostUsdNano !== undefined && !costFieldsAgree(budget.maxCostUsd, budget.maxCostUsdNano)) {
+    context.addIssue({ code: "custom", message: "worker budget cost fields disagree" });
+  }
+}).transform((budget) => Object.freeze({
+  ...budget,
+  maxCostUsdNano: budget.maxCostUsdNano ?? usdNumberToNano(budget.maxCostUsd),
+}));
 
-export const WorkerUsageSchema = z.strictObject({
+const WorkerUsageInputSchema = z.strictObject({
   seconds: z.number().nonnegative().max(86_400),
   inputTokens: z.number().int().nonnegative().max(2_000_000),
   outputTokens: z.number().int().nonnegative().max(2_000_000),
   costUsd: z.number().nonnegative().max(10_000),
+  costUsdNano: CostUsdNanoSchema.optional(),
   toolCalls: z.number().int().nonnegative().max(100_000),
   modelTurns: z.number().int().nonnegative().max(100_000),
 });
+export const WorkerUsageSchema = WorkerUsageInputSchema.superRefine((usage, context) => {
+  if (usage.costUsdNano !== undefined && !costFieldsAgree(usage.costUsd, usage.costUsdNano)) {
+    context.addIssue({ code: "custom", message: "worker usage cost fields disagree" });
+  }
+}).transform((usage) => Object.freeze({
+  ...usage,
+  costUsdNano: usage.costUsdNano ?? usdNumberToNano(usage.costUsd),
+}));
 
 export const WorkerBindingSchema = z.strictObject({
   schemaVersion: z.literal(1), workerId: IdSchema, taskId: IdSchema, rootTaskId: IdSchema,
@@ -143,6 +162,8 @@ export type WorkerBudget = z.infer<typeof WorkerBudgetSchema>;
 export type WorkerUsage = z.infer<typeof WorkerUsageSchema>;
 export type WorkerBinding = z.infer<typeof WorkerBindingSchema>;
 export type WorkerObservation = z.infer<typeof WorkerObservationSchema>;
+export type WorkerObservationInput = z.input<typeof WorkerObservationSchema>;
+export type WorkerBindingInput = z.input<typeof WorkerBindingSchema>;
 
 export interface WorkerView extends WorkerBinding {
   readonly status: "bound" | "running" | "uncertain" | "cleaned" | "terminal";
@@ -158,7 +179,7 @@ export interface WorkerLifecycleView {
   readonly budget: { readonly limits: WorkerBudget; readonly usage: WorkerUsage; readonly activeWorkers: number } | null;
 }
 
-const ZERO: WorkerUsage = Object.freeze({ seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 });
+const ZERO: WorkerUsage = Object.freeze({ seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 0 });
 
 export function capabilityEnvelope(raw: z.input<typeof EnvelopeBodySchema>): CapabilityEnvelope {
   const resources = "paths" in raw.resources
@@ -241,9 +262,12 @@ export function projectWorkerLifecycle(events: readonly StoredEvent[]): WorkerLi
 export class WorkerLifecycleService {
   constructor(private readonly journal: EventJournal) {}
 
-  bind(binding: WorkerBinding): WorkerView { return this.append(binding.rootTaskId, binding.workerId, "worker.bound", WorkerBindingSchema.parse(binding)); }
+  bind(rawBinding: WorkerBindingInput): WorkerView {
+    const binding = WorkerBindingSchema.parse(rawBinding);
+    return this.append(binding.rootTaskId, binding.workerId, "worker.bound", binding);
+  }
   start(rootTaskId: string, workerId: string): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.started", {}); }
-  observe(rootTaskId: string, workerId: string, observation: WorkerObservation): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.observed", { observation: WorkerObservationSchema.parse(observation) }); }
+  observe(rootTaskId: string, workerId: string, observation: WorkerObservationInput): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.observed", { observation: WorkerObservationSchema.parse(observation) }); }
   uncertain(rootTaskId: string, workerId: string, reason: string): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.uncertain", { reason }); }
   cleanup(rootTaskId: string, workerId: string, outcome: "completed" | "uncertain"): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.cleanup_observed", { outcome }); }
   terminate(rootTaskId: string, workerId: string, outcome: TerminalOutcome): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.terminal", { outcome }); }
@@ -306,7 +330,7 @@ function applyObservation(worker: MutableWorker, budget: MutableBudget, observat
   worker[counter] -= 1;
   budget[counter] -= 1;
   const next = add(budget.usage, observation.usage);
-  if (next.seconds > budget.limits.maxSeconds || next.costUsd > budget.limits.maxCostUsd || next.inputTokens > budget.limits.maxInputTokens || next.outputTokens > budget.limits.maxOutputTokens || next.toolCalls > budget.limits.maxToolCalls || next.modelTurns > budget.limits.maxModelTurns) throw new Error("worker task budget exceeded");
+  if (next.seconds > budget.limits.maxSeconds || next.costUsdNano > budget.limits.maxCostUsdNano || next.inputTokens > budget.limits.maxInputTokens || next.outputTokens > budget.limits.maxOutputTokens || next.toolCalls > budget.limits.maxToolCalls || next.modelTurns > budget.limits.maxModelTurns) throw new Error("worker task budget exceeded");
   budget.usage = next;
   worker.usage = add(worker.usage, observation.usage);
 }
@@ -350,7 +374,11 @@ export function envelopeWritePaths(envelope: CapabilityEnvelope): readonly strin
   return envelope.resources.repository === "assigned_worktree" ? envelope.resources.paths : [];
 }
 function pathContains(parent: string, child: string): boolean { if (parent === child || parent === "**") return true; return parent.endsWith("/**") && child.startsWith(parent.slice(0, -3) + "/"); }
-function add(a: WorkerUsage, b: WorkerUsage): WorkerUsage { return { seconds: a.seconds + b.seconds, inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd, toolCalls: a.toolCalls + b.toolCalls, modelTurns: a.modelTurns + b.modelTurns }; }
+function add(a: WorkerUsage, b: WorkerUsage): WorkerUsage {
+  const costUsdNano = a.costUsdNano + b.costUsdNano;
+  if (!Number.isSafeInteger(costUsdNano)) throw new Error("worker usage nanodollar sum is outside the safe integer bound");
+  return { seconds: a.seconds + b.seconds, inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: nanoToUsdDisplay(costUsdNano), costUsdNano, toolCalls: a.toolCalls + b.toolCalls, modelTurns: a.modelTurns + b.modelTurns };
+}
 function zeroUsage(value: WorkerUsage): boolean { return Object.values(value).every((item) => item === 0); }
 function bindingCorrelation(payload: unknown): string | undefined { const parsed = WorkerBindingSchema.safeParse(payload); return parsed.success ? parsed.data.trace.correlationId : undefined; }
 function freeze<T extends object>(record: Record<string, T>): Readonly<Record<string, T>> { for (const value of Object.values(record)) Object.freeze(value); return Object.freeze(record); }

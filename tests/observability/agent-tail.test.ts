@@ -467,10 +467,22 @@ describe("Agent Tail event envelope export", () => {
       parent_span_id: "worker:writer-1",
       actor: { id: "research-1", role: "researcher" },
       operation: { name: "worker", status: "waiting" },
-      payload: { envelope: { readScopeCount: 1, writeScopeCount: 0, forbiddenScopeCount: 1 } },
+      payload: { budget: { maxCostUsdNano: 1_000_000_000 }, envelope: { readScopeCount: 1, writeScopeCount: 0, forbiddenScopeCount: 1 } },
     });
     expect(JSON.stringify(exported.payload)).not.toContain("src/**");
     expect(JSON.stringify(exported.payload)).not.toContain(".env");
+
+    const observed = storedEventToAgentTailEvent(storedEvent({
+      streamId: "worker-task:task-1", type: "worker.observed", payload: {
+        schemaVersion: 1, workerId: "research-1", taskId: "task-1", rootTaskId: "task-1",
+        parentWorkerId: "writer-1", role: "researcher", taskContext: { kind: "milestone", milestoneId: "milestone-1" },
+        observation: {
+          kind: "model", name: "provider/model", phase: "completed", outcome: "completed",
+          usage: { seconds: 0, inputTokens: 1, outputTokens: 1, costUsd: 0.3, costUsdNano: 300_000_000, toolCalls: 0, modelTurns: 1 },
+        },
+      },
+    }));
+    expect(observed.payload).toMatchObject({ observation: { usage: { costUsd: 0.3, costUsdNano: 300_000_000 } } });
   });
 
   it("parents top-level workers to the actual standalone or milestone task span", () => {
