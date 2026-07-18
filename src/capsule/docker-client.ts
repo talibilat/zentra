@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
+import { z } from "zod";
+import { StringDecoder } from "node:string_decoder";
 
 const DOCKER_ENTRYPOINT = "/usr/local/bin/docker";
 const APPROVED_DOCKER_EXECUTABLE = "/Applications/Docker.app/Contents/Resources/bin/docker";
@@ -7,6 +9,17 @@ const MAX_DOCKER_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DOCKER_COMMAND_TIMEOUT_MS = 180_000;
 const TERMINATION_GRACE_MS = 1_000;
 const BROKER_TERMINATION_GRACE_MS = 1_000;
+const MAX_BROKER_FRAME_BYTES = 256 * 1024;
+const MAX_BROKER_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+const BrokerRequestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+export const DockerBrokerFrameSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("model_turn"), requestId: BrokerRequestIdSchema, prompt: z.string().min(1).max(256 * 1024) }),
+  z.strictObject({ type: z.literal("research_request"), requestId: BrokerRequestIdSchema,
+    capability: z.string().min(1).max(128).regex(/^[a-z][a-z0-9_]*$/).default("web_research"), method: z.string().min(1).max(16).regex(/^[A-Z]+$/),
+    url: z.string().min(1).max(16_384) }),
+]);
+export type DockerBrokerFrame = z.infer<typeof DockerBrokerFrameSchema>;
 
 export interface DockerCommandResult {
   readonly exitCode: number;
@@ -63,7 +76,7 @@ export class DockerClient {
     args: readonly string[],
     signal: AbortSignal,
     timeoutMs: number,
-    exchange: (request: unknown, signal: AbortSignal) => Promise<unknown>,
+    exchange: (request: DockerBrokerFrame, signal: AbortSignal) => Promise<unknown>,
   ): Promise<DockerCommandResult> {
     return runBrokeredDockerProcess(this.executable, args, dockerEnvironment(), signal, timeoutMs, exchange);
   }
@@ -75,7 +88,7 @@ export function runBrokeredDockerProcess(
   environment: NodeJS.ProcessEnv,
   signal: AbortSignal,
   timeoutMs: number,
-  exchange: (request: unknown, signal: AbortSignal) => Promise<unknown>,
+  exchange: (request: DockerBrokerFrame, signal: AbortSignal) => Promise<unknown>,
 ): Promise<DockerCommandResult> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(new DockerCommandCancelledError());
@@ -88,6 +101,7 @@ export function runBrokeredDockerProcess(
     let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let pendingLine = "";
+    const frameDecoder = new StringDecoder("utf8");
     let reason: "cancelled" | "timed_out" | "output" | "protocol" | null = null;
     let chain: Promise<void> = Promise.resolve();
     const exchangeLifecycle = new AbortController();
@@ -112,11 +126,18 @@ export function runBrokeredDockerProcess(
       return Buffer.concat([current, chunk]);
     };
     const handleLine = (line: string): void => {
-      if (!line.includes('"type":"model_turn"')) return;
+      if (Buffer.byteLength(line, "utf8") > MAX_BROKER_FRAME_BYTES) return terminate("output");
+      let raw: unknown;
+      try { raw = JSON.parse(line) as unknown; } catch { return terminate("protocol"); }
+      if (isOpenCodeResultFrame(raw)) return;
+      const parsed = DockerBrokerFrameSchema.safeParse(raw);
+      if (!parsed.success) return terminate("protocol");
       chain = chain.then(async () => {
         if (exchangeLifecycle.signal.aborted) return;
-        const response = await exchange(JSON.parse(line) as unknown, exchangeLifecycle.signal);
-        await writeBrokerResponse(child.stdin, `${JSON.stringify(response)}\n`, exchangeLifecycle.signal);
+        const response = await exchange(parsed.data, exchangeLifecycle.signal);
+        const serialized = `${JSON.stringify(response)}\n`;
+        if (Buffer.byteLength(serialized, "utf8") > MAX_BROKER_RESPONSE_BYTES) throw new Error("broker response exceeds limit");
+        await writeBrokerResponse(child.stdin, serialized, exchangeLifecycle.signal);
       }).catch(() => {
         if (!exchangeLifecycle.signal.aborted) terminate("protocol");
       });
@@ -124,7 +145,11 @@ export function runBrokeredDockerProcess(
     child.stdout.on("data", (chunk: Buffer) => {
       stdout = collect(stdout, chunk);
       if (reason !== null) return;
-      pendingLine += chunk.toString("utf8");
+      pendingLine += frameDecoder.write(chunk);
+      if (Buffer.byteLength(pendingLine, "utf8") > MAX_BROKER_FRAME_BYTES && !pendingLine.includes("\n")) {
+        terminate("output");
+        return;
+      }
       const lines = pendingLine.split(/\r?\n/);
       pendingLine = lines.pop() ?? "";
       for (const line of lines) handleLine(line);
@@ -142,12 +167,14 @@ export function runBrokeredDockerProcess(
     });
     child.once("close", (code) => {
       processClosed = true;
+      pendingLine += frameDecoder.end();
+      if (reason === null && pendingLine.trim() !== "") reason = "protocol";
       exchangeLifecycle.abort();
       settleExchanges(() => finish(() => {
         if (reason === "cancelled") reject(new DockerCommandCancelledError());
         else if (reason === "timed_out") reject(new DockerCommandTimeoutError());
         else if (reason === "output") reject(new DockerOutputLimitError());
-        else if (reason === "protocol") reject(new Error("model broker protocol failed"));
+        else if (reason === "protocol") reject(new Error("broker protocol failed"));
         else resolve({ exitCode: code ?? 1, stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8") });
       }));
     });
@@ -176,6 +203,11 @@ export function runBrokeredDockerProcess(
       action();
     }
   });
+}
+
+function isOpenCodeResultFrame(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return (value as Readonly<Record<string, unknown>>)["type"] === "opencode_result";
 }
 
 function writeBrokerResponse(

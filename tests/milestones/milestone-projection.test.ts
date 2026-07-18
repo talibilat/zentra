@@ -161,7 +161,7 @@ describe("projectMilestone", () => {
     };
     const completed = {
       taskId: "task-a", capsuleId: "capsule-a", outcome: "completed", actorId: "agent-a", role: "planner", harness: "opencode",
-      capabilityId: "agent-a", transportModelId: "provider/model", measuredHarness: { version: "1.18.1", executableSha256: "b".repeat(64) },
+      capabilityId: "agent-a", transportModelId: "provider/model", measuredHarness: { version: "1.18.3", executableSha256: "b".repeat(64) },
       model: { id: "provider/model", provider: "fixture", name: "model" }, cleanup: "completed", brokerTransport: "completed",
       evidence: [{ kind: "plan", summary, sha256: createHash("sha256").update(summary).digest("hex"), provenance: { harness: "opencode", capabilityId: "agent-a", transportModelId: "provider/model", repositoryRevision: "c".repeat(64) } }],
     };

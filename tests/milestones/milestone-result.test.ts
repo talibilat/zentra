@@ -160,7 +160,7 @@ describe("evidence-backed milestone terminalization", () => {
       milestoneFor("milestone-reconcile", "trace-reconcile", "milestone.task_completed", {
         taskId: "plan", capsuleId: identity.capsuleId, outcome: "completed", actorId: "planner", role: "planner", harness: "opencode",
         capabilityId: "planner", transportModelId: "fixture/model",
-        measuredHarness: { version: "1.18.1", executableSha256: "e".repeat(64) },
+        measuredHarness: { version: "1.18.3", executableSha256: "e".repeat(64) },
         model: { id: "fixture/model", provider: "fixture", name: "model" },
         evidence: [{
           kind: "plan", summary: "Reconciled plan evidence.",

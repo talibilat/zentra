@@ -27,6 +27,7 @@ import {
 } from "./docker-capsule.js";
 import { DockerBrokerTransportUncertainError, DockerClient, DockerCommandCancelledError, DockerCommandTimeoutError } from "./docker-client.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
+import { webResearchTerminalResult } from "../research/web-research.js";
 
 const SCRATCH_BYTES = 16 * 1024 * 1024;
 const MAX_TURNS = 32;
@@ -35,6 +36,14 @@ const TurnSchema = z.strictObject({
   requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   prompt: z.string().min(1).max(256 * 1024),
 });
+const ResearchTurnSchema = z.strictObject({
+  type: z.literal("research_request"),
+  requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  capability: z.string().min(1).max(128).regex(/^[a-z][a-z0-9_]*$/).default("web_research"),
+  method: z.string().min(1).max(16).regex(/^[A-Z]+$/),
+  url: z.string().min(1).max(16_384),
+});
+const BrokerTurnSchema = z.union([TurnSchema, ResearchTurnSchema]);
 const ResultSchema = z.strictObject({
   type: z.literal("opencode_result"),
   exitCode: z.number().int(),
@@ -50,6 +59,7 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
     broker: ModelBroker,
     signal: AbortSignal,
     observe: (observation: OpenCodeCapsuleObservation) => void = () => {},
+    research?: Parameters<OpenCodeReadOnlyCapsule["execute"]>[4],
   ): Promise<OpenCodeReadOnlyCapsuleResult> {
     const request = OpenCodeReadOnlyCapsuleRequestSchema.parse(rawRequest);
     const repository = canonicalDirectory(request.repositoryPath);
@@ -68,6 +78,8 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
     let brokerTransport: "completed" | "uncertain" = "completed";
     let outcome: OpenCodeReadOnlyCapsuleResult["outcome"] = "failed";
     let evidence: OpenCodeReadOnlyCapsuleResult["evidence"] = [];
+    const sourceEvidenceIds: string[] = [];
+    let researchTransportUncertain = false;
     try {
       await dockerOk(this.docker, ["build", "--platform", "linux/arm64", "--tag", imageName, assets], signal);
       const inspect = JSON.parse((await dockerOk(this.docker, ["image", "inspect", imageName], signal)).stdout) as readonly [{ readonly Id?: string; readonly Architecture?: string; readonly Os?: string; readonly Config?: { readonly Labels?: Readonly<Record<string, string>> } }];
@@ -114,7 +126,42 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
       const run = await this.docker.runBrokered([
         "exec", "--interactive", containerId, "/usr/local/bin/node", "/runner/runner.mjs",
       ], signal, request.timeoutMs, async (rawTurn, exchangeSignal) => {
-        const turn = TurnSchema.parse(rawTurn);
+        const turn = BrokerTurnSchema.parse(rawTurn);
+        if (turn.type === "research_request") {
+          if (request.webResearch === null || request.webResearchEnvelopeDigest === null || research === undefined) {
+            throw new Error("OpenCode web research is not admitted");
+          }
+          const researchRequest = {
+            schemaVersion: 1, requestId: turn.requestId, taskId: request.taskId, workerId: request.capsuleId,
+            role: request.role, modelId: request.transportModelId,
+            tool: turn.method === "CAPABILITY" ? "unknown" : turn.capability === "web_research" ? "zentra_web_research" : turn.capability,
+            method: turn.method, url: turn.url, envelopeDigest: request.webResearchEnvelopeDigest,
+            policyDigest: request.webResearch.digest,
+          };
+          try {
+            observe({ type: "research_started", requestId: turn.requestId });
+          } catch (error) {
+            const failed = webResearchTerminalResult(researchRequest, "failed", "execution_threw");
+            try { observe({ type: "research_completed", requestId: turn.requestId, result: failed }); } catch { /* recovery reconciles any durable start */ }
+            throw error;
+          }
+          let result;
+          try {
+            result = await research.execute(researchRequest, request.webResearch, exchangeSignal);
+          } catch (error) {
+            result = webResearchTerminalResult(researchRequest, exchangeSignal.aborted ? "cancelled" : "failed", "execution_threw");
+            observe({ type: "research_completed", requestId: turn.requestId, result });
+            throw error;
+          }
+          observe({ type: "research_completed", requestId: turn.requestId, result });
+          if (result.reason === "capability_attention") throw new Error("research capability requires authoritative attention");
+          if (result.outcome === "uncertain") {
+            researchTransportUncertain = true;
+            throw new Error("web research transport is uncertain");
+          }
+          if (result.evidence !== null) sourceEvidenceIds.push(result.evidence.evidenceId);
+          return { type: "research_receipt", requestId: turn.requestId, result };
+        }
         turns += 1;
         if (turns > MAX_TURNS) throw new Error("OpenCode model turn limit exceeded");
         const remainingInputTokens = request.budget.maxInputTokens - inputTokens;
@@ -184,9 +231,12 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         evidence = [{
           kind: request.role === "planner" ? "plan" : request.role === "reviewer" ? "review" : "research",
           summary: parseOpenCodeFinalAssistantText(result.stdout),
+          ...(sourceEvidenceIds.length === 0 ? {} : { sourceEvidenceIds: [...new Set(sourceEvidenceIds)].sort() }),
         }];
+        if (request.webResearch !== null) assertResearchCitations(evidence[0]!.summary, sourceEvidenceIds, request.webResearch.citationMode);
       }
     } catch (error) {
+      if (researchTransportUncertain) brokerTransport = "uncertain";
       if (error instanceof DockerBrokerTransportUncertainError) brokerTransport = "uncertain";
       outcome = brokerTransport === "uncertain" ? "failed" :
         brokerState.receipt?.outcome === "cancelled" ? "cancelled" :
@@ -281,8 +331,9 @@ function createRunnerAssets(request: OpenCodeReadOnlyCapsuleRequest): string {
   const directory = mkdtempSync(path.join(tmpdir(), "zentra-opencode-readonly-"));
   chmodSync(directory, 0o755);
   writeFileSync(path.join(directory, "Dockerfile"), openCodeWorkerDockerfile(request.capsuleId), { mode: 0o600 });
-  writeFileSync(path.join(directory, "request.json"), JSON.stringify({ role: request.role, rolePrompt: request.rolePrompt }), { mode: 0o444 });
+  writeFileSync(path.join(directory, "request.json"), JSON.stringify({ role: request.role, rolePrompt: request.rolePrompt, webResearch: request.webResearch !== null }), { mode: 0o444 });
   writeFileSync(path.join(directory, "runner.mjs"), runnerSource(), { mode: 0o444 });
+  writeFileSync(path.join(directory, "research-mcp.mjs"), researchMcpProtocolSource(), { mode: 0o444 });
   return directory;
 }
 
@@ -294,11 +345,37 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 const input=JSON.parse(readFileSync("/runner/request.json","utf8"));
 const pending=new Map();
-createInterface({input:process.stdin}).on("line",line=>{const message=JSON.parse(line);const resolve=pending.get(message.requestId);if(resolve){pending.delete(message.requestId);resolve(message.receipt)}});
+createInterface({input:process.stdin}).on("line",line=>{const message=JSON.parse(line);const resolve=pending.get(message.requestId);if(resolve){pending.delete(message.requestId);resolve(message.receipt??message.result)}});
 function text(messages){return messages.map(message=>message.role+": "+(typeof message.content==="string"?message.content:JSON.stringify(message.content))).join("\\n")}
 function chunks(base,assistant){if(assistant.type==="text")return[{...base,object:"chat.completion.chunk",choices:[{index:0,delta:{role:"assistant",content:""},finish_reason:null,logprobs:null}]},{...base,object:"chat.completion.chunk",choices:[{index:0,delta:{content:assistant.text},finish_reason:null,logprobs:null}]},{...base,object:"chat.completion.chunk",choices:[{index:0,delta:{},finish_reason:"stop",logprobs:null}]}];return[{...base,object:"chat.completion.chunk",choices:[{index:0,delta:{role:"assistant",tool_calls:assistant.calls.map((call,index)=>({index,id:call.id,type:"function",function:{name:call.name,arguments:call.arguments}}))},finish_reason:null,logprobs:null}]},{...base,object:"chat.completion.chunk",choices:[{index:0,delta:{},finish_reason:"tool_calls",logprobs:null}]}]}
 const server=createServer((request,response)=>{let body="";request.on("data",chunk=>{body+=chunk;if(Buffer.byteLength(body)>2097152)request.destroy()});request.on("end",async()=>{try{const parsed=JSON.parse(body);const requestId=randomUUID();const receiptPromise=new Promise(resolve=>pending.set(requestId,resolve));process.stdout.write(JSON.stringify({type:"model_turn",requestId,prompt:text(parsed.messages??[])})+"\\n");const receipt=await receiptPromise;if(receipt.outcome!=="completed"||receipt.response===null)throw new Error("model turn failed");const base={id:"chatcmpl-"+requestId,created:Math.floor(Date.now()/1000),model:"brokered"};response.setHeader("content-type","text/event-stream; charset=utf-8");response.setHeader("connection","close");for(const chunk of chunks(base,receipt.response))response.write("data: "+JSON.stringify(chunk)+"\\n\\n");response.end("data: [DONE]\\n\\n")}catch{response.statusCode=502;response.end('{"error":"model broker failed"}')}})});
-server.listen(4317,"127.0.0.1",()=>{const config=JSON.stringify({share:"disabled",autoupdate:false,formatter:false,lsp:false,mcp:{},plugin:[],instructions:[],model:"zentra/brokered",default_agent:"zentra-read-only",provider:{zentra:{npm:"@ai-sdk/openai-compatible",name:"Zentra Model Broker",options:{baseURL:"http://127.0.0.1:4317/v1",apiKey:"one-use-local-session"},models:{brokered:{name:"Brokered"}}}},agent:{"zentra-read-only":{mode:"primary",model:"zentra/brokered",permission:{"*":"deny",read:"allow",glob:"allow",grep:"allow",edit:"deny",bash:"deny",task:"deny",webfetch:"deny",external_directory:"deny"}}}});const child=spawn("/usr/local/bin/opencode",["run","--format","json","--model","zentra/brokered","--agent","zentra-read-only","--dir","/project",input.rolePrompt],{shell:false,env:{HOME:"/scratch",TMPDIR:"/scratch",PATH:"/usr/local/bin:/usr/bin:/bin",OPENCODE_CONFIG_CONTENT:config,OPENCODE_DISABLE_AUTOUPDATE:"1",OPENCODE_DISABLE_DEFAULT_PLUGINS:"1",OPENCODE_DISABLE_LSP_DOWNLOAD:"1"},stdio:["ignore","pipe","pipe"]});let stdout="",stderr="";const collect=(current,chunk)=>Buffer.byteLength(current)+chunk.length<=4194304?current+chunk.toString("utf8"):current;child.stdout.on("data",chunk=>stdout=collect(stdout,chunk));child.stderr.on("data",chunk=>stderr=collect(stderr,chunk));child.on("close",code=>{server.close();server.closeAllConnections();process.stdout.write(JSON.stringify({type:"opencode_result",exitCode:code??1,stdout,stderr})+"\\n",()=>process.exit(code??1))})});`;
+const researchServer=createServer((request,response)=>{let body="";request.on("data",chunk=>{body+=chunk;if(Buffer.byteLength(body)>32768)request.destroy()});request.on("end",async()=>{try{if(!input.webResearch||request.method!=="POST"||request.url!=="/research")throw new Error("denied");const parsed=JSON.parse(body);const requestId=randomUUID();const resultPromise=new Promise(resolve=>pending.set(requestId,resolve));process.stdout.write(JSON.stringify({type:"research_request",requestId,method:parsed.method,url:parsed.url})+"\\n");const result=await resultPromise;response.setHeader("content-type","application/json");response.end(JSON.stringify(result))}catch{response.statusCode=403;response.end('{"outcome":"denied"}')}})});
+researchServer.listen(4318,"127.0.0.1",()=>server.listen(4317,"127.0.0.1",()=>{const config=JSON.stringify({share:"disabled",autoupdate:false,formatter:false,lsp:false,mcp:input.webResearch?{zentra_research:{type:"local",command:["/usr/local/bin/node","/runner/research-mcp.mjs"],enabled:true}}:{},plugin:[],instructions:[],model:"zentra/brokered",default_agent:"zentra-read-only",provider:{zentra:{npm:"@ai-sdk/openai-compatible",name:"Zentra Model Broker",options:{baseURL:"http://127.0.0.1:4317/v1",apiKey:"one-use-local-session"},models:{brokered:{name:"Brokered"}}}},agent:{"zentra-read-only":{mode:"primary",model:"zentra/brokered",permission:{"*":"deny",read:"allow",glob:"allow",grep:"allow",edit:"deny",bash:"deny",task:"deny",webfetch:"deny",zentra_research_web_research:input.webResearch?"allow":"deny",external_directory:"deny"}}}});const child=spawn("/usr/local/bin/opencode",["run","--format","json","--model","zentra/brokered","--agent","zentra-read-only","--dir","/project",input.rolePrompt],{shell:false,env:{HOME:"/scratch",TMPDIR:"/scratch",PATH:"/usr/local/bin:/usr/bin:/bin",OPENCODE_CONFIG_CONTENT:config,OPENCODE_DISABLE_AUTOUPDATE:"1",OPENCODE_DISABLE_DEFAULT_PLUGINS:"1",OPENCODE_DISABLE_LSP_DOWNLOAD:"1"},stdio:["ignore","pipe","pipe"]});let stdout="",stderr="";const collect=(current,chunk)=>Buffer.byteLength(current)+chunk.length<=4194304?current+chunk.toString("utf8"):current;child.stdout.on("data",chunk=>stdout=collect(stdout,chunk));child.stderr.on("data",chunk=>stderr=collect(stderr,chunk));child.on("close",code=>{server.close();server.closeAllConnections();researchServer.close();researchServer.closeAllConnections();process.stdout.write(JSON.stringify({type:"opencode_result",exitCode:code??1,stdout,stderr})+"\\n",()=>process.exit(code??1))})}));`;
+}
+
+function researchMcpSource(): string {
+  return `import { createInterface } from "node:readline";
+const send=value=>process.stdout.write(JSON.stringify(value)+"\\n");
+createInterface({input:process.stdin}).on("line",async line=>{const message=JSON.parse(line);if(message.method==="initialize")return send({jsonrpc:"2.0",id:message.id,result:{protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"zentra-research",version:"1"}}});if(message.method==="tools/list")return send({jsonrpc:"2.0",id:message.id,result:{tools:[{name:"web_research",description:"Retrieve one approved HTTPS source through the governed Zentra broker. Cite the returned source evidence ID as [source:<id>].",inputSchema:{type:"object",additionalProperties:false,required:["url"],properties:{url:{type:"string"},method:{type:"string",enum:["GET","HEAD"],default:"GET"}}}}]}});if(message.method==="tools/call"){try{const response=await fetch("http://127.0.0.1:4318/research",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({url:message.params.arguments.url,method:message.params.arguments.method??"GET"})});const result=await response.json();const text=result.outcome==="completed"?result.content+"\\n\\nSource evidence: [source:"+result.evidence.evidenceId+"]":"Research denied: "+result.reason;return send({jsonrpc:"2.0",id:message.id,result:{content:[{type:"text",text}],isError:result.outcome!=="completed"}})}catch{return send({jsonrpc:"2.0",id:message.id,result:{content:[{type:"text",text:"Research broker failed closed."}],isError:true}})}}if(message.id!==undefined)send({jsonrpc:"2.0",id:message.id,error:{code:-32601,message:"Method not found"}})});`;
+}
+
+export function researchMcpProtocolSource(): string {
+  return `import { createInterface } from "node:readline";
+const MAX_LINE=65536,MAX_OUTPUT=4194304,pending=new Map();
+const send=value=>{const line=JSON.stringify(value);if(Buffer.byteLength(line)>MAX_OUTPUT)throw new Error("output limit");process.stdout.write(line+"\\n")};
+const error=(id,code,message)=>send({jsonrpc:"2.0",id,error:{code,message}});
+createInterface({input:process.stdin,crlfDelay:Infinity}).on("line",async line=>{let message;try{if(Buffer.byteLength(line)>MAX_LINE)throw new Error("line limit");message=JSON.parse(line);if(message===null||Array.isArray(message)||message.jsonrpc!=="2.0"||typeof message.method!=="string")throw new Error("invalid request")}catch{return error(null,-32700,"Invalid MCP frame")}
+if(message.method.startsWith("notifications/")){if(message.method==="notifications/cancelled"){const id=message.params?.requestId;pending.get(id)?.abort();pending.delete(id)}return}
+if(message.id===undefined||message.id===null)return error(null,-32600,"Request id required");
+if(message.method==="initialize"){const version=message.params?.protocolVersion;if(typeof version!=="string")return error(message.id,-32602,"Invalid initialize parameters");return send({jsonrpc:"2.0",id:message.id,result:{protocolVersion:version,capabilities:{tools:{listChanged:false}},serverInfo:{name:"zentra-research",version:"1"}}})}
+if(message.method==="tools/list")return send({jsonrpc:"2.0",id:message.id,result:{tools:[{name:"web_research",description:"Retrieve one approved HTTPS source through the governed Zentra broker. Cite the returned source evidence ID as [source:<id>].",inputSchema:{type:"object",additionalProperties:false,required:["url"],properties:{url:{type:"string",minLength:1,maxLength:16384},method:{type:"string",enum:["GET","HEAD"],default:"GET"}}}}]}});
+if(message.method==="tools/call"){const args=message.params?.arguments,name=message.params?.name;if(name!=="web_research"||args===null||typeof args!=="object"||Array.isArray(args)||typeof args.url!=="string"||!(["GET","HEAD"].includes(args.method??"GET"))||Object.keys(args).some(key=>key!=="url"&&key!=="method"))return error(message.id,-32602,"Invalid web research request");const controller=new AbortController();pending.set(message.id,controller);try{const response=await fetch("http://127.0.0.1:4318/research",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({url:args.url,method:args.method??"GET"}),signal:controller.signal});const result=await response.json();if(result.outcome!=="completed")return send({jsonrpc:"2.0",id:message.id,result:{content:[{type:"text",text:"Research did not complete: "+result.reason}],isError:true});const text=result.content+"\\n\\nSource evidence: [source:"+result.evidence.evidenceId+"]";return send({jsonrpc:"2.0",id:message.id,result:{content:[{type:"text",text}],isError:false}})}catch{return send({jsonrpc:"2.0",id:message.id,result:{content:[{type:"text",text:"Research broker failed closed."}],isError:true}})}finally{pending.delete(message.id)}}
+if(message.method==="shutdown"){send({jsonrpc:"2.0",id:message.id,result:null});return process.nextTick(()=>process.exit(0))}
+return error(message.id,-32601,"Method not found")});`
+    .replace("isError:true});const text", "isError:true}});const text")
+    .replace('!(["GET","HEAD"].includes(args.method??"GET"))', '!/^[A-Z]+$/.test(args.method??"GET")')
+    .replace('name!=="web_research"||', '')
+    .replace('method:args.method??"GET"', 'method:name==="web_research"?(args.method??"GET"):"CAPABILITY"');
 }
 
 function parseResult(output: string): z.infer<typeof ResultSchema> {
@@ -335,6 +412,16 @@ export function parseOpenCodeFinalAssistantText(output: string): string {
     throw new Error("OpenCode final assistant evidence is partial or ambiguous");
   }
   return finalTexts[0]!;
+}
+
+export function assertResearchCitations(summary: string, evidenceIds: readonly string[], mode: "all_exactly_once"): void {
+  const cited = [...summary.matchAll(/\[source:([a-f0-9]{64})\]/g)].map((match) => match[1]!);
+  const retained = [...new Set(evidenceIds)].sort();
+  const citedCanonical = [...cited].sort();
+  if (mode !== "all_exactly_once" || retained.length === 0 || cited.length !== new Set(cited).size ||
+    JSON.stringify(citedCanonical) !== JSON.stringify(retained)) {
+    throw new Error("OpenCode research findings require retained source evidence citations");
+  }
 }
 
 async function dockerOk(docker: DockerClient, args: readonly string[], signal: AbortSignal) {

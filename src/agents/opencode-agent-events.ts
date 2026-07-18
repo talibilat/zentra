@@ -15,7 +15,7 @@ const BudgetSchema = z.strictObject({
 const BoundarySchema = z.strictObject({
   repository: z.literal("sanitized_read_only_bind_mount"),
   scratch: z.literal("bounded_ephemeral"),
-  network: z.literal("model_broker_only"),
+  network: z.enum(["model_broker_only", "brokered_web_research"]),
   home: z.literal("ephemeral"),
   credentials: z.literal("none"),
   shell: z.literal("none"),
@@ -37,7 +37,7 @@ export const OpenCodeMilestoneRunningPayloadSchema = z.strictObject({
 });
 
 const HarnessMetadataSchema = z.strictObject({
-  version: z.literal("1.18.1"),
+  version: z.literal("1.18.3"),
   executableSha256: DigestSchema,
 });
 const ModelMetadataSchema = z.strictObject({
@@ -48,6 +48,7 @@ const ModelMetadataSchema = z.strictObject({
 const EvidenceSchema = z.strictObject({
   kind: z.enum(["plan", "research", "finding", "review"]),
   summary: z.string().min(1).max(256 * 1024),
+  sourceEvidenceIds: z.array(DigestSchema).max(128).optional(),
   sha256: DigestSchema,
   provenance: z.strictObject({
     harness: z.literal("opencode"),

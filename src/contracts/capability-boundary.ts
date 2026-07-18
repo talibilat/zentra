@@ -53,7 +53,7 @@ const CapabilityBoundaryBodySchema = z.strictObject({
   bindingDigest: DigestSchema,
   phase: z.enum(["pre_effect", "post_worker"]),
   status: z.enum(["attention", "replan"]),
-  reason: z.enum(["forbidden_path", "forbidden_effect", "network_disabled", "self_review", "stale_evidence", "path_not_owned"]),
+  reason: z.enum(["forbidden_path", "forbidden_effect", "network_disabled", "network_destination_not_allowed", "network_method_not_allowed", "network_capability_not_allowed", "self_review", "stale_evidence", "path_not_owned"]),
   decisionId: DigestSchema,
   requestDigest: DigestSchema,
   evaluation: EvaluationReferenceSchema,

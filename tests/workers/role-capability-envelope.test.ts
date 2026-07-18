@@ -173,6 +173,32 @@ describe("canonical role capability envelopes", () => {
     journal.close();
   });
 
+  it.each(["planner", "researcher"] as const)("admits declared web research for %s with exact destinations", (role) => {
+    const binding = buildRoleCapabilityBinding({
+      ...input(role),
+      model: { ...input(role).model, toolPermissions: roleToolPermissions(role, true), network: "declared" },
+      webResearch: { allowedDestinations: ["https://docs.example.com"], timeoutMs: 5_000 },
+    });
+    expect(binding.envelope).toMatchObject({ network: "declared_web_research", capabilities: ["read_repository", "web_research"] });
+    expect(binding.webResearch).toMatchObject({ destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }] });
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new RoleCapabilityEnvelopeService(journal);
+    service.accept(binding);
+    expect(service.evaluate(binding, { kind: "network", destination: "https://docs.example.com/reference" })).toMatchObject({ status: "allowed" });
+    expect(service.evaluate(binding, { kind: "network", destination: "https://other.example/" })).toMatchObject({ status: "attention", reason: "network_destination_not_allowed" });
+    expect(service.evaluate(binding, { kind: "network", destination: "https://docs.example.com/", method: "OTHER" })).toMatchObject({ status: "attention", reason: "network_method_not_allowed" });
+    expect(service.evaluate(binding, { kind: "network", destination: "https://docs.example.com/", capability: "unknown" })).toMatchObject({ status: "attention", reason: "network_capability_not_allowed" });
+    journal.close();
+  });
+
+  it.each(["implementer", "reviewer"] as const)("keeps web research disabled for %s", (role) => {
+    expect(() => buildRoleCapabilityBinding({
+      ...input(role),
+      model: { ...input(role).model, toolPermissions: [...input(role).model.toolPermissions, "web_research"], network: "declared" },
+      webResearch: { allowedDestinations: ["https://docs.example.com"], timeoutMs: 5_000 },
+    })).toThrow(/canonical role capability policy/i);
+  });
+
   it("rejects forged replay decisions even when the attacker recomputes public digests", () => {
     const binding = buildRoleCapabilityBinding(input("implementer"));
     const journal = new SqliteEventJournal(":memory:");

@@ -55,7 +55,7 @@ const schemas = {
     directEgress: z.literal("internal_network_only"), inheritedSecrets: z.literal(false), dockerSocket: z.literal(false),
   }).strict(),
   "capsule.check_observed": z.object({ name: CheckNameSchema, passed: z.boolean() }).strict(),
-  "capsule.harness_attested": z.object({ harness: z.literal("opencode"), version: z.literal("1.18.1"), executableSha256: HexDigestSchema }).strict(),
+  "capsule.harness_attested": z.object({ harness: z.literal("opencode"), version: z.literal("1.18.3"), executableSha256: HexDigestSchema }).strict(),
   "capsule.proxy_interaction_observed": z.object({
     scheme: z.enum(["http", "https", "unknown"]), method: z.enum(["GET", "HEAD", "POST", "CONNECT", "UPGRADE", "OTHER"]),
     host: z.string().regex(/^[a-z0-9.:-]{1,253}$/), allowed: z.boolean(),

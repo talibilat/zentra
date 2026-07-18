@@ -1,15 +1,20 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import https from "node:https";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DockerOpenCodeReadOnlyCapsule, parseOpenCodeFinalAssistantText } from "../../src/capsule/opencode-read-only-capsule.js";
+import { DockerOpenCodeReadOnlyCapsule, assertResearchCitations, parseOpenCodeFinalAssistantText } from "../../src/capsule/opencode-read-only-capsule.js";
 import { DockerBrokerTransportUncertainError, type DockerClient } from "../../src/capsule/docker-client.js";
 import type { ModelBroker } from "../../src/capsule/model-broker.js";
 import type { ModelBrokerReceipt } from "../../src/capsule/model-broker.js";
 import type { OpenCodeReadOnlyCapsuleRequest } from "../../src/agents/opencode-read-only-agent.js";
 import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
+import { GovernedWebResearch, WebResearchPolicySchema, webResearchTerminalResult } from "../../src/research/web-research.js";
+import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -33,8 +38,8 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
       }
       if (args[0] === "create") return { exitCode: 0, stdout: `${containerId}\n`, stderr: "" };
       if (args[0] === "start") return { exitCode: 0, stdout: "", stderr: "" };
-      if (args[0] === "exec" && args.at(-1) === "--version") return { exitCode: 0, stdout: "1.18.1\n", stderr: "" };
-      if (args[0] === "exec" && args.includes("/usr/bin/sha256sum")) return { exitCode: 0, stdout: "b83305b14e233483aba7027a9dd6a18716b8786b3fe13261e0afce96f4418b17  /usr/local/bin/opencode\n", stderr: "" };
+      if (args[0] === "exec" && args.at(-1) === "--version") return { exitCode: 0, stdout: "1.18.3\n", stderr: "" };
+      if (args[0] === "exec" && args.includes("/usr/bin/sha256sum")) return { exitCode: 0, stdout: "915ca1cd9eb5a7b3e15bd89dc71c38cf0caa9a02d13c5371422675b4b370bffb  /usr/local/bin/opencode\n", stderr: "" };
       if (args[0] === "image" && args[1] === "rm") { imagePresent = false; return { exitCode: 0, stdout: "", stderr: "" }; }
       if (args[0] === "rm" && args[1] === "--force") { containerPresent = false; return { exitCode: 0, stdout: "", stderr: "" }; }
       if (args[0] === "inspect") return containerPresent
@@ -133,6 +138,65 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     expect(await new DockerOpenCodeReadOnlyCapsule(docker).execute(
       request(repository), broker, new AbortController().signal,
     )).toMatchObject({ outcome: "failed", brokerTransport: "uncertain" });
+
+    transportUncertain = false;
+    imagePresent = true;
+    containerPresent = true;
+    const researchPolicy = WebResearchPolicySchema.parse({
+      schemaVersion: 1, destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }],
+      contentTypes: ["text/plain"], maxRedirects: 1, maxCompressedBytes: 1_024, maxDecompressedBytes: 1_024,
+      timeoutMs: 1_000, budget: { maxRequests: 1, maxBytes: 1_024, maxTimeMs: 1_000 },
+    });
+    const researchJournal = new SqliteEventJournal(":memory:");
+    const research = new GovernedWebResearch(researchJournal, { dispatch: async () => ({
+      status: 200, headers: { "content-type": "text/plain" }, body: Buffer.from("governed source fact"),
+      compressedBytes: 20, decompressedBytes: 20, resolvedAddress: "93.184.216.34", tls: true, dispatched: true,
+    }) });
+    runBrokered.mockImplementationOnce(async (_args, _signal, _timeout, exchange) => {
+      const researchReceipt = await exchange({ type: "research_request", requestId: "source-1", method: "GET", url: "https://docs.example.com/fact?secret=redacted" }, new AbortController().signal) as any;
+      await exchange({ type: "model_turn", requestId: "turn-research", prompt: "source result" }, new AbortController().signal);
+      const citation = `[source:${researchReceipt.result.evidence.evidenceId}]`;
+      const output = [JSON.stringify({ type: "text", part: { type: "text", text: `Finding ${citation}` } }), JSON.stringify({ type: "step_finish" })].join("\n");
+      return { exitCode: 0, stdout: `${JSON.stringify({ type: "opencode_result", exitCode: 0, stdout: output, stderr: "" })}\n`, stderr: "" };
+    });
+    const governed = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
+      ...request(repository), role: "researcher", webResearch: researchPolicy,
+      webResearchEnvelopeDigest: "a".repeat(64), securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" },
+    }, broker, new AbortController().signal, undefined, research);
+    expect(governed).toMatchObject({
+      outcome: "completed",
+      evidence: [{ kind: "research", summary: expect.stringContaining("[source:"), sourceEvidenceIds: [expect.stringMatching(/^[a-f0-9]{64}$/)] }],
+    });
+    expect(JSON.stringify(researchJournal.readAll())).not.toContain("governed source fact");
+    expect(JSON.stringify(researchJournal.readAll())).not.toContain("secret=redacted");
+    researchJournal.close();
+
+    for (const mode of ["attention", "thrown"] as const) {
+      imagePresent = true;
+      containerPresent = true;
+      const observed: any[] = [];
+      runBrokered.mockImplementationOnce(async (_args, _signal, _timeout, exchange) => {
+        await exchange({ type: "research_request", requestId: `${mode}-1`, method: "GET", url: "https://outside.example/" }, new AbortController().signal);
+        throw new Error("broker process stopped after research completion");
+      });
+      const result = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
+        ...request(repository), role: "researcher", webResearch: researchPolicy,
+        webResearchEnvelopeDigest: "a".repeat(64), securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" },
+      }, broker, new AbortController().signal, (observation) => observed.push(observation), {
+        execute: async (raw) => {
+          if (mode === "thrown") throw new Error("research execution threw");
+          return webResearchTerminalResult(raw, "denied", "capability_attention");
+        },
+      });
+      expect(result).toMatchObject({ outcome: "failed", cleanup: "completed" });
+      expect(observed.filter((item) => item.type.startsWith("research_"))).toEqual([
+        { type: "research_started", requestId: `${mode}-1` },
+        expect.objectContaining({ type: "research_completed", requestId: `${mode}-1`, result: expect.objectContaining({
+          outcome: mode === "attention" ? "denied" : "failed", reason: mode === "attention" ? "capability_attention" : "execution_threw",
+        }) }),
+      ]);
+      expect(observed.at(-1)).toMatchObject({ type: "cleanup_observed", payload: { outcome: "completed" } });
+    }
   });
 
   it("does not fabricate harness metadata when image build fails before attestation", async () => {
@@ -290,7 +354,23 @@ describe("OpenCode final evidence parsing", () => {
   });
 });
 
-describe.runIf(process.env.ZENTRA_OPENCODE_DOCKER_E2E === "1")("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
+describe("OpenCode research citation verification", () => {
+  const first = "a".repeat(64);
+  const second = "b".repeat(64);
+  it("requires every retained source exactly once", () => {
+    expect(() => assertResearchCitations(`One [source:${first}] two [source:${second}]`, [first, second], "all_exactly_once")).not.toThrow();
+  });
+  it.each([
+    [`Only [source:${first}]`, [first, second]],
+    [`Duplicate [source:${first}] [source:${first}]`, [first]],
+    [`Unknown [source:${second}]`, [first]],
+    ["No citation", [first]],
+  ] as const)("rejects incomplete, duplicate, unknown, or absent citations", (summary, retained) => {
+    expect(() => assertResearchCitations(summary, retained, "all_exactly_once")).toThrow(/retained source evidence/i);
+  });
+});
+
+describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
   it("runs the attested OpenCode executable with no network and a typed host broker", async () => {
     const repository = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-real-")));
     roots.push(repository);
@@ -336,11 +416,97 @@ describe.runIf(process.env.ZENTRA_OPENCODE_DOCKER_E2E === "1")("DockerOpenCodeRe
     expect(promptEvidence).toContain("file");
     expect(result.evidence).toEqual([{ kind: "research", summary: "Observed violet repository fact 731" }]);
   }, 120_000);
+
+  it("runs governed research through the supported local MCP protocol and requires citations", async () => {
+    const repository = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-research-")));
+    roots.push(repository);
+    const policy = WebResearchPolicySchema.parse({
+      schemaVersion: 1, destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }],
+      contentTypes: ["text/plain"], maxRedirects: 1, maxCompressedBytes: 1_024, maxDecompressedBytes: 1_024,
+      timeoutMs: 10_000, budget: { maxRequests: 2, maxBytes: 2_048, maxTimeMs: 20_000 },
+    });
+    const journal = new SqliteEventJournal(":memory:");
+    const controlled = await controlledHttpsSource(repository, "governed MCP fact 913");
+    const research = new GovernedWebResearch(journal, controlled.transport);
+    const prompts: string[] = [];
+    const broker: ModelBroker = { execute: async (brokerRequest) => {
+      prompts.push(brokerRequest.prompt);
+      const citation = /\[source:[a-f0-9]{64}\]/.exec(brokerRequest.prompt)?.[0];
+      const title = brokerRequest.prompt.startsWith("system: You are a title generator");
+      return {
+        outcome: "completed" as const,
+        response: title ? { type: "text" as const, text: "Governed research" } : citation === undefined
+          ? { type: "tool_calls" as const, calls: [{ id: "research-1", name: "zentra_research_web_research", arguments: JSON.stringify({ url: "https://docs.example.com/fact", method: "GET" }) }] }
+          : { type: "text" as const, text: `Observed governed MCP fact 913 ${citation}` },
+        model: { id: brokerRequest.modelId, provider: "fixture", name: "researcher" },
+        usage: { inputTokens: 10, outputTokens: 3, costUsd: 0 },
+      };
+    } };
+    const result = await new DockerOpenCodeReadOnlyCapsule().execute({
+      ...request(repository), role: "researcher", rolePrompt: "Use the governed research tool, then report the fact with its source citation.",
+      webResearch: policy, webResearchEnvelopeDigest: "a".repeat(64),
+      securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" },
+      timeoutMs: 60_000, budget: { maxSeconds: 60, maxCostUsd: 1, maxInputTokens: 10_000, maxOutputTokens: 1_000 },
+    }, broker, new AbortController().signal, undefined, research);
+
+    expect(result).toMatchObject({
+      outcome: "completed",
+      openCode: { version: "1.18.3", executableSha256: "915ca1cd9eb5a7b3e15bd89dc71c38cf0caa9a02d13c5371422675b4b370bffb" },
+      evidence: [{ kind: "research", summary: expect.stringContaining("governed MCP fact 913"), sourceEvidenceIds: [expect.stringMatching(/^[a-f0-9]{64}$/)] }],
+      cleanup: "completed",
+    });
+    expect(controlled.requests).toBe(1);
+    const sourceEvent = journal.readStream("web-research:task-1")[0]!;
+    expect(sourceEvent.payload).toMatchObject({
+      outcome: "completed", identity: { taskId: "task-1", workerId: "milestone.task", role: "researcher",
+        envelopeDigest: "a".repeat(64), policyDigest: policy.digest },
+      evidence: { parent: { workerId: "milestone.task", modelId: "fixture/planner", tool: "zentra_web_research" },
+        provenance: { transport: "zentra_https_broker", redirectHops: 0 } },
+    });
+    expect(storedEventToAgentTailEvent(sourceEvent)).toMatchObject({
+      actor: { id: "milestone.task", role: "researcher" }, parent_span_id: "worker:milestone.task",
+      operation: { name: "web_research", status: "completed" },
+    });
+    await controlled.close();
+    journal.close();
+  }, 120_000);
+
+  it("emits a typed completion and cleans up when real MCP research requires capability attention", async () => {
+    const repository = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-attention-")));
+    roots.push(repository);
+    const policy = WebResearchPolicySchema.parse({ schemaVersion: 1, destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }],
+      contentTypes: ["text/plain"], maxRedirects: 1, maxCompressedBytes: 1_024, maxDecompressedBytes: 1_024,
+      timeoutMs: 10_000, budget: { maxRequests: 1, maxBytes: 1_024, maxTimeMs: 10_000 } });
+    let turns = 0;
+    const broker: ModelBroker = { execute: async (brokerRequest) => {
+      turns += 1;
+      const title = brokerRequest.prompt.startsWith("system: You are a title generator");
+      return { outcome: "completed", response: title ? { type: "text", text: "Research attention" }
+        : { type: "tool_calls", calls: [{ id: "attention-1", name: "zentra_research_web_research", arguments: JSON.stringify({ url: "https://outside.example/", method: "GET" }) }] },
+        model: { id: brokerRequest.modelId, provider: "fixture", name: "researcher" }, usage: { inputTokens: 5, outputTokens: 2, costUsd: 0 } };
+    } };
+    const observations: any[] = [];
+    const result = await new DockerOpenCodeReadOnlyCapsule().execute({ ...request(repository), role: "researcher",
+      rolePrompt: "Use the governed research tool.", webResearch: policy, webResearchEnvelopeDigest: "a".repeat(64),
+      securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" }, timeoutMs: 60_000,
+      budget: { maxSeconds: 60, maxCostUsd: 1, maxInputTokens: 10_000, maxOutputTokens: 1_000 },
+    }, broker, new AbortController().signal, (observation) => observations.push(observation), {
+      execute: async (raw) => webResearchTerminalResult(raw, "denied", "capability_attention"),
+    });
+    expect(result).toMatchObject({ outcome: "failed", cleanup: "completed" });
+    expect(observations.filter((item) => item.type.startsWith("research_"))).toEqual([
+      { type: "research_started", requestId: expect.any(String) },
+      { type: "research_completed", requestId: expect.any(String), result: expect.objectContaining({ outcome: "denied", reason: "capability_attention" }) },
+    ]);
+    expect(observations.at(-1)).toMatchObject({ type: "cleanup_observed", payload: { outcome: "completed", containerAbsent: true, imageAbsent: true } });
+    expect(turns).toBe(2);
+  }, 120_000);
 });
 
 function request(repositoryPath: string): OpenCodeReadOnlyCapsuleRequest {
   return {
     capsuleId: "milestone.task",
+    taskId: "task-1",
     repositoryPath,
     role: "planner",
     actorId: "opencode-planner",
@@ -354,6 +520,8 @@ function request(repositoryPath: string): OpenCodeReadOnlyCapsuleRequest {
     },
     budget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 50 },
     timeoutMs: 5_000,
+    webResearch: null,
+    webResearchEnvelopeDigest: null,
     securityBoundary: {
       repository: "sanitized_read_only_bind_mount",
       scratch: "bounded_ephemeral",
@@ -365,5 +533,42 @@ function request(repositoryPath: string): OpenCodeReadOnlyCapsuleRequest {
       forbiddenPaths: [".env"],
       repositoryRevision: "a".repeat(64),
     },
+  };
+}
+
+async function controlledHttpsSource(root: string, content: string) {
+  const key = path.join(root, "controlled.key");
+  const cert = path.join(root, "controlled.crt");
+  const generated = spawnSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=docs.example.com", "-days", "1"], {
+    shell: false, env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" }, encoding: "utf8",
+  });
+  if (generated.status !== 0) throw new Error("controlled HTTPS certificate generation failed");
+  let requests = 0;
+  const server = https.createServer({ key: readFileSync(key), cert: readFileSync(cert) }, (_request, response) => {
+    requests += 1;
+    response.setHeader("content-type", "text/plain");
+    response.end(content);
+  });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("controlled HTTPS source did not bind");
+  return {
+    get requests() { return requests; },
+    transport: { dispatch: (input: any) => new Promise<any>((resolve, reject) => {
+      const request = https.request({ hostname: "127.0.0.1", port: address.port, path: input.url.pathname, method: input.method, rejectUnauthorized: false }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const body = Buffer.concat(chunks);
+          resolve({ status: response.statusCode, headers: { "content-type": String(response.headers["content-type"]) }, body,
+            compressedBytes: body.length, decompressedBytes: body.length, resolvedAddress: "93.184.216.34", tls: true, dispatched: true });
+        });
+      });
+      request.on("error", reject);
+      input.signal.addEventListener("abort", () => request.destroy(new Error("cancelled")), { once: true });
+      request.end();
+    }) },
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

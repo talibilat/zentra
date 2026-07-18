@@ -143,7 +143,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
         } });
         return {
           outcome: receipt.outcome === "completed" ? "completed" : "failed",
-          openCode: { version: "1.18.1", executableSha256: "d".repeat(64) },
+          openCode: { version: "1.18.3", executableSha256: "d".repeat(64) },
           model: receipt.model,
           evidence: receipt.response?.type === "text" ? [{ kind: request.role === "reviewer" ? "review" : "plan", summary: receipt.response.text }] : [],
           cleanup: "completed", brokerTransport: "completed",

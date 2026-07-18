@@ -16,6 +16,12 @@ import { projectMilestone } from "../milestones/milestone-projection.js";
 import type { ModelBroker } from "../capsule/model-broker.js";
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
+import { GovernedWebResearch, NodeHttpsResearchTransport, WebResearchPolicySchema, webResearchTerminalResult, type WebResearchResult } from "../research/web-research.js";
+import { WebResearchRequestSchema } from "../research/web-research.js";
+import { TaskService } from "../tasks/task-service.js";
+import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../contracts/capability-boundary.js";
+import { MilestoneRegistry } from "../milestones/milestone-registry.js";
+import type { RoleCapabilityDecision } from "../workers/role-capability-envelope.js";
 import {
   OpenCodeMilestoneCompletedPayloadSchema,
   OpenCodeMilestoneRunningPayloadSchema,
@@ -38,6 +44,7 @@ const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
   kind: z.enum(["plan", "research", "finding", "review"]),
   summary: z.string().min(1).max(256 * 1024),
+  sourceEvidenceIds: z.array(DigestSchema).max(128).optional(),
 });
 const ModelMetadataSchema = z.strictObject({
   id: z.string().min(1).max(256),
@@ -47,6 +54,7 @@ const ModelMetadataSchema = z.strictObject({
 
 export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
   capsuleId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  taskId: z.string().min(1).max(256),
   repositoryPath: z.string().min(1).max(4_096),
   role: z.enum(["planner", "researcher", "reviewer"]),
   actorId: z.string().min(1).max(256),
@@ -65,10 +73,12 @@ export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
     maxOutputTokens: z.number().int().positive().max(2_000_000),
   }),
   timeoutMs: z.number().int().positive().max(86_400_000),
+  webResearch: WebResearchPolicySchema.nullable(),
+  webResearchEnvelopeDigest: DigestSchema.nullable(),
   securityBoundary: z.strictObject({
     repository: z.literal("sanitized_read_only_bind_mount"),
     scratch: z.literal("bounded_ephemeral"),
-    network: z.literal("model_broker_only"),
+    network: z.enum(["model_broker_only", "brokered_web_research"]),
     home: z.literal("ephemeral"),
     credentials: z.literal("none"),
     shell: z.literal("none"),
@@ -81,7 +91,7 @@ export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
 export const OpenCodeReadOnlyCapsuleResultSchema = z.strictObject({
   outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
   openCode: z.strictObject({
-    version: z.literal("1.18.1"),
+    version: z.literal("1.18.3"),
     executableSha256: DigestSchema,
   }).nullable(),
   model: ModelMetadataSchema.nullable(),
@@ -124,6 +134,7 @@ export interface OpenCodeReadOnlyCapsule {
     broker: ModelBroker,
     signal: AbortSignal,
     observe?: (observation: OpenCodeCapsuleObservation) => void,
+    research?: { execute(request: unknown, policy: unknown, signal: AbortSignal): Promise<WebResearchResult> },
   ): Promise<OpenCodeReadOnlyCapsuleResult>;
 }
 
@@ -131,7 +142,9 @@ export type OpenCodeCapsuleObservation =
   | { readonly type: "resources_prepared"; readonly payload: Omit<z.infer<typeof OpenCodeResourcesPreparedPayloadSchema>, "taskId"> }
   | { readonly type: "cleanup_observed"; readonly payload: Omit<z.infer<typeof OpenCodeCleanupObservedPayloadSchema>, "taskId"> }
   | { readonly type: "model_started"; readonly modelId: string }
-  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly toolCalls: number; readonly modelTurns: number } };
+  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly toolCalls: number; readonly modelTurns: number } }
+  | { readonly type: "research_started"; readonly requestId: string }
+  | { readonly type: "research_completed"; readonly requestId: string; readonly result: WebResearchResult };
 
 export interface OpenCodeReadOnlyAgentRequest {
   readonly milestoneId: string;
@@ -160,6 +173,7 @@ export class OpenCodeReadOnlyAgent {
     private readonly broker: ModelBroker,
     private readonly models: ModelSheet,
     private readonly security?: SecuritySheet,
+    private readonly research = new GovernedWebResearch(journal, new NodeHttpsResearchTransport()),
   ) {}
 
   async run(request: OpenCodeReadOnlyAgentRequest): Promise<OpenCodeReadOnlyAgentResult> {
@@ -209,6 +223,10 @@ export class OpenCodeReadOnlyAgent {
         configuredReadPaths: request.role === "reviewer" ? task.ownedPaths : this.security.allowedFileScopes,
         ownedPaths: task.ownedPaths,
         forbiddenPaths: [...new Set([...task.forbiddenPaths, ...this.security.forbiddenPaths])],
+        ...(model.network === "declared" ? { webResearch: {
+          allowedDestinations: this.security.network.allowedDestinations,
+          timeoutMs: request.timeoutMs,
+        } } : {}),
         ...(request.reviewEvidence === undefined ? {} : { review: request.reviewEvidence }),
       });
       new RoleCapabilityEnvelopeService(this.journal).accept(roleBinding);
@@ -227,6 +245,7 @@ export class OpenCodeReadOnlyAgent {
     const identity = openCodeResourceIdentity(request.milestoneId, request.taskId, resourceEvents.length + 1);
     const workerId = identity.capsuleId;
     const workers = new WorkerLifecycleService(this.journal);
+    const capabilityTasks = new TaskService(this.journal);
     const workerEvents = new OpenCodeWorkerEventAdapter();
     workers.bind({
       schemaVersion: 1,
@@ -240,8 +259,9 @@ export class OpenCodeReadOnlyAgent {
       envelope: roleBinding?.envelope ?? capabilityEnvelope({
         role: request.role,
         authority: task.risk.authority,
-        capabilities: request.role === "reviewer" ? ["read_repository", "review_diff"] : ["read_repository"],
-        network: "model_provider_only",
+        capabilities: request.role === "reviewer" ? ["read_repository", "review_diff"] :
+          model.network === "declared" ? ["read_repository", "web_research"] : ["read_repository"],
+        network: model.network === "declared" ? "declared_web_research" : "model_provider_only",
         secrets: "none",
         effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" },
         resources: { repository: "read_only", paths: [...task.ownedPaths], forbiddenPaths: [...task.forbiddenPaths] },
@@ -307,6 +327,7 @@ export class OpenCodeReadOnlyAgent {
     }
     const packet = OpenCodeReadOnlyCapsuleRequestSchema.parse({
       capsuleId: identity.capsuleId,
+      taskId: request.taskId,
       repositoryPath: view.path,
       role: request.role,
       actorId: task.roleAssignment.agentId,
@@ -320,10 +341,12 @@ export class OpenCodeReadOnlyAgent {
       },
       budget: request.budget,
       timeoutMs: request.timeoutMs,
+      webResearch: roleBinding?.webResearch ?? null,
+      webResearchEnvelopeDigest: roleBinding?.webResearch === null || roleBinding === null ? null : roleBinding.envelope.digest,
       securityBoundary: {
         repository: "sanitized_read_only_bind_mount",
         scratch: "bounded_ephemeral",
-        network: "model_broker_only",
+        network: roleBinding?.webResearch === null || roleBinding === null ? "model_broker_only" : "brokered_web_research",
         home: "ephemeral",
         credentials: "none",
         shell: "none",
@@ -364,6 +387,27 @@ export class OpenCodeReadOnlyAgent {
 
     const deadline = AbortSignal.timeout(request.timeoutMs);
     const signal = AbortSignal.any([request.signal, deadline]);
+    let capabilityAttention: RoleCapabilityDecision | null = null;
+    const researchCapability = roleBinding === null ? undefined : {
+      execute: async (rawResearchRequest: unknown, policy: unknown, researchSignal: AbortSignal): Promise<WebResearchResult> => {
+        if (typeof rawResearchRequest !== "object" || rawResearchRequest === null || Array.isArray(rawResearchRequest)) throw new Error("invalid research capability request");
+        const raw = rawResearchRequest as Readonly<Record<string, unknown>>;
+        const destination = new URL(String(raw["url"]));
+        destination.search = "";
+        destination.hash = "";
+        const decision = new RoleCapabilityEnvelopeService(this.journal).evaluate(roleBinding!, {
+          kind: "network", destination: destination.href,
+          method: raw["method"] === "GET" || raw["method"] === "HEAD" ? raw["method"] : "OTHER",
+          capability: raw["tool"] === "zentra_web_research" ? "web_research" : "unknown",
+        });
+        if (decision.status !== "allowed") {
+          capabilityAttention = decision;
+          return webResearchTerminalResult(rawResearchRequest, "denied", "capability_attention");
+        }
+        const researchRequest = WebResearchRequestSchema.parse(rawResearchRequest);
+        return this.research.execute(researchRequest, policy, researchSignal);
+      },
+    };
     let result: OpenCodeReadOnlyCapsuleResult | undefined;
     const observationState: { cleanup: Extract<OpenCodeCapsuleObservation, { type: "cleanup_observed" }> | null } = { cleanup: null };
     let repositoryViewAbsent = false;
@@ -371,6 +415,21 @@ export class OpenCodeReadOnlyAgent {
       result = OpenCodeReadOnlyCapsuleResultSchema.parse(await this.capsule.execute(packet, this.broker, signal, (observation) => {
         if (observation.type === "cleanup_observed") {
           observationState.cleanup = observation;
+          return;
+        }
+        if (observation.type === "research_started") {
+          workers.observe(request.taskId, workerId, {
+            kind: "tool", name: "zentra_web_research", phase: "started", outcome: null,
+            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 },
+          });
+          return;
+        }
+        if (observation.type === "research_completed") {
+          workers.observe(request.taskId, workerId, {
+            kind: "tool", name: "zentra_web_research", phase: "completed",
+            outcome: observation.result.outcome === "uncertain" ? "failed" : observation.result.outcome,
+            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 1, modelTurns: 0 },
+          });
           return;
         }
         if (observation.type === "model_started") {
@@ -393,7 +452,7 @@ export class OpenCodeReadOnlyAgent {
         version = this.journal.append(request.milestoneId, version, [{
           streamId: request.milestoneId, type, payload, causationId: null, correlationId,
         }]).at(-1)!.streamVersion;
-      }));
+      }, researchCapability));
       if (deadline.aborted && result.outcome === "cancelled") {
         result = Object.freeze({ ...result, outcome: "timed_out" });
       }
@@ -482,6 +541,25 @@ export class OpenCodeReadOnlyAgent {
     if (uncertainWorker) workers.uncertain(request.taskId, workerId, "OpenCode transport or cleanup is uncertain");
     workers.cleanup(request.taskId, workerId, result.cleanup);
     if (!uncertainWorker) workers.terminate(request.taskId, workerId, outcome);
+    if (capabilityAttention !== null && !uncertainWorker) {
+      const decision = capabilityAttention as RoleCapabilityDecision;
+      const rolePolicy = new RoleCapabilityEnvelopeService(this.journal);
+      if (capabilityTasks.readStream(request.taskId).length === 0) {
+        capabilityTasks.create({ taskId: request.taskId, projectId: milestone.projectId, title: task.title, correlationId });
+      }
+      const occurrence = createCapabilityBoundaryOccurrence({
+        binding: roleBinding!, decision,
+        evaluationEvent: rolePolicy.evaluationEvent(roleBinding!, decision.decisionId),
+        phase: "pre_effect", taskHead: capabilityTaskHead(capabilityTasks.readStream(request.taskId)),
+      });
+      new MilestoneRegistry(this.journal).pauseForCapabilityBoundary(request.milestoneId, occurrence, null);
+      const trace = traceOutcome(this.journal);
+      return Object.freeze({
+        ...result, outcome: "failed", trace: Object.freeze({ outcome: trace }),
+        execution: Object.freeze({ milestoneId: request.milestoneId, taskId: request.taskId, capsuleId: packet.capsuleId,
+          actorId: packet.actorId, capabilityId: packet.capabilityId, transportModelId: packet.transportModelId }),
+      });
+    }
     if (uncertainWorker) {
       const trace = traceOutcome(this.journal);
       return Object.freeze({

@@ -101,7 +101,7 @@ function reviewerProgram(
       return {
         status: "executed",
         outcome: "completed",
-        openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+        openCode: { version: "1.18.3", executableSha256: "c".repeat(64) },
         model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
         evidence: [{ kind: "review", summary: JSON.stringify(response) }],
         cleanup: "completed",

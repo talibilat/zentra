@@ -80,8 +80,8 @@ describe("secure Docker capsule acceptance", () => {
     for (const filter of ["container", "network"] as const) {
       const result = await docker.run(
         filter === "container"
-          ? ["ps", "--all", "--filter", "name=zentra-", "--quiet"]
-          : ["network", "ls", "--filter", "name=zentra-", "--quiet"],
+          ? ["ps", "--all", "--filter", "label=org.zentra.capsule-id=docker-acceptance", "--quiet"]
+          : ["network", "ls", "--filter", "label=org.zentra.capsule-id=docker-acceptance", "--quiet"],
         new AbortController().signal,
         30_000,
       );

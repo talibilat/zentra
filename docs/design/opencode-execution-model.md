@@ -134,9 +134,15 @@ The existing planner, researcher, writer, and reviewer journals and APIs remain 
 
 Agent Tail projects generic workers as actor-specific spans, with nested workers parented to the worker that delegated them.
 
-The typed `web_research` capability and declared-web-research network mode are reserved but rejected by current admission.
+The typed `web_research` capability and declared-web-research network mode are admitted only for planner and researcher tasks with exact security-sheet HTTPS destinations.
 
-Web research policy and Azure provider configuration remain deferred to separate tickets.
+OpenCode uses one local MCP tool inside the network-dark capsule, and Zentra brokers each typed request through the host policy boundary.
+
+Native OpenCode web tools and internal subagents remain denied because OpenCode 1.18.3 does not provide the complete stable lifecycle, budget, and provenance observations required by Zentra.
+
+Web research source evidence is journaled by digest and provenance without raw response content or query values.
+
+Azure provider configuration remains deferred to a separate ticket.
 
 ## Example Workflows
 

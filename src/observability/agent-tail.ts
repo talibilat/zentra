@@ -9,6 +9,7 @@ import { parseReleaseEventPayload, ReleaseMilestoneTaskCompletedPayloadSchema } 
 import { envelopeReadPaths, envelopeWritePaths, parseWorkerEventPayload, type WorkerBinding } from "../workers/worker-lifecycle.js";
 import { parseRoleCapabilityEventPayload } from "../workers/role-capability-envelope.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema } from "../contracts/capability-boundary.js";
+import { parseWebResearchEventPayload } from "../research/web-research.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -90,6 +91,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? parseRoutingEventPayload(event.type, event.payload)
     : event.type.startsWith("capability_envelope.")
       ? redactedRoleCapabilityPayload(event.type, event.payload)
+    : event.type.startsWith("web_research.")
+      ? redactedWebResearchPayload(event.type, event.payload)
     : event.type.startsWith("worker.")
       ? redactedWorkerPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
@@ -159,6 +162,7 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("capability_envelope.")) return `capability-envelope:${event.streamId}`;
+  if (event.type.startsWith("web_research.")) return `web-research:${payloadString(event.payload, "requestId")!}`;
   if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
@@ -180,6 +184,10 @@ function parentSpanIdFor(event: StoredEvent): string | null {
       ? `milestone:${payloadString(context, "milestoneId")!}:task:${payloadString(event.payload, "taskId")!}`
       : `task:${payloadString(event.payload, "taskId")!}`;
   }
+  if (event.type.startsWith("web_research.")) {
+    const identity = payloadRecord(event.payload, "identity");
+    return identity === null ? null : `worker:${payloadString(identity, "workerId")!}`;
+  }
   return event.type.startsWith("milestone.task_") && payloadString(event.payload, "taskId") !== null
     ? `milestone:${event.streamId}`
     : null;
@@ -188,6 +196,10 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 function actorFor(event: StoredEvent): AgentTailActor {
   if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
   if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
+  if (event.type.startsWith("web_research.")) {
+    const identity = payloadRecord(event.payload, "identity");
+    return { id: payloadString(identity, "workerId") ?? "zentra-research-broker", role: payloadString(identity, "role") ?? "researcher" };
+  }
   if (event.type.startsWith("worker.")) {
     return { id: payloadString(event.payload, "workerId")!, role: payloadString(event.payload, "role")! };
   }
@@ -281,6 +293,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 function operationName(event: StoredEvent): string {
   if (event.type.includes("capability_boundary_")) return "capability_boundary";
   if (event.type.startsWith("capability_envelope.")) return "capability_envelope";
+  if (event.type.startsWith("web_research.")) return "web_research";
   if (event.type.startsWith("worker.")) return "worker";
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
   if (event.type === "milestone.release_operation_bound") return "release_preparation";
@@ -324,6 +337,7 @@ function operationName(event: StoredEvent): string {
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
   if (type === "capability_envelope.accepted") return "completed";
+  if (type === "web_research.observed") return payloadString(event.payload, "outcome") ?? "failed";
   if (type === "capability_envelope.evaluated") {
     return payloadString(payloadRecord(event.payload, "decision"), "status") === "allowed" ? "completed" : "waiting";
   }
@@ -621,6 +635,33 @@ function redactedRoleCapabilityPayload(type: string, payload: unknown): unknown 
     writeScopeCount: access.writePaths.length,
     forbiddenScopeCount: access.forbiddenPaths.length,
     reviewEvidenceBound: binding["review"] !== null,
+    researchPolicyDigest: (binding["webResearch"] as Readonly<Record<string, unknown>> | null)?.["digest"] ?? null,
+    researchDestinationCount: Array.isArray((binding["webResearch"] as Readonly<Record<string, unknown>> | null)?.["destinations"])
+      ? ((binding["webResearch"] as Readonly<Record<string, unknown>>)["destinations"] as readonly unknown[]).length : 0,
+  });
+}
+
+function redactedWebResearchPayload(type: string, payload: unknown): unknown {
+  const parsed = parseWebResearchEventPayload(type, payload) as Readonly<Record<string, unknown>>;
+  const evidence = parsed["evidence"] as Readonly<Record<string, unknown> | null>;
+  if (evidence === null) return Object.freeze({
+    requestId: parsed["requestId"], requestDigest: parsed["requestDigest"], eventDigest: parsed["eventDigest"],
+    outcome: parsed["outcome"], reason: parsed["reason"], elapsedMs: parsed["elapsedMs"],
+    identity: parsed["identity"], usage: parsed["usage"], evidence: null,
+  });
+  const source = new URL(evidence["sourceUrl"] as string);
+  return Object.freeze({
+    requestId: parsed["requestId"], requestDigest: parsed["requestDigest"], eventDigest: parsed["eventDigest"],
+    outcome: parsed["outcome"], reason: parsed["reason"], elapsedMs: parsed["elapsedMs"],
+    identity: parsed["identity"], usage: parsed["usage"],
+    evidence: Object.freeze({
+      evidenceId: evidence["evidenceId"], sourceHost: source.hostname,
+      sourcePathDigest: digestCanonical(source.pathname), status: evidence["status"], contentType: evidence["contentType"],
+      contentSha256: evidence["contentSha256"], compressedBytes: evidence["compressedBytes"],
+      decompressedBytes: evidence["decompressedBytes"], retrievedAt: evidence["retrievedAt"],
+      parent: evidence["parent"], envelopeDigest: evidence["envelopeDigest"], policyDigest: evidence["policyDigest"],
+      provenance: evidence["provenance"],
+    }),
   });
 }
 

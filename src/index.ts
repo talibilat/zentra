@@ -89,6 +89,21 @@ export {
   OpenCodeReviewerUncertainError,
 } from "./reviews/opencode-reviewer-adapter.js";
 export {
+  GovernedWebResearch,
+  NodeHttpsResearchTransport,
+  WebResearchPolicySchema,
+  WebResearchRequestSchema,
+  WebResearchResultSchema,
+  canonicalWebUrl,
+} from "./research/web-research.js";
+export type {
+  WebResearchPolicy,
+  WebResearchRequest,
+  WebResearchResult,
+  WebResearchTransport,
+  WebSourceEvidence,
+} from "./research/web-research.js";
+export {
   RoleCapabilityBindingSchema,
   RoleCapabilityDecisionSchema,
   RoleCapabilityEnvelopeService,

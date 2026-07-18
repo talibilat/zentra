@@ -32,7 +32,9 @@ describe("generic worker lifecycle", () => {
 
   it.each(networks.flatMap((parent) => networks.map((child) => [parent, child] as const)))(
     "defines network partial order %s -> %s",
-    (parent, child) => expect(networkCanNarrow(parent, child)).toBe(child === parent || (parent === "model_provider_only" && child === "denied")),
+    (parent, child) => expect(networkCanNarrow(parent, child)).toBe(child === parent ||
+      (parent === "declared_web_research" && (child === "model_provider_only" || child === "denied")) ||
+      (parent === "model_provider_only" && child === "denied")),
   );
 
   it.each(repositories.flatMap((parent) => repositories.map((child) => [parent, child] as const)))(
@@ -133,9 +135,10 @@ describe("generic worker lifecycle", () => {
     journal.close();
   });
 
-  it("rejects role-authority mismatches and reserved web research before binding", () => {
+  it("rejects role-authority mismatches and web research for non-research roles", () => {
     expect(() => capabilityEnvelope({ role: "researcher", authority: "workspace_write", capabilities: ["read_repository"], network: "denied", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [] } })).toThrow(/role and authority/i);
-    expect(() => capabilityEnvelope({ role: "researcher", authority: "read_only", capabilities: ["read_repository", "web_research"], network: "declared_web_research", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [] } })).toThrow(/reserved/i);
+    expect(() => capabilityEnvelope({ role: "researcher", authority: "read_only", capabilities: ["read_repository", "web_research"], network: "declared_web_research", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [] } })).not.toThrow();
+    expect(() => capabilityEnvelope({ role: "reviewer", authority: "review", capabilities: ["read_repository", "review_diff", "web_research"], network: "declared_web_research", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [] } })).toThrow(/planner or researcher/i);
   });
 
   it("reserves active workers atomically across two services and SQLite connections", () => {

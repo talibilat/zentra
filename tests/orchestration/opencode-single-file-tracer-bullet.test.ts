@@ -505,7 +505,7 @@ class DenyingOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
     return Promise.resolve({
       status: "executed",
       outcome: "completed",
-      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      openCode: { version: "1.18.3", executableSha256: "c".repeat(64) },
       model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
       evidence: [{ kind: "review", summary: JSON.stringify(response) }],
       cleanup: "completed",
@@ -541,7 +541,7 @@ class ApprovingOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
     return Promise.resolve({
       status: "executed",
       outcome: "completed",
-      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      openCode: { version: "1.18.3", executableSha256: "c".repeat(64) },
       model: { id: "fixture/reviewer-1", provider: "fixture", name: "reviewer-v1" },
       evidence: [{ kind: "review", summary: JSON.stringify(response) }],
       cleanup: "completed",
@@ -568,7 +568,7 @@ class UncertainOpenCodeReviewerProgram implements OpenCodeReviewerProgram {
     return Promise.resolve({
       status: "executed",
       outcome: "failed",
-      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      openCode: { version: "1.18.3", executableSha256: "c".repeat(64) },
       model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
       evidence: [],
       cleanup: "completed",
