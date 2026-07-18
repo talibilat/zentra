@@ -4,6 +4,7 @@ import { digestCanonical } from "../contracts/authority-attention.js";
 import type { EventJournal } from "../journal/journal.js";
 import { capabilityEnvelope, CapabilityEnvelopeSchema } from "./worker-lifecycle.js";
 import { WebResearchPolicySchema } from "../research/web-research.js";
+import { researchDestinationAllows } from "../research/destination-policy.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const IdentitySchema = z.string().min(1).max(256);
@@ -87,6 +88,8 @@ export interface RoleCapabilityBindingInput {
   readonly review?: z.infer<typeof ReviewEvidenceSchema>;
   readonly webResearch?: {
     readonly allowedDestinations: readonly string[];
+    readonly destinations?: readonly { readonly origin: string; readonly pathPrefix: string }[];
+    readonly requiredRequest?: { readonly method: "GET"; readonly url: string; readonly maxRequests: 1 };
     readonly timeoutMs: number;
   };
 }
@@ -185,13 +188,16 @@ export function buildRoleCapabilityBinding(input: RoleCapabilityBindingInput): R
   if (!webResearchEnabled && input.webResearch !== undefined) throw new Error("web research policy requires its accepted capability");
   const webResearch = webResearchEnabled ? WebResearchPolicySchema.parse({
     schemaVersion: 1,
-    destinations: [...new Set(input.webResearch!.allowedDestinations)].sort().map((origin) => ({ origin, pathPrefix: "/" })),
+    destinations: input.webResearch!.destinations ??
+      [...new Set(input.webResearch!.allowedDestinations)].sort().map((origin) => ({ origin, pathPrefix: "/" })),
+    requiredRequest: input.webResearch!.requiredRequest ?? null,
     contentTypes: ["application/json", "application/xhtml+xml", "text/html", "text/markdown", "text/plain"],
     maxRedirects: 5,
     maxCompressedBytes: 2 * 1024 * 1024,
     maxDecompressedBytes: 4 * 1024 * 1024,
     timeoutMs: input.webResearch!.timeoutMs,
-    budget: { maxRequests: 16, maxBytes: 16 * 1024 * 1024, maxTimeMs: input.webResearch!.timeoutMs },
+    budget: { maxRequests: input.webResearch!.requiredRequest === undefined ? 16 : 1,
+      maxBytes: 16 * 1024 * 1024, maxTimeMs: input.webResearch!.timeoutMs },
   }) : null;
   if (access.readPaths.length === 0) throw new Error("role capability requires configured repository read scope");
   for (const writable of access.writePaths) {
@@ -395,8 +401,15 @@ function evaluateRequestResult(binding: RoleCapabilityBinding, request: RoleCapa
     if ((request.method ?? "GET") !== "GET" && request.method !== "HEAD") return { status: "attention", reason: "network_method_not_allowed" };
     let candidate: URL;
     try { candidate = new URL(request.destination); } catch { return { status: "attention", reason: "network_destination_not_allowed" }; }
-    const allowed = binding.webResearch.destinations.some((destination) => candidate.protocol === "https:" && candidate.origin === destination.origin &&
-      (candidate.pathname === destination.pathPrefix || candidate.pathname.startsWith(destination.pathPrefix)));
+    if (binding.webResearch.requiredRequest !== null) {
+      if ((request.method ?? "GET") !== binding.webResearch.requiredRequest.method) {
+        return { status: "attention", reason: "network_method_not_allowed" };
+      }
+      if (candidate.href !== binding.webResearch.requiredRequest.url) {
+        return { status: "attention", reason: "network_destination_not_allowed" };
+      }
+    }
+    const allowed = binding.webResearch.destinations.some((destination) => researchDestinationAllows(destination, candidate));
     return allowed ? { status: "allowed", reason: "in_envelope" } : { status: "attention", reason: "network_destination_not_allowed" };
   }
   return { status: "attention", reason: "forbidden_effect" };

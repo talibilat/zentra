@@ -117,7 +117,7 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
       expect.objectContaining({ type: "resources_prepared", payload: expect.objectContaining({ containerId, imageId, repositoryViewPath: repository }) }),
       { type: "model_started", modelId: "fixture/planner" },
       {
-        type: "model_completed", modelId: "fixture/planner", outcome: "completed",
+        type: "model_completed", modelId: "fixture/planner", outcome: "completed", failureReason: null,
         usage: { seconds: 0, inputTokens: 10, outputTokens: 5, costUsd: 0.01, costUsdNano: 10_000_000, toolCalls: 0, modelTurns: 1 },
       },
       expect.objectContaining({ type: "cleanup_observed", payload: expect.objectContaining({ outcome: "completed", containerAbsent: true, imageAbsent: true }) }),
@@ -142,31 +142,153 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     containerPresent = true;
     measuredTurn = 0;
     const excessiveBroker: ModelBroker = { execute: async (modelRequest) => {
-      const costUsdNano = measuredTurn++ === 0 ? 100_000_000 : 200_000_001;
+      const attempt = measuredTurn++;
+      const costUsdNano = attempt === 0 ? 100_000_000 : 200_000_001;
       return { outcome: "completed", response: { type: "text", text: "excess" },
-        model: { id: modelRequest.modelId, provider: "fixture", name: "planner" },
+        model: { id: attempt === 0 ? modelRequest.modelId : "substituted/model", provider: "fixture", name: "planner" },
         usage: { inputTokens: 1, outputTokens: 1, costUsd: costUsdNano / 1_000_000_000, costUsdNano } };
     } };
+    const excessiveObservations: any[] = [];
     const excessive = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
       ...request(repository), budget: { maxSeconds: 30, maxCostUsd: 0.3, maxInputTokens: 100, maxOutputTokens: 50 },
-    }, excessiveBroker, new AbortController().signal);
-    expect(excessive).toMatchObject({ outcome: "failed", usage: { costUsdNano: 300_000_001 } });
+    }, excessiveBroker, new AbortController().signal, (observation) => excessiveObservations.push(observation));
+    expect(excessive).toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: "cost_budget_exceeded", usage: { costUsdNano: 300_000_001 } });
+    expect(excessiveObservations.filter((observation) => observation.type === "model_started")).toHaveLength(2);
+    expect(excessiveObservations.filter((observation) => observation.type === "model_completed")).toHaveLength(2);
+    expect(excessiveObservations.findLast((observation) => observation.type === "model_completed")).toMatchObject({
+      outcome: "failed", failureReason: "cost_budget_exceeded",
+      usage: { costUsdNano: 200_000_001, modelTurns: 1 },
+    });
+    expect(excessiveObservations.at(-1)).toMatchObject({ type: "cleanup_observed", payload: { outcome: "completed" } });
     modelTurnCount = 1;
+
+    imagePresent = true;
+    containerPresent = true;
+    const tokenPrecedenceObservations: any[] = [];
+    const tokenPrecedence = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository),
+      { execute: async () => ({ outcome: "completed", response: { type: "text", text: "token overrun" },
+        model: { id: "substituted/model", provider: "fixture", name: "substituted" },
+        usage: { inputTokens: 101, outputTokens: 1, costUsd: 0 } }) },
+      new AbortController().signal,
+      (observation) => tokenPrecedenceObservations.push(observation),
+    );
+    expect(tokenPrecedence).toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: "token_budget_exceeded", usage: { inputTokens: 101 } });
+    expect(tokenPrecedenceObservations.filter((observation) => observation.type === "model_completed")).toEqual([
+      expect.objectContaining({ outcome: "failed", failureReason: "token_budget_exceeded",
+        usage: expect.objectContaining({ inputTokens: 101, modelTurns: 1 }) }),
+    ]);
+
+    imagePresent = true;
+    containerPresent = true;
+    const modelTurnPrecedenceObservations: any[] = [];
+    const modelTurnBroker = vi.fn(async (modelRequest) => ({
+      outcome: "completed" as const, response: { type: "text" as const, text: "turn" },
+      model: { id: modelRequest.modelId, provider: "fixture", name: "planner" },
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    }));
+    runBrokered.mockImplementationOnce(async (_args, _signal, _timeout, exchange) => {
+      for (let index = 0; index < 31; index += 1) {
+        const response = await exchange({ type: "model_turn", requestId: `turn-${index + 1}`, prompt: "turn" }, new AbortController().signal) as any;
+        expect(response.receipt.outcome).toBe("completed");
+      }
+      const [lastSlot, denied] = await Promise.all([
+        exchange({ type: "model_turn", requestId: "turn-32", prompt: "last slot" }, new AbortController().signal),
+        exchange({ type: "model_turn", requestId: "turn-33", prompt: "must be denied" }, new AbortController().signal),
+      ]) as any[];
+      expect(lastSlot.receipt.outcome).toBe("completed");
+      expect(denied.receipt).toMatchObject({ outcome: "failed", failureReason: "model_turn_budget_exceeded" });
+      throw new Error("OpenCode stopped after fixed model-turn denial");
+    });
+    const modelTurnPrecedence = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository),
+      { execute: modelTurnBroker },
+      new AbortController().signal,
+      (observation) => modelTurnPrecedenceObservations.push(observation),
+    );
+    expect(modelTurnPrecedence).toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: "model_turn_budget_exceeded", usage: { modelTurns: 32 } });
+    expect(modelTurnBroker).toHaveBeenCalledTimes(32);
+    expect(modelTurnPrecedenceObservations.filter((observation) => observation.type === "model_started")).toHaveLength(32);
+    expect(modelTurnPrecedenceObservations.filter((observation) => observation.type === "model_completed")).toHaveLength(32);
+    expect(modelTurnPrecedenceObservations.findLast((observation) => observation.type === "model_completed"))
+      .toMatchObject({ outcome: "completed", usage: expect.objectContaining({ modelTurns: 1 }) });
+
+    imagePresent = true;
+    containerPresent = true;
+    const substitutedObservations: any[] = [];
+    const substituted = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository),
+      { execute: async () => ({ outcome: "completed", response: { type: "text", text: "substituted" },
+        model: { id: "substituted/model", provider: "fixture", name: "substituted", configurationDigest: "d".repeat(64) },
+        usage: { inputTokens: 3, outputTokens: 2, costUsd: 0.01 } }) },
+      new AbortController().signal,
+      (observation) => substitutedObservations.push(observation),
+    );
+    expect(substituted).toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: "provider_model_mismatch", usage: { inputTokens: 3, outputTokens: 2, costUsdNano: 10_000_000 } });
+    expect(substitutedObservations.filter((observation) => observation.type === "model_started")).toHaveLength(1);
+    expect(substitutedObservations.filter((observation) => observation.type === "model_completed")).toEqual([
+      expect.objectContaining({ outcome: "failed", failureReason: "provider_model_mismatch",
+        usage: expect.objectContaining({ inputTokens: 3, outputTokens: 2, costUsdNano: 10_000_000, modelTurns: 1 }) }),
+    ]);
+    expect(substitutedObservations.at(-1)).toMatchObject({ type: "cleanup_observed", payload: { outcome: "completed" } });
+
+    imagePresent = true;
+    containerPresent = true;
+    let completionAttempts = 0;
+    const acceptedCompletions: any[] = [];
+    const observerFailure = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository), broker, new AbortController().signal,
+      (observation) => {
+        if (observation.type === "model_completed") {
+          completionAttempts += 1;
+          if (completionAttempts === 1) throw new Error("observer append failed before acceptance");
+          acceptedCompletions.push(observation);
+        }
+      },
+    );
+    expect(observerFailure).toMatchObject({ outcome: "failed", cleanup: "completed" });
+    expect(completionAttempts).toBe(2);
+    expect(acceptedCompletions).toEqual([expect.objectContaining({ outcome: "completed" })]);
 
     for (const brokerOutcome of ["cancelled", "timed_out", "uncertain"] as const) {
       imagePresent = true;
       containerPresent = true;
       const mapped = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
         request(repository),
-        { execute: async () => ({ outcome: brokerOutcome, response: null, model: null, usage: null }) },
+        { execute: async () => ({ outcome: brokerOutcome,
+          failureReason: brokerOutcome === "cancelled" ? "request_cancelled" as const :
+            brokerOutcome === "timed_out" ? "request_timed_out_before_dispatch" as const : "transport_uncertain_after_dispatch" as const,
+          response: null, model: null, usage: null }) },
         new AbortController().signal,
       );
       expect(mapped).toMatchObject({
         outcome: brokerOutcome === "uncertain" ? "failed" : brokerOutcome,
         brokerTransport: brokerOutcome === "uncertain" ? "uncertain" : "completed",
+        brokerFailureReason: brokerOutcome === "cancelled" ? "request_cancelled" :
+          brokerOutcome === "timed_out" ? "request_timed_out_before_dispatch" : "transport_uncertain_after_dispatch",
         cleanup: "completed",
       });
     }
+    imagePresent = true;
+    containerPresent = true;
+    const toolFailureObservations: any[] = [];
+    const toolFailure = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository),
+      { execute: async () => ({ outcome: "failed", failureReason: "tool_call_arguments_schema_invalid",
+        failureTool: "read", response: null, model: null, usage: null }) },
+      new AbortController().signal,
+      (observation) => toolFailureObservations.push(observation),
+    );
+    expect(toolFailure).toMatchObject({
+      outcome: "failed", brokerFailureReason: "tool_call_arguments_schema_invalid", brokerFailureTool: "read",
+    });
+    expect(toolFailureObservations.find((observation) => observation.type === "model_completed")).toMatchObject({
+      failureReason: "tool_call_arguments_schema_invalid", failureTool: "read",
+    });
     imagePresent = true;
     containerPresent = true;
     transportUncertain = true;
@@ -175,6 +297,29 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     )).toMatchObject({ outcome: "failed", brokerTransport: "uncertain" });
 
     transportUncertain = false;
+    imagePresent = true;
+    containerPresent = true;
+    const ambiguousObservations: any[] = [];
+    runBrokered.mockImplementationOnce(async (_args, _signal, _timeout, exchange) => {
+      void exchange({ type: "model_turn", requestId: "ambiguous-turn", prompt: "ambiguous" }, new AbortController().signal);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      throw new DockerBrokerTransportUncertainError();
+    });
+    const ambiguous = await new DockerOpenCodeReadOnlyCapsule(docker).execute(
+      request(repository),
+      { execute: async () => new Promise<ModelBrokerReceipt>(() => {}) },
+      new AbortController().signal,
+      (observation) => ambiguousObservations.push(observation),
+    );
+    expect(ambiguous).toMatchObject({ outcome: "failed", brokerTransport: "uncertain",
+      brokerFailureReason: "transport_uncertain_after_dispatch", cleanup: "completed" });
+    expect(ambiguousObservations.filter((observation) => observation.type === "model_started")).toHaveLength(1);
+    expect(ambiguousObservations.filter((observation) => observation.type === "model_completed")).toEqual([
+      expect.objectContaining({ outcome: "uncertain", failureReason: "transport_uncertain_after_dispatch",
+        usage: expect.objectContaining({ modelTurns: 0 }) }),
+    ]);
+    expect(ambiguousObservations.at(-1)).toMatchObject({ type: "cleanup_observed", payload: { outcome: "completed" } });
+
     imagePresent = true;
     containerPresent = true;
     const researchPolicy = WebResearchPolicySchema.parse({
@@ -205,6 +350,52 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     expect(JSON.stringify(researchJournal.readAll())).not.toContain("governed source fact");
     expect(JSON.stringify(researchJournal.readAll())).not.toContain("secret=redacted");
     researchJournal.close();
+
+    imagePresent = true;
+    containerPresent = true;
+    const requiredUrl = "https://docs.example.com/fact";
+    const requiredPolicy = WebResearchPolicySchema.parse({
+      schemaVersion: 1,
+      destinations: [{ origin: "https://docs.example.com", pathPrefix: "/fact" }],
+      requiredRequest: { method: "GET", url: requiredUrl, maxRequests: 1 },
+      contentTypes: ["text/plain"], maxRedirects: 0, maxCompressedBytes: 1_024, maxDecompressedBytes: 1_024,
+      timeoutMs: 1_000, budget: { maxRequests: 1, maxBytes: 1_024, maxTimeMs: 1_000 },
+    });
+    const requiredJournal = new SqliteEventJournal(":memory:");
+    const requiredDispatch = vi.fn(async () => ({
+      status: 200, headers: { "content-type": "text/plain" }, body: Buffer.from("single governed source"),
+      compressedBytes: 22, decompressedBytes: 22, resolvedAddress: "93.184.216.34", tls: true, dispatched: true,
+    }));
+    const requiredResearch = new GovernedWebResearch(requiredJournal, { dispatch: requiredDispatch });
+    const repeatedObservations: any[] = [];
+    vi.mocked(broker.execute).mockClear();
+    runBrokered.mockImplementationOnce(async (_args, _signal, _timeout, exchange) => {
+      await exchange({ type: "model_turn", requestId: "required-turn-1", prompt: "request source" }, new AbortController().signal);
+      const first = await exchange({ type: "research_request", requestId: "required-source-1", method: "GET", url: requiredUrl }, new AbortController().signal) as any;
+      const repeated = await exchange({ type: "research_request", requestId: "required-source-2", method: "GET", url: requiredUrl }, new AbortController().signal) as any;
+      expect(repeated.result.evidence.evidenceId).toBe(first.result.evidence.evidenceId);
+      await exchange({ type: "model_turn", requestId: "required-turn-2", prompt: "write cited final" }, new AbortController().signal);
+      const citation = `[source:${first.result.evidence.evidenceId}]`;
+      const output = [JSON.stringify({ type: "text", part: { type: "text", text: `Final ${citation}` } }), JSON.stringify({ type: "step_finish" })].join("\n");
+      return { exitCode: 0, stdout: `${JSON.stringify({ type: "opencode_result", exitCode: 0, stdout: output, stderr: "" })}\n`, stderr: "" };
+    });
+    const repeatedResult = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
+      ...request(repository), role: "researcher", webResearch: requiredPolicy,
+      webResearchEnvelopeDigest: "a".repeat(64), securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" },
+    }, broker, new AbortController().signal, (observation) => repeatedObservations.push(observation), requiredResearch);
+    expect(repeatedResult).toMatchObject({ outcome: "completed", evidence: [{
+      kind: "research", summary: expect.stringMatching(/\[source:[a-f0-9]{64}\]/),
+      sourceEvidenceIds: [expect.stringMatching(/^[a-f0-9]{64}$/)],
+    }] });
+    expect(requiredDispatch).toHaveBeenCalledTimes(1);
+    expect(requiredJournal.readStream("web-research:task-1")).toHaveLength(1);
+    expect(repeatedObservations.filter((observation) => observation.type === "research_started")).toHaveLength(1);
+    expect(repeatedObservations.filter((observation) => observation.type === "research_completed")).toHaveLength(1);
+    const brokerRequests = vi.mocked(broker.execute).mock.calls.map(([modelRequest]) => modelRequest);
+    expect(brokerRequests).toHaveLength(2);
+    expect(brokerRequests[0]?.allowedTools).toContain("zentra_research_web_research");
+    expect(brokerRequests[1]?.allowedTools).not.toContain("zentra_research_web_research");
+    requiredJournal.close();
 
     for (const mode of ["attention", "thrown"] as const) {
       imagePresent = true;
@@ -412,28 +603,28 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
     writeFileSync(path.join(repository, "evidence.txt"), "violet repository fact 731\n");
     let turns = 0;
     const promptEvidence: string[] = [];
-    const broker: ModelBroker = {
-      execute: async (brokerRequest): Promise<ModelBrokerReceipt> => {
-        turns += 1;
-        promptEvidence.push(brokerRequest.prompt.includes("violet repository fact 731") ? "file" : brokerRequest.prompt.slice(0, 40));
-        const title = brokerRequest.prompt.startsWith("system: You are a title generator");
-        const observedFile = brokerRequest.prompt.includes("violet repository fact 731");
-        return {
-          outcome: "completed",
-          response: title
-            ? { type: "text", text: "Repository evidence" }
-            : observedFile
-              ? { type: "text", text: "Observed violet repository fact 731" }
-              : { type: "tool_calls", calls: [{ id: "read-evidence", name: "read", arguments: JSON.stringify({ filePath: "/project/evidence.txt" }) }] },
-          model: { id: brokerRequest.modelId, provider: "fixture", name: "planner" },
-          usage: { inputTokens: 10, outputTokens: 2, costUsd: 0 },
-        };
-      },
-    };
+    const broker = azureOpenAIModelBrokerForTest({
+      provider: "azure", endpoint: "https://zentra-test.openai.azure.com", deployment: "azure-deployment",
+      apiVersion: "2025-04-01-preview", credentialEnv: "KEY", timeoutMs: 30_000, maxResponseBytes: 1_048_576,
+      maxInputTokens: 10_000, maxOutputTokens: 1_000, maxToolCalls: 4,
+      expectedProviderModels: ["fixture-provider-model"], inputTokenRateUsdPerMillion: "0", outputTokenRateUsdPerMillion: "0",
+    }, { KEY: "host-only-secret" }, async (input) => {
+      turns += 1;
+      const prompt = (JSON.parse(input.body) as { messages: readonly { content: string }[] }).messages[0]!.content;
+      promptEvidence.push(prompt.includes("violet repository fact 731") ? "file" : prompt.slice(0, 40));
+      const title = prompt.startsWith("system: You are a title generator");
+      const observedFile = prompt.includes("violet repository fact 731");
+      return azureTransportResponse(title
+        ? { type: "text", text: "Repository evidence" }
+        : observedFile
+          ? { type: "text", text: "Observed violet repository fact 731" }
+          : { type: "tool_calls", name: "read", arguments: JSON.stringify({ filePath: "/project/evidence.txt" }) });
+    });
 
     const result = await new DockerOpenCodeReadOnlyCapsule().execute({
       ...request(repository),
       role: "researcher",
+      transportModelId: "azure-deployment",
       securityBoundary: {
         ...request(repository).securityBoundary,
         readableScopes: ["evidence.txt"],
@@ -444,7 +635,7 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
 
     expect(result).toMatchObject({
       outcome: "completed",
-      model: { id: "fixture/planner", provider: "fixture", name: "planner" },
+      model: { id: "azure-deployment", provider: "azure", name: "fixture-provider-model" },
       cleanup: "completed",
     });
     expect(turns).toBeGreaterThanOrEqual(3);
@@ -498,11 +689,14 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
     const sourceEvent = journal.readStream("web-research:task-1")[0]!;
     expect(sourceEvent.payload).toMatchObject({
       outcome: "completed", identity: { taskId: "task-1", workerId: "milestone.task", role: "researcher",
-        envelopeDigest: "a".repeat(64), policyDigest: policy.digest },
+        envelopeDigest: "a".repeat(64), policyDigest: policy.digest,
+        trace: request(repository).trace },
       evidence: { parent: { workerId: "milestone.task", modelId: "azure-deployment", tool: "zentra_web_research" },
         provenance: { transport: "zentra_https_broker", redirectHops: 0 } },
     });
+    expect(sourceEvent.correlationId).toBe("milestone-trace-1");
     expect(storedEventToAgentTailEvent(sourceEvent)).toMatchObject({
+      trace_id: "milestone-trace-1",
       actor: { id: "milestone.task", role: "researcher" }, parent_span_id: "worker:milestone.task",
       operation: { name: "web_research", status: "completed" },
     });
@@ -552,6 +746,7 @@ function request(repositoryPath: string): OpenCodeReadOnlyCapsuleRequest {
     rolePrompt: "Plan safely.",
     capabilityId: "opencode-planner",
     transportModelId: "fixture/planner",
+    trace: { traceId: "milestone-trace-1", correlationId: "milestone-trace-1" },
     resources: {
       resourceLabel: "org.zentra.capsule-id=milestone.task",
       containerName: "zentra-opencode-readonly-test",

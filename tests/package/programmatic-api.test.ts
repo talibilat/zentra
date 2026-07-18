@@ -37,7 +37,6 @@ describe("package-root programmatic API", () => {
     expect("createInstalledModelBroker" in packageApi).toBe(false);
     expect("runCli" in packageApi).toBe(false);
     expect("ProviderConfigSchema" in packageApi).toBe(false);
-    expect("OPENROUTER_ENDPOINT" in packageApi).toBe(false);
     expect("loadProviderConfig" in packageApi).toBe(false);
     expect("loadInstalledProviderConfig" in packageApi).toBe(false);
     expect("LocalReleaseRunner" in packageApi).toBe(false);

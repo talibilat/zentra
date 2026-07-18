@@ -20,6 +20,7 @@
   "scripts": {
     "build": "node scripts/build-package.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "docs:codebase-map": "node scripts/generate-codebase-map.mjs",
     "package:contents": "node scripts/verify-package-contents.mjs",
     "package:verify": "node scripts/verify-package.mjs",
     "prepack": "node scripts/build-package.mjs && node scripts/verify-package.mjs",

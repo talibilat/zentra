@@ -180,7 +180,11 @@ describe("canonical role capability envelopes", () => {
       webResearch: { allowedDestinations: ["https://docs.example.com"], timeoutMs: 5_000 },
     });
     expect(binding.envelope).toMatchObject({ network: "declared_web_research", capabilities: ["read_repository", "web_research"] });
-    expect(binding.webResearch).toMatchObject({ destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }] });
+    expect(binding.webResearch).toMatchObject({
+      destinations: [{ origin: "https://docs.example.com", pathPrefix: "/" }],
+      requiredRequest: null,
+      budget: { maxRequests: 16 },
+    });
     const journal = new SqliteEventJournal(":memory:");
     const service = new RoleCapabilityEnvelopeService(journal);
     service.accept(binding);
@@ -188,6 +192,34 @@ describe("canonical role capability envelopes", () => {
     expect(service.evaluate(binding, { kind: "network", destination: "https://other.example/" })).toMatchObject({ status: "attention", reason: "network_destination_not_allowed" });
     expect(service.evaluate(binding, { kind: "network", destination: "https://docs.example.com/", method: "OTHER" })).toMatchObject({ status: "attention", reason: "network_method_not_allowed" });
     expect(service.evaluate(binding, { kind: "network", destination: "https://docs.example.com/", capability: "unknown" })).toMatchObject({ status: "attention", reason: "network_capability_not_allowed" });
+    journal.close();
+  });
+
+  it("uses exact non-directory research paths consistently", () => {
+    const binding = buildRoleCapabilityBinding({
+      ...input("researcher"),
+      model: { ...input("researcher").model, toolPermissions: roleToolPermissions("researcher", true), network: "declared" },
+      webResearch: {
+        allowedDestinations: ["https://www.iana.org"],
+        destinations: [{ origin: "https://www.iana.org", pathPrefix: "/help/example-domains" }],
+        requiredRequest: { method: "GET", url: "https://www.iana.org/help/example-domains", maxRequests: 1 },
+        timeoutMs: 5_000,
+      },
+    });
+    expect(binding.webResearch).toMatchObject({
+      requiredRequest: { method: "GET", url: "https://www.iana.org/help/example-domains", maxRequests: 1 },
+      budget: { maxRequests: 1 }, digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new RoleCapabilityEnvelopeService(journal);
+    service.accept(binding);
+    expect(service.evaluate(binding, { kind: "network", destination: "https://www.iana.org/help/example-domains", method: "GET" })).toMatchObject({ status: "allowed" });
+    for (const destination of [
+      "https://www.iana.org/help/example-domains-evil",
+      "https://www.iana.org/help/example-domains/child",
+    ]) expect(service.evaluate(binding, { kind: "network", destination, method: "GET" })).toMatchObject({ status: "attention", reason: "network_destination_not_allowed" });
+    expect(service.evaluate(binding, { kind: "network", destination: "https://www.iana.org/help/example-domains", method: "HEAD" }))
+      .toMatchObject({ status: "attention", reason: "network_method_not_allowed" });
     journal.close();
   });
 

@@ -10,9 +10,14 @@ import { z } from "zod";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import type { EventJournal } from "../journal/journal.js";
 import { isPublicAddress } from "../capsule/egress-policy.js";
+import { researchDestinationAllows } from "./destination-policy.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const IdentitySchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
+const TraceIdentitySchema = z.strictObject({
+  traceId: z.string().min(1).max(512),
+  correlationId: z.string().min(1).max(512),
+});
 const ContentTypeSchema = z.enum(["application/json", "application/xhtml+xml", "text/html", "text/markdown", "text/plain"]);
 const DestinationSchema = z.strictObject({
   origin: z.string().transform((value, context) => {
@@ -27,10 +32,25 @@ const DestinationSchema = z.strictObject({
   }),
   pathPrefix: z.string().min(1).max(4_096).refine((value) => value.startsWith("/") && !value.includes("?") && !value.includes("#"), "invalid research path prefix"),
 });
+const RequiredWebResearchRequestSchema = z.strictObject({
+  method: z.literal("GET"),
+  url: z.string().transform((value, context) => {
+    try {
+      const url = canonicalWebUrl(value);
+      if (url.search !== "" || url.href !== value) throw new Error("required URL is not canonical");
+      return url.href;
+    } catch {
+      context.addIssue({ code: "custom", message: "required research request must be one canonical exact HTTPS GET URL" });
+      return z.NEVER;
+    }
+  }),
+  maxRequests: z.literal(1),
+});
 
 const WebResearchPolicyBodySchema = z.strictObject({
   schemaVersion: z.literal(1),
   destinations: z.array(DestinationSchema).min(1).max(128).superRefine(canonicalDestinations),
+  requiredRequest: RequiredWebResearchRequestSchema.nullable().default(null),
   contentTypes: z.array(ContentTypeSchema).min(1).max(8).superRefine(canonicalStrings),
   maxRedirects: z.number().int().nonnegative().max(10),
   maxCompressedBytes: z.number().int().positive().max(64 * 1024 * 1024),
@@ -42,6 +62,13 @@ const WebResearchPolicyBodySchema = z.strictObject({
     maxBytes: z.number().int().positive().max(1024 * 1024 * 1024),
     maxTimeMs: z.number().int().positive().max(86_400_000),
   }),
+}).superRefine((policy, context) => {
+  if (policy.requiredRequest === null) return;
+  const required = canonicalWebUrl(policy.requiredRequest.url);
+  if (policy.budget.maxRequests !== 1 || !policy.destinations.some((destination) =>
+    researchDestinationAllows(destination, required))) {
+    context.addIssue({ code: "custom", message: "required research request must match one single-use destination" });
+  }
 });
 
 const WebResearchPolicyOutputSchema = WebResearchPolicyBodySchema.extend({ digest: DigestSchema }).superRefine((policy, context) => {
@@ -65,8 +92,16 @@ export const WebResearchRequestSchema = z.strictObject({
   url: z.string().min(1).max(16_384),
   envelopeDigest: DigestSchema,
   policyDigest: DigestSchema,
+  trace: TraceIdentitySchema,
 });
 const ResultIdentitySchema = z.object({
+  taskId: IdentitySchema, workerId: IdentitySchema,
+  role: z.enum(["planner", "researcher", "implementer", "reviewer"]),
+  modelId: z.string().min(1).max(512), tool: z.string().min(1).max(128),
+  envelopeDigest: DigestSchema, policyDigest: DigestSchema,
+  trace: TraceIdentitySchema,
+});
+const LegacyResultIdentitySchema = z.strictObject({
   taskId: IdentitySchema, workerId: IdentitySchema,
   role: z.enum(["planner", "researcher", "implementer", "reviewer"]),
   modelId: z.string().min(1).max(512), tool: z.string().min(1).max(128),
@@ -75,6 +110,7 @@ const ResultIdentitySchema = z.object({
 
 const SourceEvidenceBodySchema = z.strictObject({
   sourceUrl: z.string().url(),
+  method: z.enum(["GET", "HEAD"]),
   querySha256: DigestSchema.nullable(),
   retrievedAt: z.string().datetime({ offset: true }),
   status: z.number().int().min(100).max(599),
@@ -98,7 +134,7 @@ export const WebResearchResultSchema = z.strictObject({
     "completed", "invalid_request", "destination_denied", "method_denied", "budget_exhausted",
     "redirect_denied", "content_type_denied", "compressed_size_exceeded", "decompressed_size_exceeded",
     "tls_required", "private_target_denied", "cancelled", "timed_out", "transport_failed", "transport_uncertain",
-    "capability_attention", "execution_threw",
+    "http_status_failed", "capability_attention", "execution_threw",
   ]),
   content: z.string().max(64 * 1024 * 1024).nullable(),
   evidence: SourceEvidenceSchema.nullable(),
@@ -107,6 +143,7 @@ export const WebResearchResultSchema = z.strictObject({
     role: z.enum(["planner", "researcher", "implementer", "reviewer"]),
     modelId: z.string().min(1).max(512), tool: z.string().min(1).max(128),
     envelopeDigest: DigestSchema, policyDigest: DigestSchema,
+    trace: TraceIdentitySchema,
   }),
   usage: z.strictObject({
     requests: z.number().int().nonnegative(), compressedBytes: z.number().int().nonnegative(),
@@ -122,6 +159,16 @@ const JournalResultBodySchema = WebResearchResultSchema.omit({ content: true }).
 const JournalResultSchema = JournalResultBodySchema.extend({ eventDigest: DigestSchema }).superRefine((result, context) => {
   const { eventDigest, ...body } = result;
   if (eventDigest !== digestCanonical(body)) context.addIssue({ code: "custom", message: "web research event digest mismatch" });
+});
+const LegacyJournalResultBodySchema = WebResearchResultSchema.omit({ content: true, identity: true }).extend({
+  identity: LegacyResultIdentitySchema,
+  requestId: IdentitySchema,
+  requestDigest: DigestSchema,
+  elapsedMs: z.number().int().nonnegative(),
+});
+const LegacyJournalResultSchema = LegacyJournalResultBodySchema.extend({ eventDigest: DigestSchema }).superRefine((result, context) => {
+  const { eventDigest, ...body } = result;
+  if (eventDigest !== digestCanonical(body)) context.addIssue({ code: "custom", message: "legacy web research event digest mismatch" });
 });
 
 export type WebResearchPolicy = z.output<typeof WebResearchPolicySchema>;
@@ -274,7 +321,7 @@ export class GovernedWebResearch {
     }
     const streamId = `web-research:${request.taskId}`;
     const events = this.journal.readStream(streamId);
-    const prior = events.map((event) => JournalResultSchema.parse(event.payload));
+    const prior = events.map((event) => parseJournalResult(event.payload));
     const requestDigest = digestCanonical(request);
     let requests = 0;
     let compressedBytes = 0;
@@ -287,11 +334,15 @@ export class GovernedWebResearch {
         type: "web_research.observed",
         payload: journalEvent({ ...journalResult, requestId: request.requestId, requestDigest, elapsedMs }),
         causationId: null,
-        correlationId: request.taskId,
+        correlationId: request.trace.correlationId,
       }]);
       return safe;
     };
     if (request.policyDigest !== policy.digest) return append(denied("invalid_request"), 0);
+    if (policy.requiredRequest !== null &&
+      (request.method !== policy.requiredRequest.method || request.url !== policy.requiredRequest.url)) {
+      return append(denied("invalid_request"), 0);
+    }
     if (prior.some((entry) => entry.requestId === request.requestId)) return append(denied("invalid_request"), 0);
     const usedRequests = prior.reduce((sum, entry) => sum + entry.usage.requests, 0);
     const usedBytes = prior.reduce((sum, entry) => sum + entry.usage.compressedBytes + entry.usage.decompressedBytes, 0);
@@ -341,12 +392,14 @@ export class GovernedWebResearch {
         redirects += 1;
         continue;
       }
+      if (response.status < 200 || response.status >= 300) return append(failed("http_status_failed"));
       const contentType = normalizedContentType(response.headers["content-type"]);
       if (contentType === null || !policy.contentTypes.includes(contentType)) return append(failed("content_type_denied"));
       const contentSha256 = sha256(response.body);
       const sourceUrl = redactedSourceUrl(current);
       const evidenceBody = {
         sourceUrl,
+        method: request.method,
         querySha256: current.search === "" ? null : sha256(Buffer.from(current.search.slice(1), "utf8")),
         retrievedAt: new Date().toISOString(), status: response.status, contentType, contentSha256,
         compressedBytes: response.compressedBytes, decompressedBytes: response.decompressedBytes,
@@ -362,7 +415,13 @@ export class GovernedWebResearch {
 
 export function parseWebResearchEventPayload(type: string, payload: unknown): unknown {
   if (type !== "web_research.observed") throw new Error(`unknown web research event: ${type}`);
-  return JournalResultSchema.parse(payload);
+  return parseJournalResult(payload);
+}
+
+function parseJournalResult(payload: unknown): z.infer<typeof JournalResultSchema> | z.infer<typeof LegacyJournalResultSchema> {
+  const current = JournalResultSchema.safeParse(payload);
+  if (current.success) return current.data;
+  return LegacyJournalResultSchema.parse(payload);
 }
 
 export function canonicalWebUrl(value: string): URL {
@@ -377,8 +436,7 @@ export function canonicalWebUrl(value: string): URL {
 }
 
 function destinationAllows(policy: WebResearchPolicy, url: URL): boolean {
-  return policy.destinations.some((destination) => destination.origin === url.origin &&
-    (url.pathname === destination.pathPrefix || url.pathname.startsWith(destination.pathPrefix)));
+  return policy.destinations.some((destination) => researchDestinationAllows(destination, url));
 }
 
 function normalizedContentType(value: string | undefined): z.infer<typeof ContentTypeSchema> | null {
@@ -397,7 +455,7 @@ function denied(reason: "invalid_request" | "destination_denied" | "method_denie
   return { outcome: "denied", reason, content: null, evidence: null };
 }
 
-function failed(reason: "content_type_denied" | "compressed_size_exceeded" | "decompressed_size_exceeded" | "tls_required" | "private_target_denied"): BareWebResearchResult {
+function failed(reason: "content_type_denied" | "compressed_size_exceeded" | "decompressed_size_exceeded" | "tls_required" | "private_target_denied" | "http_status_failed"): BareWebResearchResult {
   return { outcome: "failed", reason, content: null, evidence: null };
 }
 

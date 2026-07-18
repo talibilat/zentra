@@ -19,6 +19,7 @@ import {
   type ModelBroker,
   type ModelBrokerReceipt,
 } from "./model-broker.js";
+import type { ModelBrokerFailureReason, ModelToolName } from "./model-broker.js";
 import {
   NODE_BASE_INDEX_DIGEST,
   OPENCODE_EXECUTABLE_SHA256,
@@ -27,11 +28,30 @@ import {
 } from "./docker-capsule.js";
 import { DockerBrokerTransportUncertainError, DockerClient, DockerCommandCancelledError, DockerCommandTimeoutError } from "./docker-client.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
-import { webResearchTerminalResult } from "../research/web-research.js";
+import { webResearchTerminalResult, type WebResearchResult } from "../research/web-research.js";
 import { nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
 
 const SCRATCH_BYTES = 16 * 1024 * 1024;
 const MAX_TURNS = 32;
+interface ModelObservationUsage {
+  readonly seconds: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costUsd: number;
+  readonly costUsdNano: number;
+  readonly toolCalls: number;
+  readonly modelTurns: number;
+}
+const ZERO_MODEL_USAGE: ModelObservationUsage = Object.freeze({
+  seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 0,
+});
+type ModelCompletionOutcome = "completed" | "cancelled" | "timed_out" | "failed" | "uncertain";
+interface ModelCompletion {
+  readonly outcome: ModelCompletionOutcome;
+  readonly failureReason: ModelBrokerFailureReason | null;
+  readonly failureTool?: ModelToolName;
+  readonly usage: ModelObservationUsage;
+}
 const TurnSchema = z.strictObject({
   type: z.literal("model_turn"),
   requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
@@ -71,6 +91,7 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
     let containerId: string | null = null;
     let measuredHarness: OpenCodeReadOnlyCapsuleResult["openCode"] = null;
     const brokerState: { receipt: ModelBrokerReceipt | null } = { receipt: null };
+    const terminalModel = { failure: null as ModelBrokerReceipt | null };
     let turns = 0;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -78,10 +99,14 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
     const maxCostUsdNano = usdNumberToNano(request.budget.maxCostUsd);
     let cleanup: "completed" | "uncertain" = "uncertain";
     let brokerTransport: "completed" | "uncertain" = "completed";
+    let brokerFailureReason: ModelBrokerFailureReason | null = null;
+    let brokerFailureTool: ModelToolName | undefined;
     let outcome: OpenCodeReadOnlyCapsuleResult["outcome"] = "failed";
     let evidence: OpenCodeReadOnlyCapsuleResult["evidence"] = [];
-    const sourceEvidenceIds: string[] = [];
+    const sourceEvidenceIds = new Set<string>();
+    let completedRequiredResearch: WebResearchResult | null = null;
     let researchTransportUncertain = false;
+    const activeModel = { settle: null as ((completion: ModelCompletion) => void) | null };
     try {
       await dockerOk(this.docker, ["build", "--platform", "linux/arm64", "--tag", imageName, assets], signal);
       const inspect = JSON.parse((await dockerOk(this.docker, ["image", "inspect", imageName], signal)).stdout) as readonly [{ readonly Id?: string; readonly Architecture?: string; readonly Os?: string; readonly Config?: { readonly Labels?: Readonly<Record<string, string>> } }];
@@ -133,12 +158,16 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
           if (request.webResearch === null || request.webResearchEnvelopeDigest === null || research === undefined) {
             throw new Error("OpenCode web research is not admitted");
           }
+          if (request.webResearch.requiredRequest !== null && completedRequiredResearch !== null) {
+            return { type: "research_receipt", requestId: turn.requestId, result: completedRequiredResearch };
+          }
           const researchRequest = {
             schemaVersion: 1, requestId: turn.requestId, taskId: request.taskId, workerId: request.capsuleId,
             role: request.role, modelId: request.transportModelId,
             tool: turn.method === "CAPABILITY" ? "unknown" : turn.capability === "web_research" ? "zentra_web_research" : turn.capability,
             method: turn.method, url: turn.url, envelopeDigest: request.webResearchEnvelopeDigest,
             policyDigest: request.webResearch.digest,
+            trace: request.trace,
           };
           try {
             observe({ type: "research_started", requestId: turn.requestId });
@@ -161,11 +190,23 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
             researchTransportUncertain = true;
             throw new Error("web research transport is uncertain");
           }
-          if (result.evidence !== null) sourceEvidenceIds.push(result.evidence.evidenceId);
+          if (result.evidence !== null) {
+            sourceEvidenceIds.add(result.evidence.evidenceId);
+            if (request.webResearch.requiredRequest !== null && result.outcome === "completed") {
+              completedRequiredResearch = result;
+            }
+          }
           return { type: "research_receipt", requestId: turn.requestId, result };
         }
+        if (turns >= MAX_TURNS) {
+          brokerFailureReason = "model_turn_budget_exceeded";
+          brokerFailureTool = undefined;
+          const denied = failedModelReceipt("failed", brokerFailureReason);
+          terminalModel.failure ??= denied;
+          brokerState.receipt = denied;
+          return { type: "model_receipt", requestId: turn.requestId, receipt: denied };
+        }
         turns += 1;
-        if (turns > MAX_TURNS) throw new Error("OpenCode model turn limit exceeded");
         const remainingInputTokens = request.budget.maxInputTokens - inputTokens;
         const remainingOutputTokens = request.budget.maxOutputTokens - outputTokens;
         const remainingCostUsdNano = maxCostUsdNano - costUsdNano;
@@ -178,59 +219,139 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
           maxInputTokens: remainingInputTokens,
           maxOutputTokens: remainingOutputTokens,
           maxCostUsd: nanoToUsdDisplay(remainingCostUsdNano),
-          allowedTools: request.webResearch === null
+          allowedTools: request.webResearch === null ||
+            (request.webResearch.requiredRequest !== null && completedRequiredResearch !== null)
             ? ["read", "glob", "grep"]
             : ["read", "glob", "grep", "zentra_research_web_research"],
         });
         observe({ type: "model_started", modelId: request.transportModelId });
-        let receipt: ModelBrokerReceipt;
-        try {
-          receipt = ModelBrokerReceiptSchema.parse(await broker.execute(brokerRequest, exchangeSignal));
-        } catch (error) {
+        let settled = false;
+        let pendingCompletion: ModelCompletion | null = null;
+        const settle = (completion: ModelCompletion): void => {
+          if (settled) return;
+          pendingCompletion ??= completion;
           observe({
-            type: "model_completed", modelId: request.transportModelId, outcome: "failed",
-            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 0 },
+            type: "model_completed", modelId: request.transportModelId,
+            outcome: pendingCompletion.outcome, failureReason: pendingCompletion.failureReason,
+            ...(pendingCompletion.failureTool === undefined ? {} : { failureTool: pendingCompletion.failureTool }),
+            usage: pendingCompletion.usage,
           });
-          throw error;
-        }
-        if (receipt.model !== null && receipt.model.id !== request.transportModelId) {
-          throw new Error("model broker receipt identity mismatch");
-        }
-        if (receipt.usage !== null) {
-          inputTokens += receipt.usage.inputTokens;
-          outputTokens += receipt.usage.outputTokens;
-          costUsdNano += receipt.usage.costUsdNano ?? usdNumberToNano(receipt.usage.costUsd);
-          if (!Number.isSafeInteger(costUsdNano)) throw new Error("OpenCode model cost exceeds the safe integer bound");
-        }
-        if (inputTokens > request.budget.maxInputTokens || outputTokens > request.budget.maxOutputTokens || costUsdNano > maxCostUsdNano) {
-          throw new Error("OpenCode model budget exceeded");
-        }
-        observe({
-          type: "model_completed",
-          modelId: request.transportModelId,
-          outcome: receipt.outcome === "completed" ? "completed" : receipt.outcome === "cancelled" ? "cancelled" : receipt.outcome === "timed_out" ? "timed_out" : "failed",
-          usage: {
-            seconds: 0,
-            inputTokens: receipt.usage?.inputTokens ?? 0,
-            outputTokens: receipt.usage?.outputTokens ?? 0,
-            costUsd: receipt.usage?.costUsd ?? 0,
-            costUsdNano: receipt.usage?.costUsdNano ?? usdNumberToNano(receipt.usage?.costUsd ?? 0),
-            toolCalls: 0,
-            modelTurns: 1,
-          },
-        });
-        brokerState.receipt = receipt;
-        if (receipt.outcome === "uncertain") {
-          brokerTransport = "uncertain";
-          throw new Error("model broker transport is uncertain");
-        }
-        if (receipt.outcome !== "completed") throw new Error(`model broker ${receipt.outcome}`);
-        return {
-          type: "model_receipt",
-          requestId: turn.requestId,
-          receipt,
+          settled = true;
+          pendingCompletion = null;
+          activeModel.settle = null;
         };
+        activeModel.settle = settle;
+        let receipt: ModelBrokerReceipt | null = null;
+        try {
+          let rawReceipt: ModelBrokerReceipt;
+          try {
+            rawReceipt = await broker.execute(brokerRequest, exchangeSignal);
+          } catch (error) {
+            brokerTransport = "uncertain";
+            brokerFailureReason = "transport_uncertain_after_dispatch";
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("uncertain", brokerFailureReason);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "uncertain", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+            throw error;
+          }
+          try {
+            receipt = ModelBrokerReceiptSchema.parse(rawReceipt);
+          } catch (error) {
+            brokerFailureReason = "broker_receipt_invalid";
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("failed", brokerFailureReason);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "failed", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+            throw error;
+          }
+          let measuredUsage: ModelObservationUsage;
+          try {
+            measuredUsage = modelObservationUsage(receipt);
+          } catch (error) {
+            brokerFailureReason = "usage_invalid";
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("failed", brokerFailureReason);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "failed", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+            throw error;
+          }
+          brokerFailureReason = receipt.failureReason ?? null;
+          brokerFailureTool = receipt.failureTool;
+          const nextInputTokens = inputTokens + measuredUsage.inputTokens;
+          const nextOutputTokens = outputTokens + measuredUsage.outputTokens;
+          const nextCostUsdNano = costUsdNano + measuredUsage.costUsdNano;
+          if (!Number.isSafeInteger(nextCostUsdNano)) {
+            brokerFailureReason = "usage_invalid";
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("failed", brokerFailureReason);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "failed", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+            throw new Error("OpenCode model cost exceeds the safe integer bound");
+          }
+          inputTokens = nextInputTokens;
+          outputTokens = nextOutputTokens;
+          costUsdNano = nextCostUsdNano;
+          const budgetFailureReason: ModelBrokerFailureReason | null =
+            inputTokens > request.budget.maxInputTokens || outputTokens > request.budget.maxOutputTokens
+              ? "token_budget_exceeded"
+              : costUsdNano > maxCostUsdNano
+                ? "cost_budget_exceeded"
+                : null;
+          if (budgetFailureReason !== null) {
+            brokerFailureReason = budgetFailureReason;
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("failed", brokerFailureReason, measuredUsage);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "failed", failureReason: brokerFailureReason, usage: measuredUsage });
+            throw new Error("OpenCode model budget exceeded");
+          }
+          if (receipt.model !== null && (receipt.model.id !== request.transportModelId ||
+            !sameModelIdentity(brokerState.receipt?.model ?? null, receipt.model))) {
+            brokerFailureReason = "provider_model_mismatch";
+            brokerFailureTool = undefined;
+            receipt = failedModelReceipt("failed", brokerFailureReason, measuredUsage);
+            if (terminalModel.failure === null) brokerState.receipt = receipt;
+            settle({ outcome: "failed", failureReason: brokerFailureReason, usage: measuredUsage });
+            throw new Error("model broker receipt identity mismatch");
+          }
+          const completionOutcome = receipt.outcome === "completed" ? "completed" : receipt.outcome;
+          settle({
+            outcome: completionOutcome,
+            failureReason: receipt.failureReason ?? null,
+            ...(receipt.failureTool === undefined ? {} : { failureTool: receipt.failureTool }),
+            usage: measuredUsage,
+          });
+          if (terminalModel.failure === null) brokerState.receipt = receipt;
+          if (receipt.outcome === "uncertain") {
+            brokerTransport = "uncertain";
+            throw new Error("model broker transport is uncertain");
+          }
+          if (receipt.outcome !== "completed") throw new Error(`model broker ${receipt.outcome}`);
+          return {
+            type: "model_receipt",
+            requestId: turn.requestId,
+            receipt,
+          };
+        } finally {
+          if (!settled) {
+            if (pendingCompletion !== null) {
+              settle(pendingCompletion);
+            } else {
+              brokerFailureReason ??= "broker_receipt_invalid";
+              brokerFailureTool = undefined;
+              receipt ??= failedModelReceipt("failed", brokerFailureReason);
+              if (terminalModel.failure === null) brokerState.receipt = receipt;
+              settle({ outcome: "failed", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+            }
+          }
+        }
       });
+      if (terminalModel.failure !== null) {
+        brokerState.receipt = terminalModel.failure;
+        brokerFailureReason = terminalModel.failure.failureReason ?? "model_turn_budget_exceeded";
+        brokerFailureTool = terminalModel.failure.failureTool;
+      }
       const result = parseResult(run.stdout);
       new OpenCodeWorkerEventAdapter().assertNoDelegation(parseJsonLines(result.stdout));
       outcome = run.exitCode === 0 && result.exitCode === 0 && brokerState.receipt?.outcome === "completed" ? "completed" : "failed";
@@ -238,13 +359,29 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         evidence = [{
           kind: request.role === "planner" ? "plan" : request.role === "reviewer" ? "review" : "research",
           summary: parseOpenCodeFinalAssistantText(result.stdout),
-          ...(sourceEvidenceIds.length === 0 ? {} : { sourceEvidenceIds: [...new Set(sourceEvidenceIds)].sort() }),
+          ...(sourceEvidenceIds.size === 0 ? {} : { sourceEvidenceIds: [...sourceEvidenceIds].sort() }),
         }];
-        if (request.webResearch !== null) assertResearchCitations(evidence[0]!.summary, sourceEvidenceIds, request.webResearch.citationMode);
+        if (request.webResearch !== null) assertResearchCitations(evidence[0]!.summary, [...sourceEvidenceIds], request.webResearch.citationMode);
       }
     } catch (error) {
+      if (terminalModel.failure !== null) {
+        brokerState.receipt = terminalModel.failure;
+        brokerFailureReason = terminalModel.failure.failureReason ?? "model_turn_budget_exceeded";
+        brokerFailureTool = terminalModel.failure.failureTool;
+      }
       if (researchTransportUncertain) brokerTransport = "uncertain";
-      if (error instanceof DockerBrokerTransportUncertainError) brokerTransport = "uncertain";
+      if (error instanceof DockerBrokerTransportUncertainError) {
+        brokerTransport = "uncertain";
+        brokerFailureReason ??= "transport_uncertain_after_dispatch";
+        activeModel.settle?.({ outcome: "uncertain", failureReason: brokerFailureReason, usage: ZERO_MODEL_USAGE });
+      } else if (activeModel.settle !== null) {
+        const completionOutcome = error instanceof DockerCommandTimeoutError ? "timed_out" :
+          error instanceof DockerCommandCancelledError || signal.aborted ? "cancelled" : "failed";
+        const reason: ModelBrokerFailureReason = completionOutcome === "timed_out" ? "request_timed_out_before_dispatch" :
+          completionOutcome === "cancelled" ? "request_cancelled" : "broker_receipt_invalid";
+        brokerFailureReason = reason;
+        activeModel.settle({ outcome: completionOutcome, failureReason: reason, usage: ZERO_MODEL_USAGE });
+      }
       outcome = brokerTransport === "uncertain" ? "failed" :
         brokerState.receipt?.outcome === "cancelled" ? "cancelled" :
         brokerState.receipt?.outcome === "timed_out" ? "timed_out" :
@@ -280,6 +417,8 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
       evidence,
       cleanup,
       brokerTransport,
+      brokerFailureReason,
+      ...(brokerFailureTool === undefined ? {} : { brokerFailureTool }),
       usage: {
         seconds: 0,
         inputTokens,
@@ -384,6 +523,47 @@ return error(message.id,-32601,"Method not found")});`
     .replace('!(["GET","HEAD"].includes(args.method??"GET"))', '!/^[A-Z]+$/.test(args.method??"GET")')
     .replace('name!=="web_research"||', '')
     .replace('method:args.method??"GET"', 'method:name==="web_research"?(args.method??"GET"):"CAPABILITY"');
+}
+
+function modelObservationUsage(receipt: ModelBrokerReceipt): ModelObservationUsage {
+  const costUsdNano = receipt.usage?.costUsdNano ?? usdNumberToNano(receipt.usage?.costUsd ?? 0);
+  if (!Number.isSafeInteger(costUsdNano)) throw new Error("model receipt usage is outside the safe integer bound");
+  return Object.freeze({
+    seconds: 0,
+    inputTokens: receipt.usage?.inputTokens ?? 0,
+    outputTokens: receipt.usage?.outputTokens ?? 0,
+    costUsd: nanoToUsdDisplay(costUsdNano),
+    costUsdNano,
+    toolCalls: 0,
+    modelTurns: 1,
+  });
+}
+
+function failedModelReceipt(
+  outcome: "failed" | "uncertain",
+  failureReason: ModelBrokerFailureReason,
+  usage?: ModelObservationUsage,
+): ModelBrokerReceipt {
+  return ModelBrokerReceiptSchema.parse({
+    outcome,
+    failureReason,
+    response: null,
+    model: null,
+    usage: usage === undefined ? null : {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+      costUsdNano: usage.costUsdNano,
+    },
+  });
+}
+
+function sameModelIdentity(
+  previous: ModelBrokerReceipt["model"],
+  current: NonNullable<ModelBrokerReceipt["model"]>,
+): boolean {
+  return previous === null || (previous.id === current.id && previous.provider === current.provider &&
+    previous.name === current.name && previous.configurationDigest === current.configurationDigest);
 }
 
 function parseResult(output: string): z.infer<typeof ResultSchema> {

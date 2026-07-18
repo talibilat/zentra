@@ -7,6 +7,7 @@ import { AuthorityLevelSchema, MilestoneRoleSchema } from "../contracts/mileston
 import { TerminalOutcomeSchema, type TerminalOutcome } from "../contracts/task.js";
 import type { EventJournal } from "../journal/journal.js";
 import { CostUsdNanoSchema, costFieldsAgree, nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
+import { ModelBrokerFailureReasonSchema, ModelToolNameSchema, isModelBrokerToolFailureReason } from "../capsule/model-broker.js";
 
 const IdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -149,7 +150,16 @@ const IdentitySchema = z.strictObject({
 });
 export const WorkerObservationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.enum(["process", "resource"]), name: z.string().min(1).max(512), outcome: z.union([TerminalOutcomeSchema, z.literal("uncertain")]) }),
-  z.strictObject({ kind: z.enum(["tool", "model"]), name: z.string().min(1).max(512), phase: z.enum(["started", "completed"]), outcome: TerminalOutcomeSchema.nullable(), usage: WorkerUsageSchema }),
+  z.strictObject({ kind: z.literal("tool"), name: z.string().min(1).max(512), phase: z.enum(["started", "completed"]), outcome: TerminalOutcomeSchema.nullable(), usage: WorkerUsageSchema }),
+  z.strictObject({ kind: z.literal("model"), name: z.string().min(1).max(512), phase: z.enum(["started", "completed"]), outcome: z.union([TerminalOutcomeSchema, z.literal("uncertain")]).nullable(),
+    failureReason: ModelBrokerFailureReasonSchema.nullable().optional(), failureTool: ModelToolNameSchema.optional(), usage: WorkerUsageSchema }).superRefine((observation, context) => {
+    if ((observation.phase !== "completed" || observation.outcome === "completed") && observation.failureReason != null) {
+      context.addIssue({ code: "custom", message: "successful or active model observation cannot contain a failure reason" });
+    }
+    if (observation.failureTool !== undefined && !isModelBrokerToolFailureReason(observation.failureReason)) {
+      context.addIssue({ code: "custom", message: "model observation failure tool requires a tool-call failure reason" });
+    }
+  }),
 ]);
 const StartedSchema = IdentitySchema;
 const ObservedSchema = IdentitySchema.extend({ observation: WorkerObservationSchema });
@@ -330,7 +340,15 @@ function applyObservation(worker: MutableWorker, budget: MutableBudget, observat
   worker[counter] -= 1;
   budget[counter] -= 1;
   const next = add(budget.usage, observation.usage);
-  if (next.seconds > budget.limits.maxSeconds || next.costUsdNano > budget.limits.maxCostUsdNano || next.inputTokens > budget.limits.maxInputTokens || next.outputTokens > budget.limits.maxOutputTokens || next.toolCalls > budget.limits.maxToolCalls || next.modelTurns > budget.limits.maxModelTurns) throw new Error("worker task budget exceeded");
+  const exceeded = next.seconds > budget.limits.maxSeconds || next.costUsdNano > budget.limits.maxCostUsdNano ||
+    next.inputTokens > budget.limits.maxInputTokens || next.outputTokens > budget.limits.maxOutputTokens ||
+    next.toolCalls > budget.limits.maxToolCalls || next.modelTurns > budget.limits.maxModelTurns;
+  const measuredFailure = observation.kind === "model" && observation.outcome === "failed" &&
+    ((observation.failureReason === "cost_budget_exceeded" && next.costUsdNano > budget.limits.maxCostUsdNano) ||
+      (observation.failureReason === "token_budget_exceeded" &&
+        (next.inputTokens > budget.limits.maxInputTokens || next.outputTokens > budget.limits.maxOutputTokens)) ||
+      (observation.failureReason === "model_turn_budget_exceeded" && next.modelTurns > budget.limits.maxModelTurns));
+  if (exceeded && !measuredFailure) throw new Error("worker task budget exceeded");
   budget.usage = next;
   worker.usage = add(worker.usage, observation.usage);
 }

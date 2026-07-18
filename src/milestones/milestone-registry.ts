@@ -1815,11 +1815,17 @@ function verifyStoredResearchSources(journal: EventJournal, milestoneEvents: rea
     const completion = parsed.data;
     const references = completion.evidence.flatMap((item) => item.sourceEvidenceIds ?? []);
     const sourceEvents = journal.readStream(`web-research:${completion.taskId}`).filter((event) => event.type === "web_research.observed");
-    const sources = sourceEvents.map((event) => parseWebResearchEventPayload(event.type, event.payload) as {
+    const sources = sourceEvents.map((event) => ({
+      ...(parseWebResearchEventPayload(event.type, event.payload) as {
       readonly outcome: string;
-      readonly identity: { readonly taskId: string; readonly workerId: string; readonly role: string; readonly modelId: string; readonly envelopeDigest: string; readonly policyDigest: string };
-      readonly evidence: null | { readonly evidenceId: string; readonly envelopeDigest: string; readonly policyDigest: string; readonly parent: { readonly workerId: string; readonly modelId: string } };
-    }).filter((source) => source.outcome === "completed" && source.evidence !== null);
+      readonly identity: { readonly taskId: string; readonly workerId: string; readonly role: string; readonly modelId: string; readonly envelopeDigest: string; readonly policyDigest: string;
+        readonly trace?: { readonly traceId: string; readonly correlationId: string } };
+      readonly evidence: null | { readonly evidenceId: string; readonly sourceUrl: string; readonly method: "GET" | "HEAD"; readonly status: number;
+        readonly contentSha256: string; readonly compressedBytes: number; readonly decompressedBytes: number;
+        readonly envelopeDigest: string; readonly policyDigest: string; readonly parent: { readonly workerId: string; readonly modelId: string } };
+      }),
+      eventCorrelationId: event.correlationId,
+    })).filter((source) => source.outcome === "completed" && source.evidence !== null);
     const retainedIds = sources.map((source) => source.evidence!.evidenceId).sort();
     const cited = completion.evidence.flatMap((item) => [...item.summary.matchAll(/\[source:([a-f0-9]{64})\]/g)].map((match) => match[1]!)).sort();
     const referencesCanonical = [...references].sort();
@@ -1837,16 +1843,36 @@ function verifyStoredResearchSources(journal: EventJournal, milestoneEvents: rea
       throw new Error("OpenCode research completion lacks its parent root worker");
     }
     const accepted = journal.readAll().filter((event) => event.type === "capability_envelope.accepted").map((event) => {
-      const payload = parseRoleCapabilityEventPayload(event.type, event.payload) as { readonly binding: { readonly taskId: string; readonly envelope: { readonly digest: string }; readonly webResearch: null | { readonly digest: string } } };
+      const payload = parseRoleCapabilityEventPayload(event.type, event.payload) as { readonly binding: { readonly taskId: string; readonly envelope: { readonly digest: string }; readonly webResearch: null | { readonly digest: string; readonly destinations: readonly { readonly origin: string; readonly pathPrefix: string }[] } } };
       return payload.binding;
     }).find((binding) => binding.taskId === completion.taskId && binding.envelope.digest === worker.envelope.digest);
     if (accepted?.webResearch === null || accepted === undefined) throw new Error("OpenCode research completion lacks its accepted research policy");
+    const requiresIana = accepted.webResearch.destinations.some((destination) =>
+      destination.origin === "https://www.iana.org" && destination.pathPrefix === "/help/example-domains");
+    if (requiresIana) {
+      const required = sources.filter((source) => source.evidence?.sourceUrl === "https://www.iana.org/help/example-domains" &&
+        source.evidence.method === "GET" && source.evidence.status === 200 &&
+        /^[a-f0-9]{64}$/.test(source.evidence.contentSha256) && source.evidence.compressedBytes > 0 &&
+        source.evidence.decompressedBytes > 0);
+      if (required.length !== 1 || !references.includes(required[0]!.evidence!.evidenceId) ||
+        !cited.includes(required[0]!.evidence!.evidenceId)) {
+        throw new Error("required IANA GET source evidence is missing or invalid");
+      }
+    }
     for (const source of sources) {
+      const traceMatches = source.identity.trace === undefined
+        ? source.eventCorrelationId === completion.taskId
+        : source.eventCorrelationId === source.identity.trace.correlationId &&
+          source.identity.trace.traceId === worker.trace.traceId &&
+          source.identity.trace.correlationId === worker.trace.correlationId &&
+          source.identity.trace.correlationId === milestoneEvents[0]!.correlationId &&
+          completionEvent.correlationId === source.identity.trace.correlationId;
       if (source.identity.taskId !== completion.taskId || source.identity.workerId !== completion.capsuleId ||
         source.identity.role !== completion.role || source.identity.modelId !== completion.transportModelId ||
         source.identity.envelopeDigest !== worker.envelope.digest || source.identity.policyDigest !== accepted.webResearch.digest ||
         source.evidence!.parent.workerId !== completion.capsuleId || source.evidence!.parent.modelId !== completion.transportModelId ||
-        source.evidence!.envelopeDigest !== source.identity.envelopeDigest || source.evidence!.policyDigest !== source.identity.policyDigest) {
+        source.evidence!.envelopeDigest !== source.identity.envelopeDigest || source.evidence!.policyDigest !== source.identity.policyDigest ||
+        !traceMatches) {
         throw new Error("OpenCode research source provenance contradicts its completion");
       }
     }

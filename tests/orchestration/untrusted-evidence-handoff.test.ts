@@ -58,5 +58,14 @@ function item(kind: "plan" | "research", role: "planner" | "researcher", summary
     summary,
     sha256: createHash("sha256").update(summary, "utf8").digest("hex"),
     sourceEvidenceIds,
+    sources: sourceEvidenceIds.map((evidenceId) => ({
+      evidenceId,
+      sourceUrl: "https://www.iana.org/help/example-domains",
+      method: "GET" as const,
+      status: 200,
+      contentSha256: "d".repeat(64),
+      compressedBytes: 10,
+      decompressedBytes: 10,
+    })),
   };
 }

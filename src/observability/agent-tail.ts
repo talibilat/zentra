@@ -655,8 +655,8 @@ function redactedWebResearchPayload(type: string, payload: unknown): unknown {
     outcome: parsed["outcome"], reason: parsed["reason"], elapsedMs: parsed["elapsedMs"],
     identity: parsed["identity"], usage: parsed["usage"],
     evidence: Object.freeze({
-      evidenceId: evidence["evidenceId"], sourceHost: source.hostname,
-      sourcePathDigest: digestCanonical(source.pathname), status: evidence["status"], contentType: evidence["contentType"],
+       evidenceId: evidence["evidenceId"], sourceHost: source.hostname,
+       sourcePathDigest: digestCanonical(source.pathname), method: evidence["method"], status: evidence["status"], contentType: evidence["contentType"],
       contentSha256: evidence["contentSha256"], compressedBytes: evidence["compressedBytes"],
       decompressedBytes: evidence["decompressedBytes"], retrievedAt: evidence["retrievedAt"],
       parent: evidence["parent"], envelopeDigest: evidence["envelopeDigest"], policyDigest: evidence["policyDigest"],

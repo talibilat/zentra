@@ -10,6 +10,8 @@ import {
   ModelBrokerRequestSchema,
   ModelToolCallIdSchema,
   ModelToolNameSchema,
+  type ModelBrokerFailureReason,
+  type ModelToolName,
   type ModelBroker,
   type ModelBrokerReceipt,
   type ModelBrokerRequest,
@@ -215,13 +217,14 @@ export class AzureOpenAIModelBroker implements ModelBroker {
 
   async execute(rawRequest: ModelBrokerRequest, signal: AbortSignal): Promise<ModelBrokerReceipt> {
     const request = ModelBrokerRequestSchema.parse(rawRequest);
-    if (signal.aborted) return emptyReceipt("cancelled");
-    if (request.modelId !== this.config.deployment || estimatedTokens(request.prompt) > request.maxInputTokens ||
-      request.maxInputTokens > this.config.maxInputTokens || request.maxOutputTokens > this.config.maxOutputTokens) {
-      return emptyReceipt("failed");
+    if (signal.aborted) return emptyReceipt("cancelled", "request_cancelled");
+    if (request.modelId !== this.config.deployment) return emptyReceipt("failed", "request_model_mismatch");
+    if (estimatedTokens(request.prompt) > request.maxInputTokens || request.maxInputTokens > this.config.maxInputTokens) {
+      return emptyReceipt("failed", "input_budget_exceeded");
     }
+    if (request.maxOutputTokens > this.config.maxOutputTokens) return emptyReceipt("failed", "output_budget_exceeded");
     const allowedTools = request.allowedTools ?? [];
-    if (allowedTools.length > this.config.maxToolCalls) return emptyReceipt("failed");
+    if (allowedTools.length > this.config.maxToolCalls) return emptyReceipt("failed", "tool_budget_exceeded");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     const combined = AbortSignal.any([signal, controller.signal]);
@@ -240,25 +243,33 @@ export class AzureOpenAIModelBroker implements ModelBroker {
     } catch (error) {
       clearTimeout(timer);
       const failure = transportRecord(error);
-      if (failure.dispatched === true) return emptyReceipt("uncertain");
-      if (signal.aborted || failure.code === "AZURE_CANCELLED") return emptyReceipt("cancelled");
-      if (controller.signal.aborted || failure.code === "AZURE_TIMEOUT") return emptyReceipt("timed_out");
-      return emptyReceipt("failed");
+      if (failure.dispatched === true) return emptyReceipt("uncertain", "transport_uncertain_after_dispatch");
+      if (signal.aborted || failure.code === "AZURE_CANCELLED") return emptyReceipt("cancelled", "request_cancelled");
+      if (controller.signal.aborted || failure.code === "AZURE_TIMEOUT") return emptyReceipt("timed_out", "request_timed_out_before_dispatch");
+      if (failure.code === "AZURE_RESOLUTION") return emptyReceipt("failed", "dns_resolution_failed");
+      if (failure.code === "AZURE_PRIVATE_TARGET") return emptyReceipt("failed", "dns_private_target");
+      if (failure.code === "AZURE_TLS" || failure.code === "AZURE_PEER_MISMATCH") return emptyReceipt("failed", "tls_failed");
+      return emptyReceipt("failed", "transport_failed_before_dispatch");
     } finally {
       clearTimeout(timer);
     }
-    if (response.status === 408 || response.status >= 500) return emptyReceipt("uncertain");
-    if (response.status >= 300 && response.status < 400) return emptyReceipt("failed");
-    if (response.status >= 400) return parseCompleteAzureError(response) ? emptyReceipt("failed") : emptyReceipt("uncertain");
-    if (response.status < 200 || response.status >= 300) return emptyReceipt("failed");
+    if (response.status === 408 || response.status >= 500) return emptyReceipt("uncertain", "provider_status_uncertain");
+    if (response.status >= 300 && response.status < 400) return emptyReceipt("failed", "provider_status_rejected");
+    if (response.status >= 400) return parseCompleteAzureError(response)
+      ? emptyReceipt("failed", "provider_status_rejected")
+      : emptyReceipt("uncertain", "provider_status_uncertain");
+    if (response.status < 200 || response.status >= 300) return emptyReceipt("failed", "provider_status_rejected");
     const contentType = response.headers["content-type"];
-    if (contentType === undefined || !/^text\/event-stream(?:;\s*charset=utf-8)?$/i.test(contentType)) return emptyReceipt("failed");
-    try {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
-      return parseStream(text, request, this.config, this.configurationDigest);
-    } catch {
-      return emptyReceipt("failed");
+    if (contentType === undefined || !/^text\/event-stream(?:;\s*charset=utf-8)?$/i.test(contentType)) {
+      return emptyReceipt("failed", "response_sse_invalid");
     }
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
+    } catch {
+      return emptyReceipt("failed", "response_utf8_invalid");
+    }
+    return parseStream(text, request, this.config, this.configurationDigest);
   }
 
   private url(): URL {
@@ -283,8 +294,8 @@ export function nodeAzureOpenAITransportForTest(
 }
 
 const ToolCallDeltaSchema = z.strictObject({
-  index: z.number().int().nonnegative().max(15), id: ModelToolCallIdSchema.optional(), type: z.literal("function").optional(),
-  function: z.strictObject({ name: z.string().min(1).max(128).optional(), arguments: z.string().max(64 * 1024).optional() }).optional(),
+  index: z.number().finite(), id: z.string().max(1_024).optional(), type: z.literal("function").optional(),
+  function: z.strictObject({ name: z.string().max(1_024).optional(), arguments: z.string().max(128 * 1024).optional() }).optional(),
 });
 const LogprobTokenSchema: z.ZodType = z.lazy(() => z.strictObject({
   token: z.string().max(16_384), logprob: z.number().finite(), bytes: z.array(z.number().int().min(0).max(255)).max(16_384).nullable(),
@@ -299,13 +310,36 @@ const UsageSchema = z.strictObject({
   prompt_tokens_details: z.strictObject({ audio_tokens: z.number().int().nonnegative().optional(), cached_tokens: z.number().int().nonnegative().optional() }).nullable().optional(),
   completion_tokens_details: z.strictObject({ accepted_prediction_tokens: z.number().int().nonnegative().optional(), audio_tokens: z.number().int().nonnegative().optional(), reasoning_tokens: z.number().int().nonnegative().optional(), rejected_prediction_tokens: z.number().int().nonnegative().optional() }).nullable().optional(),
 });
-const StreamChunkSchema = z.strictObject({
+const PromptFilterResultsSchema = z.array(z.strictObject({
+  prompt_index: z.number().int().nonnegative(),
+  content_filter_results: contentFilterResultsSchema(),
+})).min(1).max(8);
+const PromptFilterSentinelSchema = z.strictObject({
+  id: z.literal(""), object: z.literal(""), created: z.literal(0), model: z.literal(""),
+  choices: z.tuple([]), prompt_filter_results: PromptFilterResultsSchema,
+});
+const ServiceTierSchema = z.enum(["auto", "default", "flex", "priority"]);
+const BoundedLatencyMsSchema = z.number().finite().nonnegative().max(86_400_000);
+const LatencyCheckpointSchema = z.strictObject({
+  engine_tbt_ms: BoundedLatencyMsSchema,
+  engine_ttft_ms: BoundedLatencyMsSchema,
+  engine_ttlt_ms: BoundedLatencyMsSchema,
+  pre_inference_ms: BoundedLatencyMsSchema,
+  service_tbt_ms: BoundedLatencyMsSchema,
+  service_ttft_ms: BoundedLatencyMsSchema,
+  service_ttlt_ms: BoundedLatencyMsSchema,
+  total_duration_ms: BoundedLatencyMsSchema,
+  user_visible_ttft_ms: BoundedLatencyMsSchema,
+});
+const NormalStreamChunkSchema = z.strictObject({
   id: z.string().min(1).max(256), object: z.literal("chat.completion.chunk"), created: z.number().int().nonnegative(),
   model: z.string().min(1).max(256).regex(PROVIDER_MODEL), system_fingerprint: z.string().max(256).nullable().optional(),
-  prompt_filter_results: z.array(z.strictObject({ prompt_index: z.number().int().nonnegative(), content_filter_results: contentFilterResultsSchema() })).max(8).optional(),
+  obfuscation: z.string().max(16 * 1024).optional(),
+  service_tier: ServiceTierSchema.optional(),
+  latency_checkpoint: LatencyCheckpointSchema.optional(),
   choices: z.array(z.strictObject({
     index: z.number().int().nonnegative().max(7),
-    delta: z.strictObject({ role: z.literal("assistant").optional(), content: z.string().nullable().optional(), refusal: z.string().nullable().optional(), tool_calls: z.array(ToolCallDeltaSchema).max(16).optional() }),
+    delta: z.strictObject({ role: z.literal("assistant").optional(), content: z.string().nullable().optional(), refusal: z.string().nullable().optional(), tool_calls: z.array(ToolCallDeltaSchema).max(64).optional() }),
     finish_reason: z.enum(["stop", "tool_calls", "length", "content_filter"]).nullable(),
     logprobs: LogprobsSchema.nullable().optional(), content_filter_results: contentFilterResultsSchema().optional(),
     content_filter_offsets: z.strictObject({
@@ -314,62 +348,105 @@ const StreamChunkSchema = z.strictObject({
   })).max(8),
   usage: UsageSchema.nullable().optional(),
 });
+const StreamFrameSchema = z.union([
+  PromptFilterSentinelSchema.transform((chunk) => ({ kind: "prompt_filter" as const, chunk })),
+  NormalStreamChunkSchema.transform((chunk) => ({ kind: "normal" as const, chunk })),
+]);
 
 function parseStream(textValue: string, request: ModelBrokerRequest, config: AzureOpenAIProviderConfig, configurationDigest: string): ModelBrokerReceipt {
-  if (textValue.includes("\r") && !textValue.includes("\r\n")) return emptyReceipt("failed");
+  if (textValue.includes("\r") && !textValue.includes("\r\n")) return emptyReceipt("failed", "response_sse_invalid");
   const text = textValue.replaceAll("\r\n", "\n");
-  if (!text.endsWith("\n")) return emptyReceipt("uncertain");
+  if (!text.endsWith("\n")) return emptyReceipt("uncertain", "response_incomplete");
   const frames = text.slice(0, text.endsWith("\n\n") ? -2 : -1).split("\n\n");
-  if (frames.length < 2 || frames.at(-1) !== "data: [DONE]") return emptyReceipt("uncertain");
+  if (frames.length < 2 || frames.at(-1) !== "data: [DONE]") return emptyReceipt("uncertain", "response_incomplete");
   let providerModel: string | null = null;
   let content = "";
   let finishReason: "stop" | "tool_calls" | "length" | "content_filter" | null = null;
   let usage: z.infer<typeof UsageSchema> | null = null;
+  let promptFilterObserved = false;
   const calls = new Map<number, { id: string; name: string; arguments: string }>();
   for (const frame of frames.slice(0, -1)) {
-    if (!frame.startsWith("data: ") || frame.includes("\n")) return emptyReceipt("failed");
+    if (!frame.startsWith("data: ") || frame.includes("\n")) return emptyReceipt("failed", "response_sse_invalid");
     let raw: unknown;
-    try { raw = JSON.parse(frame.slice(6)); } catch { return emptyReceipt("failed"); }
-    const parsed = StreamChunkSchema.safeParse(raw);
-    if (!parsed.success) return emptyReceipt("failed");
-    const chunk = parsed.data;
-    if (!config.expectedProviderModels.includes(chunk.model)) return emptyReceipt("failed");
-    if (providerModel !== null && providerModel !== chunk.model) return emptyReceipt("failed");
+    try { raw = JSON.parse(frame.slice(6)); } catch { return emptyReceipt("failed", "response_json_invalid"); }
+    const parsed = StreamFrameSchema.safeParse(raw);
+    if (!parsed.success) return emptyReceipt("failed", "response_schema_invalid");
+    if (parsed.data.kind === "prompt_filter") {
+      if (promptFilterObserved || providerModel !== null || content !== "" || finishReason !== null || usage !== null || calls.size !== 0) {
+        return emptyReceipt("failed", "response_schema_invalid");
+      }
+      promptFilterObserved = true;
+      continue;
+    }
+    const chunk = parsed.data.chunk;
+    if (!config.expectedProviderModels.includes(chunk.model)) return emptyReceipt("failed", "provider_model_mismatch");
+    if (providerModel !== null && providerModel !== chunk.model) return emptyReceipt("failed", "provider_model_mismatch");
     providerModel = chunk.model;
     if (chunk.usage !== undefined && chunk.usage !== null) {
-      if (usage !== null || chunk.choices.length !== 0 || chunk.usage.total_tokens !== chunk.usage.prompt_tokens + chunk.usage.completion_tokens) return emptyReceipt("failed");
+      if (usage !== null || chunk.choices.length !== 0 || chunk.usage.total_tokens !== chunk.usage.prompt_tokens + chunk.usage.completion_tokens) {
+        return emptyReceipt("failed", "usage_invalid");
+      }
       usage = chunk.usage;
     }
-    if (chunk.choices.length > 1 || (chunk.choices.length === 1 && chunk.choices[0]?.index !== 0)) return emptyReceipt("failed");
+    if (chunk.latency_checkpoint !== undefined && (chunk.usage === undefined || chunk.usage === null || chunk.choices.length !== 0)) {
+      return emptyReceipt("failed", "usage_invalid");
+    }
+    if (chunk.choices.length > 1 || (chunk.choices.length === 1 && chunk.choices[0]?.index !== 0)) {
+      return emptyReceipt("failed", "response_schema_invalid");
+    }
     const choice = chunk.choices[0];
     if (choice === undefined) continue;
-    if (choice.delta.refusal !== undefined && choice.delta.refusal !== null) return emptyReceipt("failed");
+    if (choice.delta.refusal !== undefined && choice.delta.refusal !== null) return emptyReceipt("failed", "content_filtered");
     if (choice.delta.content !== undefined && choice.delta.content !== null) content += choice.delta.content;
     for (const delta of choice.delta.tool_calls ?? []) {
+      if (!Number.isInteger(delta.index) || delta.index < 0 || delta.index > 15) {
+        return emptyReceipt("failed", "tool_call_index_invalid", parsedToolName(delta.function?.name));
+      }
       const current = calls.get(delta.index) ?? { id: "", name: "", arguments: "" };
       current.id += delta.id ?? ""; current.name += delta.function?.name ?? ""; current.arguments += delta.function?.arguments ?? "";
-      if (current.arguments.length > 64 * 1024) return emptyReceipt("failed");
+      if (current.arguments.length > 64 * 1024) {
+        return emptyReceipt("failed", "tool_call_arguments_schema_invalid", parsedToolName(current.name));
+      }
       calls.set(delta.index, current);
+      if (calls.size > config.maxToolCalls || calls.size > 16) {
+        return emptyReceipt("failed", "tool_call_count_exceeded", singleParsedTool(calls.values()));
+      }
     }
     if (choice.finish_reason !== null) {
-      if (finishReason !== null) return emptyReceipt("failed");
+      if (finishReason !== null) return emptyReceipt("failed", "response_schema_invalid");
       finishReason = choice.finish_reason;
     }
   }
-  if (providerModel === null || usage === null || finishReason === null) return emptyReceipt("uncertain");
-  if (finishReason === "length" || finishReason === "content_filter") return emptyReceipt("failed");
-  if (usage.prompt_tokens > request.maxInputTokens || usage.prompt_tokens > config.maxInputTokens || usage.completion_tokens > request.maxOutputTokens || usage.completion_tokens > config.maxOutputTokens) return emptyReceipt("failed");
+  if (providerModel === null || usage === null || finishReason === null) return emptyReceipt("uncertain", "response_incomplete");
+  if (finishReason === "length") return emptyReceipt("failed", "completion_length_exceeded");
+  if (finishReason === "content_filter") return emptyReceipt("failed", "content_filtered");
+  if (usage.prompt_tokens > request.maxInputTokens || usage.prompt_tokens > config.maxInputTokens ||
+    usage.completion_tokens > request.maxOutputTokens || usage.completion_tokens > config.maxOutputTokens) {
+    return emptyReceipt("failed", "token_budget_exceeded");
+  }
   const costNano = computedCostNano(usage.prompt_tokens, usage.completion_tokens, config);
-  if (costNano > BigInt(usdNumberToNano(request.maxCostUsd))) return emptyReceipt("failed");
+  if (costNano > BigInt(usdNumberToNano(request.maxCostUsd))) return emptyReceipt("failed", "cost_budget_exceeded");
   let response: ModelBrokerReceipt["response"];
   if (finishReason === "tool_calls") {
-    if (content !== "" || calls.size === 0 || calls.size > config.maxToolCalls || [...calls.keys()].some((index, position) => index !== position)) return emptyReceipt("failed");
+    if (content !== "") return emptyReceipt("failed", "tool_call_content_conflict", singleParsedTool(calls.values()));
+    if (calls.size === 0) return emptyReceipt("failed", "tool_call_incomplete");
+    if ([...calls.keys()].some((index, position) => index !== position)) {
+      return emptyReceipt("failed", "tool_call_index_invalid", singleParsedTool(calls.values()));
+    }
     const allowed = new Set(request.allowedTools ?? []);
-    const validated = [...calls.values()].map((call) => validateToolCall(call, allowed));
-    if (validated.some((call) => call === null) || new Set(validated.map((call) => call?.id)).size !== validated.length) return emptyReceipt("failed");
-    response = { type: "tool_calls", calls: validated as NonNullable<(typeof validated)[number]>[] };
+    const callsValue: NonNullable<Extract<ModelBrokerReceipt["response"], { type: "tool_calls" }>>["calls"] = [];
+    for (const call of calls.values()) {
+      const validated = validateToolCall(call, allowed);
+      if (validated.status !== "valid") return emptyReceipt("failed", validated.reason, validated.failureTool);
+      callsValue.push(validated.value);
+    }
+    if (new Set(callsValue.map((call) => call.id)).size !== callsValue.length) {
+      return emptyReceipt("failed", "tool_call_duplicate_id", singleParsedTool(calls.values()));
+    }
+    response = { type: "tool_calls", calls: callsValue };
   } else {
-    if (calls.size > 0 || content.length === 0) return emptyReceipt("failed");
+    if (calls.size > 0) return emptyReceipt("failed", "tool_call_content_conflict", singleParsedTool(calls.values()));
+    if (content.length === 0) return emptyReceipt("failed", "response_schema_invalid");
     response = { type: "text", text: content };
   }
   return {
@@ -379,34 +456,91 @@ function parseStream(textValue: string, request: ModelBrokerRequest, config: Azu
   };
 }
 
-const SafeRelativePathSchema = z.string().min(1).max(4_096).refine((candidate) => !candidate.startsWith("/") && !candidate.includes("\\") && !candidate.includes("\0") && candidate.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."));
-const SafeGlobSchema = z.string().min(1).max(4_096).refine((candidate) => !candidate.startsWith("/") && !candidate.includes("\\") && !candidate.includes("\0") && candidate.split("/").every((segment) => segment !== ".."));
+const RepositoryToolPathSchema = z.string().min(1).max(4_096).transform((candidate, context) => {
+  if (Buffer.byteLength(candidate, "utf8") > 4_096 || /[\u0000-\u001f\u007f-\u009f]/.test(candidate) ||
+    candidate.includes("\\") || candidate.includes("%")) {
+    context.addIssue({ code: "custom", message: "repository tool path is not canonical" });
+    return z.NEVER;
+  }
+  let relative = candidate;
+  if (candidate.startsWith("/")) {
+    if (!candidate.startsWith("/project/") || candidate === "/project/") {
+      context.addIssue({ code: "custom", message: "absolute repository tool path must be below /project" });
+      return z.NEVER;
+    }
+    relative = candidate.slice("/project/".length);
+  }
+  if (relative.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    context.addIssue({ code: "custom", message: "repository tool path has an unsafe segment" });
+    return z.NEVER;
+  }
+  return `/project/${relative}`;
+});
+const SafeGlobSchema = z.string().min(1).max(4_096).refine((candidate) =>
+  Buffer.byteLength(candidate, "utf8") <= 4_096 && !candidate.startsWith("/") &&
+  !/[\u0000-\u001f\u007f-\u009f]/.test(candidate) && !candidate.includes("\\") && !candidate.includes("%") &&
+  candidate.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."));
+const SafeGrepPatternSchema = z.string().min(1).max(4_096).refine((value) =>
+  Buffer.byteLength(value, "utf8") <= 4_096 && !/[\u0000-\u001f\u007f-\u009f]/.test(value));
 const ModelFacingResearchSchema = z.strictObject({
   url: z.string().min(1).max(16_384).refine((value) => { try { const url = new URL(value); return url.protocol === "https:" && url.username === "" && url.password === "" && url.hash === ""; } catch { return false; } }),
   method: z.enum(["GET", "HEAD"]).optional(),
 });
 const ToolArgumentSchemas = {
-  read: z.strictObject({ filePath: SafeRelativePathSchema, offset: z.number().int().positive().max(10_000_000).optional(), limit: z.number().int().positive().max(2_000).optional() }),
-  glob: z.strictObject({ pattern: SafeGlobSchema, path: SafeRelativePathSchema.optional() }),
-  grep: z.strictObject({ pattern: z.string().min(1).max(4_096).refine((value) => !value.includes("\0")), path: SafeRelativePathSchema.optional(), include: SafeGlobSchema.optional() }),
+  read: z.strictObject({ filePath: RepositoryToolPathSchema, offset: z.number().int().positive().max(10_000_000).optional(), limit: z.number().int().positive().max(2_000).optional() }),
+  glob: z.strictObject({ pattern: SafeGlobSchema, path: RepositoryToolPathSchema.optional() }),
+  grep: z.strictObject({ pattern: SafeGrepPatternSchema, path: RepositoryToolPathSchema.optional(), include: SafeGlobSchema.optional() }),
   zentra_research_web_research: ModelFacingResearchSchema,
 } as const;
 
 function validateToolCall(call: { id: string; name: string; arguments: string }, allowed: ReadonlySet<string>) {
-  const name = ModelToolNameSchema.safeParse(call.name); const id = ModelToolCallIdSchema.safeParse(call.id);
-  if (!name.success || !id.success || !allowed.has(name.data)) return null;
-  try { return { id: id.data, name: name.data, arguments: JSON.stringify(ToolArgumentSchemas[name.data].parse(JSON.parse(call.arguments))) }; }
-  catch { return null; }
+  const name = ModelToolNameSchema.safeParse(call.name);
+  const failureTool = name.success ? name.data : undefined;
+  if (call.id === "" || call.name === "" || call.arguments === "") {
+    return { status: "invalid" as const, reason: "tool_call_incomplete" as const, failureTool };
+  }
+  const id = ModelToolCallIdSchema.safeParse(call.id);
+  if (!id.success) return { status: "invalid" as const, reason: "tool_call_id_invalid" as const, failureTool };
+  if (!name.success) return { status: "invalid" as const, reason: "tool_call_name_invalid" as const, failureTool: undefined };
+  if (!allowed.has(name.data)) return { status: "invalid" as const, reason: "unsupported_tool_call" as const, failureTool: name.data };
+  let decoded: unknown;
+  try { decoded = JSON.parse(call.arguments); }
+  catch { return { status: "invalid" as const, reason: "tool_call_arguments_json_invalid" as const, failureTool: name.data }; }
+  const parsed = ToolArgumentSchemas[name.data].safeParse(decoded);
+  if (!parsed.success) return { status: "invalid" as const, reason: "tool_call_arguments_schema_invalid" as const, failureTool: name.data };
+  return { status: "valid" as const, value: { id: id.data, name: name.data, arguments: JSON.stringify(parsed.data) } };
+}
+
+function singleParsedTool(calls: Iterable<{ readonly name: string }>): ModelToolName | undefined {
+  const names = [...calls].map((call) => ModelToolNameSchema.safeParse(call.name))
+    .filter((result): result is { success: true; data: ModelToolName } => result.success)
+    .map((result) => result.data);
+  return names.length > 0 && new Set(names).size === 1 ? names[0] : undefined;
+}
+
+function parsedToolName(value: string | undefined): ModelToolName | undefined {
+  const parsed = ModelToolNameSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function toolDefinition(name: z.infer<typeof ModelToolNameSchema>) {
   return { type: "function", function: { name, description: `Request the bounded ${name} tool.`, parameters: toolParameters(name) } };
 }
 function toolParameters(name: z.infer<typeof ModelToolNameSchema>): Readonly<Record<string, unknown>> {
-  const relativePath = { type: "string", minLength: 1, maxLength: 4096 } as const;
-  if (name === "read") return { type: "object", additionalProperties: false, required: ["filePath"], properties: { filePath: relativePath, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 2000 } } };
-  if (name === "glob") return { type: "object", additionalProperties: false, required: ["pattern"], properties: { pattern: relativePath, path: relativePath } };
-  if (name === "grep") return { type: "object", additionalProperties: false, required: ["pattern"], properties: { pattern: relativePath, path: relativePath, include: relativePath } };
+  const repositoryPath = { type: "string", minLength: 10, maxLength: 4096,
+    description: "Canonical absolute path below /project, for example /project/src/greeting.mjs. The /project root, other absolute roots, traversal, backslashes, control characters, and percent encoding are invalid." } as const;
+  const globPattern = { type: "string", minLength: 1, maxLength: 4096,
+    description: "Bounded repository-relative glob pattern without traversal, for example src/**/*.ts." } as const;
+  if (name === "read") return { type: "object", additionalProperties: false, required: ["filePath"], properties: {
+    filePath: repositoryPath,
+    offset: { type: "integer", minimum: 1, maximum: 10_000_000 },
+    limit: { type: "integer", minimum: 1, maximum: 2_000 },
+  } };
+  if (name === "glob") return { type: "object", additionalProperties: false, required: ["pattern"], properties: { pattern: globPattern, path: repositoryPath } };
+  if (name === "grep") return { type: "object", additionalProperties: false, required: ["pattern"], properties: {
+    pattern: { type: "string", minLength: 1, maxLength: 4096, description: "Bounded search pattern without control characters." },
+    path: repositoryPath, include: globPattern,
+  } };
   return { type: "object", additionalProperties: false, required: ["url"], properties: { url: { type: "string", minLength: 1, maxLength: 16384 }, method: { type: "string", enum: ["GET", "HEAD"], default: "GET" } } };
 }
 
@@ -449,7 +583,13 @@ function isCanonicalAzurePublicOrigin(value: string): boolean {
   catch { return false; }
 }
 function estimatedTokens(text: string): number { return Math.ceil(Buffer.byteLength(text, "utf8") / 4); }
-function emptyReceipt(outcome: Exclude<ModelBrokerReceipt["outcome"], "completed">): ModelBrokerReceipt { return { outcome, response: null, model: null, usage: null }; }
+function emptyReceipt(
+  outcome: Exclude<ModelBrokerReceipt["outcome"], "completed">,
+  failureReason: ModelBrokerFailureReason,
+  failureTool?: ModelToolName,
+): ModelBrokerReceipt {
+  return { outcome, failureReason, ...(failureTool === undefined ? {} : { failureTool }), response: null, model: null, usage: null };
+}
 function canonicalStrings(values: readonly string[], context: z.RefinementCtx): void {
   if (new Set(values).size !== values.length || values.some((value, index) => index > 0 && values[index - 1]! >= value)) context.addIssue({ code: "custom", message: "values must be sorted and unique" });
 }

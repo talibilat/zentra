@@ -125,5 +125,6 @@ function policy(maxBytes: number) {
 function request(pathname: string, policyDigest: string) {
   return { schemaVersion: 1 as const, requestId: `request-${pathname.slice(1)}`, taskId: "task-1", workerId: "worker-1", role: "researcher" as const,
     modelId: "provider/model", tool: "zentra_web_research" as const, method: "GET" as const, url: `https://docs.example.com${pathname}`,
-    envelopeDigest: "a".repeat(64), policyDigest };
+    envelopeDigest: "a".repeat(64), policyDigest,
+    trace: { traceId: "milestone-trace-1", correlationId: "milestone-trace-1" } };
 }

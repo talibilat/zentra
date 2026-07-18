@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
+import { digestCanonical } from "../../src/contracts/authority-attention.js";
 import {
   GovernedWebResearch,
   WebResearchPolicySchema,
@@ -37,6 +38,7 @@ function request(url = "https://docs.example.com/api/page?token=secret&q=term") 
     url,
     envelopeDigest: DIGEST,
     policyDigest: policy().digest,
+    trace: { traceId: "milestone-trace-1", correlationId: "milestone-trace-1" },
   };
 }
 
@@ -59,6 +61,29 @@ function transport(steps: Parameters<WebResearchTransport["dispatch"]>[0][] = []
 }
 
 describe("governed web research", () => {
+  it("treats a non-directory destination path as exact", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const exact = WebResearchPolicySchema.parse({
+      schemaVersion: 1,
+      destinations: [{ origin: "https://docs.example.com", pathPrefix: "/exact" }],
+      contentTypes: ["text/plain"],
+      maxRedirects: 0,
+      maxCompressedBytes: 1_024,
+      maxDecompressedBytes: 1_024,
+      timeoutMs: 1_000,
+      budget: { maxRequests: 1, maxBytes: 2_048, maxTimeMs: 1_000 },
+    });
+    const calls: Parameters<WebResearchTransport["dispatch"]>[0][] = [];
+    const result = await new GovernedWebResearch(journal, transport(calls)).execute(
+      { ...request("https://docs.example.com/exact/child"), policyDigest: exact.digest },
+      exact,
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({ outcome: "denied", reason: "destination_denied" });
+    expect(calls).toHaveLength(0);
+    journal.close();
+  });
+
   it("canonicalizes HTTPS identity and rejects ambiguous or unsafe URLs", () => {
     expect(canonicalWebUrl("https://DOCS.example.com:443/a/../api/page?x=1").href).toBe("https://docs.example.com/api/page?x=1");
     for (const invalid of [
@@ -76,6 +101,7 @@ describe("governed web research", () => {
       content: "bounded evidence",
       evidence: {
         sourceUrl: "https://docs.example.com/api/page",
+        method: "GET",
         status: 200,
         contentType: "text/plain",
         contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -90,12 +116,14 @@ describe("governed web research", () => {
     expect(serialized).not.toContain("bounded evidence");
     const trace = storedEventToAgentTailEvent(journal.readStream("web-research:task-1")[0]!);
     expect(trace).toMatchObject({
+      trace_id: "milestone-trace-1",
       span_id: "web-research:request-1", parent_span_id: "worker:researcher-1",
       actor: { id: "researcher-1", role: "researcher" }, operation: { name: "web_research", status: "completed" },
-      payload: { evidence: { sourceHost: "docs.example.com", sourcePathDigest: expect.stringMatching(/^[a-f0-9]{64}$/), status: 200, decompressedBytes: 16 } },
+      payload: { evidence: { sourceHost: "docs.example.com", sourcePathDigest: expect.stringMatching(/^[a-f0-9]{64}$/), method: "GET", status: 200, decompressedBytes: 16 } },
     });
     expect(JSON.stringify(trace)).not.toContain("token=secret");
     expect(JSON.stringify(trace)).not.toContain("/api/page");
+    expect(journal.readStream("web-research:task-1")[0]?.correlationId).toBe("milestone-trace-1");
     journal.close();
   });
 
@@ -173,6 +201,17 @@ describe("governed web research", () => {
     }
   });
 
+  it.each([199, 404, 500])("fails non-2xx status %s without citable source evidence", async (status) => {
+    const network: WebResearchTransport = { dispatch: async () => ({
+      status, headers: { "content-type": "text/plain" }, body: Buffer.from("not accepted"),
+      compressedBytes: 12, decompressedBytes: 12, resolvedAddress: "93.184.216.34", tls: true, dispatched: true,
+    }) };
+    const journal = new SqliteEventJournal(":memory:");
+    const result = await new GovernedWebResearch(journal, network).execute(request(), policy(), new AbortController().signal);
+    expect(result).toMatchObject({ outcome: "failed", reason: "http_status_failed", evidence: null });
+    journal.close();
+  });
+
   it("maps timeout, cancellation, and dispatched uncertainty without retry", async () => {
     for (const [error, outcome] of [
       [Object.assign(new Error("timeout"), { code: "WEB_TIMEOUT", dispatched: true }), "timed_out"],
@@ -219,5 +258,34 @@ describe("governed web research", () => {
       hostile.close();
     }
     source.close();
+  });
+
+  it("replays only the concrete legacy task-correlated event shape and writes new events with trace correlation", async () => {
+    const source = new SqliteEventJournal(":memory:");
+    await new GovernedWebResearch(source, transport()).execute(request(), policy(), new AbortController().signal);
+    const current = source.readStream("web-research:task-1")[0]!;
+    const currentPayload = current.payload as any;
+    const { trace: _identityTrace, ...legacyIdentity } = currentPayload.identity;
+    const { trace: _requestTrace, ...legacyRequest } = request();
+    const { eventDigest: _eventDigest, ...currentBody } = currentPayload;
+    const legacyBody = {
+      ...currentBody,
+      identity: legacyIdentity,
+      requestDigest: digestCanonical(legacyRequest),
+    };
+    const legacyPayload = { ...legacyBody, eventDigest: digestCanonical(legacyBody) };
+    const journal = new SqliteEventJournal(":memory:");
+    journal.append(current.streamId, 0, [{
+      streamId: current.streamId, type: current.type, payload: legacyPayload,
+      causationId: null, correlationId: "task-1",
+    }]);
+    const next = await new GovernedWebResearch(journal, transport()).execute(
+      { ...request(), requestId: "request-2" }, policy(), new AbortController().signal,
+    );
+    expect(next.outcome).toBe("completed");
+    expect(journal.readStream("web-research:task-1").map((event) => event.correlationId))
+      .toEqual(["task-1", "milestone-trace-1"]);
+    source.close();
+    journal.close();
   });
 });

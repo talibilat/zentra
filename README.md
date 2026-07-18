@@ -15,6 +15,15 @@ The `task run` command retains the bundled deterministic tracer bullet for local
 The `milestone run` command is the installed real-harness workflow: brokered Azure OpenAI planner and researcher roles, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered Azure OpenAI reviewer, and validated candidate integration.
 
 The planner, researcher, and reviewer run attested OpenCode 1.18.3 in short-lived Docker capsules with sanitized read-only repository views and model turns brokered by the host.
+The fixed researcher must retrieve `https://www.iana.org/help/example-domains` once through the governed GET-only HTTPS broker, retain its content digest and provenance, cite its source evidence exactly once, and hand the result to the writer as untrusted guidance.
+The installed researcher has a 32,000 input-token budget so its post-tool model turn can include bounded source context; its 2,000 output-token, USD 1 cost, model-turn, tool, request, web-byte, and time limits are unchanged.
+The installed planner and reviewer retain their 8,000 input-token limits, and all three read-only roles remain within the required 128,000-token model context.
+The installed planner, researcher, implementer, and reviewer each have one 300-second elapsed budget.
+For read-only roles, the same journaled execution deadline covers cold Docker image preparation, resource creation, harness attestation, and model turns; preparation does not receive a separate unjournaled allowance.
+The governed research request policy remains bounded to a 120-second timeout and cumulative web-time ceiling inside the researcher's overall 300-second task deadline.
+The installed required IANA request is additionally bound to one exact `GET` and one outbound request.
+After its source event is retained, the trusted capsule removes the research tool from later model turns; a repeated native MCP call receives the same bounded completed reference without another dispatch, source event, or citation requirement.
+General planner or researcher policies without a required source retain their configured multi-request allowance.
 Zentra creates or verifies the configured integration branch before planning, and installed planner and researcher views are materialized from immutable blobs at that exact integration head.
 Every blob identity is recomputed before exposure, so mutable primary-checkout bytes are never labeled as the accepted integration commit and a normal later milestone starts from prior integrated work.
 Before any integration-ref creation, Zentra durably registers the exact milestone authority and journals a preparation intent bound to canonical repository and Git-common-directory paths plus their filesystem device/inode identities, the full ref, intended base commit, project, milestone, and correlation identity.
@@ -492,6 +501,8 @@ Run the complete test suite, type check, build, and built CLI help verification 
 pnpm test
 pnpm check
 pnpm build
+pnpm package:verify
+pnpm package:contents
 pnpm start -- --help
 ```
 
@@ -500,10 +511,12 @@ The CLI integration tests create real temporary Git repositories and exercise de
 Run the Docker-gated OpenCode capsule test when Docker Desktop and the approved OpenCode capsule prerequisites are available.
 
 ```bash
-ZENTRA_OPENCODE_DOCKER_E2E=1 pnpm test -- tests/capsule/opencode-read-only-capsule.test.ts
+pnpm exec vitest run tests/capsule/opencode-read-only-capsule.test.ts
+pnpm exec vitest run tests/capsule/docker-capsule.e2e.test.ts
 ```
 
 Run the final installed-package smoke only with a real Azure OpenAI deployment and credential, a canonical OpenCode executable, a dedicated canonical authenticated OpenCode home, operator-attested executable identity, and an explicit implementer model.
+Use `.env.example` as the complete Azure-only prerequisite name list; it intentionally contains no credentials.
 
 ```bash
 ZENTRA_LIVE_OPENCODE_E2E=1 \
@@ -519,7 +532,7 @@ ZENTRA_LIVE_OPENCODE_HOME=/canonical/path/to/dedicated-opencode-home \
 ZENTRA_LIVE_OPENCODE_SHA256='<redacted-lowercase-sha256>' \
 ZENTRA_LIVE_OPENCODE_VERSION='<redacted-exact-version-line>' \
 ZENTRA_LIVE_IMPLEMENTER_MODEL=opencode-provider/implementer-model \
-pnpm test -- tests/package/installed-milestone-live.e2e.test.ts
+pnpm exec vitest run tests/package/installed-milestone-live.e2e.test.ts
 ```
 
 `ZENTRA_LIVE_OPENCODE_SHA256` is the expected lowercase SHA-256 of the exact canonical executable, and `ZENTRA_LIVE_OPENCODE_VERSION` is the exact single-line identifier produced by `opencode --version` after trimming its line ending.
@@ -528,5 +541,9 @@ Before creating the package or any project, Git, Docker, or provider effect, the
 It repeats the same operator-identity check immediately before invoking the installed workflow; Zentra's production probe then measures the executable used at runtime, and the writer rejects an executable change after that probe.
 The test performs no OpenCode, capsule, fetch, preload, provider endpoint, or executable substitution.
 The live test then packs Zentra, installs it into an empty consumer, invokes the installed binary, validates a concurrently nonterminal SQLite milestone snapshot when live stdout JSONL first arrives, compares stdout with the retained trace byte-for-byte, replays terminal status, verifies only the owned file reached the integration branch, proves ticket and candidate worktrees and branches were removed, scans retained evidence for credential and source-checkout leakage, and confirms all recorded capsule resources are absent.
-When `ZENTRA_LIVE_OPENCODE_E2E` is unset, the test reports a gated skip that does not satisfy final live acceptance.
+When `ZENTRA_LIVE_OPENCODE_E2E` is unset, empty, or exactly `0`, the test reports a gated skip that does not satisfy final live acceptance.
 When the gate is `1`, every prerequisite is mandatory and a missing or invalid value fails the test rather than skipping.
+Any other nonempty gate value is invalid and fails the test rather than silently skipping.
+`ZENTRA_LIVE_KEEP_ARTIFACTS=1` is accepted only when the live gate is exactly `1`.
+It preserves the temporary live root on test failure and prints only that root path; the default is cleanup, and successful runs are always cleaned.
+Installed CLI failures report only allowlisted lifecycle fields plus stdout/stderr SHA-256 digests and byte counts, never raw output, credentials, prompts, model text, or paths parsed from output.
