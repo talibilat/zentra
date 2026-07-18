@@ -19,6 +19,7 @@ import {
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
 import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
+import { usdNumberToNano } from "../contracts/cost.js";
 import {
   isVerifiedOpenCodeProbeReport,
   type OpenCodeProbeReport,
@@ -203,6 +204,7 @@ export class OpenCodeSingleFileTracerBullet {
         budgetId: request.task.taskId,
         maxSeconds: request.task.budget.maxSeconds,
         maxCostUsd: request.task.budget.maxCostUsd,
+        maxCostUsdNano: usdNumberToNano(request.task.budget.maxCostUsd),
         maxInputTokens: request.task.budget.maxInputTokens,
         maxOutputTokens: request.task.budget.maxOutputTokens,
         maxToolCalls: 10_000,

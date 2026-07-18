@@ -16,6 +16,7 @@ import {
   repositoryCanNarrow,
   workerStreamId,
   type WorkerBinding,
+  type WorkerBindingInput,
 } from "../../src/workers/worker-lifecycle.js";
 
 describe("generic worker lifecycle", () => {
@@ -205,6 +206,70 @@ describe("generic worker lifecycle", () => {
     journal.close();
   });
 
+  it("sums 0.1 plus 0.2 as exactly 0.3 nanodollars across concurrent descendants", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new WorkerLifecycleService(journal);
+    const shared = budget({ maxCostUsd: 0.3, maxCostUsdNano: 300_000_000, maxConcurrentModelTurns: 2 });
+    service.bind(binding("parent", { budget: shared }));
+    service.start("task-1", "parent");
+    service.bind(binding("child", { parentWorkerId: "parent", role: "researcher", envelope: readEnvelope("researcher", ["src/**"]), budget: shared }));
+    service.start("task-1", "child");
+    service.observe("task-1", "parent", model("started", null, usage()));
+    service.observe("task-1", "child", model("started", null, usage()));
+    service.observe("task-1", "parent", model("completed", "completed", usage({ costUsd: 0.1, costUsdNano: 100_000_000, modelTurns: 1 })));
+    service.observe("task-1", "child", model("completed", "completed", usage({ costUsd: 0.2, costUsdNano: 200_000_000, modelTurns: 1 })));
+
+    expect(service.inspect("task-1")).toMatchObject({
+      budget: { limits: { maxCostUsdNano: 300_000_000 }, usage: { costUsd: 0.3, costUsdNano: 300_000_000, modelTurns: 2 } },
+      workers: {
+        parent: { usage: { costUsdNano: 100_000_000 } },
+        child: { usage: { costUsdNano: 200_000_000 } },
+      },
+    });
+    journal.close();
+  });
+
+  it("rejects a one-nanodollar shared-budget exceed and forged display mismatches", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new WorkerLifecycleService(journal);
+    const shared = budget({ maxCostUsd: 0.3, maxCostUsdNano: 300_000_000, maxConcurrentModelTurns: 2 });
+    service.bind(binding("parent", { budget: shared }));
+    service.start("task-1", "parent");
+    service.bind(binding("child", { parentWorkerId: "parent", role: "researcher", envelope: readEnvelope("researcher", ["src/**"]), budget: shared }));
+    service.start("task-1", "child");
+    service.observe("task-1", "parent", model("started", null, usage()));
+    service.observe("task-1", "child", model("started", null, usage()));
+    service.observe("task-1", "parent", model("completed", "completed", usage({ costUsd: 0.1, costUsdNano: 100_000_000, modelTurns: 1 })));
+    expect(() => service.observe("task-1", "child", model("completed", "completed", usage({
+      costUsd: 0.200000001, costUsdNano: 200_000_001, modelTurns: 1,
+    })))).toThrow(/budget exceeded/i);
+    expect(service.inspect("task-1").budget?.usage.costUsdNano).toBe(100_000_000);
+    expect(() => service.observe("task-1", "child", model("completed", "completed", usage({
+      costUsd: 0.2, costUsdNano: 199_999_999, modelTurns: 1,
+    })))).toThrow(/cost fields disagree/i);
+    expect(() => service.bind(binding("forged-budget", { budget: budget({ maxCostUsd: 1, maxCostUsdNano: 999_999_999 }) })))
+      .toThrow(/cost fields disagree/i);
+    journal.close();
+  });
+
+  it("replays concrete legacy worker events without nanodollar fields", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new WorkerLifecycleService(journal);
+    service.bind(binding("worker"));
+    service.start("task-1", "worker");
+    service.observe("task-1", "worker", model("started", null, usage()));
+    service.observe("task-1", "worker", model("completed", "completed", usage({ costUsd: 0.1, costUsdNano: 100_000_000, modelTurns: 1 })));
+    const legacy = journal.readStream(workerStreamId("task-1")).map((event) => ({
+      ...event,
+      payload: JSON.parse(JSON.stringify(event.payload), (key, value) => key === "costUsdNano" || key === "maxCostUsdNano" ? undefined : value),
+    }));
+    expect(projectWorkerLifecycle(legacy).budget).toMatchObject({
+      limits: { maxCostUsd: 1, maxCostUsdNano: 1_000_000_000 },
+      usage: { costUsd: 0.1, costUsdNano: 100_000_000 },
+    });
+    journal.close();
+  });
+
   it("uses one optimistic version for parent terminal and descendant binding races", () => {
     const root = mkdtempSync(path.join(tmpdir(), "zentra-worker-parent-race-"));
     const database = path.join(root, "events.sqlite");
@@ -244,7 +309,7 @@ describe("generic worker lifecycle", () => {
   });
 });
 
-function binding(workerId: string, overrides: Partial<WorkerBinding> = {}): WorkerBinding {
+function binding(workerId: string, overrides: Partial<WorkerBindingInput> = {}): WorkerBindingInput {
   return { schemaVersion: 1, workerId, taskId: "task-1", rootTaskId: "task-1", parentWorkerId: null,
     harness: "deterministic", role: "implementer", model: { capabilityId: "model", modelId: "provider/model" },
     envelope: writerEnvelope("implementer"), budget: budget(),

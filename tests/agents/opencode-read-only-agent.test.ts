@@ -125,7 +125,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
           evidence: [{ kind: "plan", summary: receipt.response?.type === "text" ? receipt.response.text : "" }],
           cleanup: "completed",
           brokerTransport: "completed",
-          usage: { seconds: 1, inputTokens: 12, outputTokens: 14, costUsd: 0.01, toolCalls: 0, modelTurns: 1 },
+          usage: { seconds: 1, inputTokens: 12, outputTokens: 14, costUsd: 0.01, costUsdNano: 10_000_000, toolCalls: 0, modelTurns: 1 },
         };
       }),
     };

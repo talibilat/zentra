@@ -15,6 +15,7 @@ import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-ide
 import { GovernedWebResearch, WebResearchPolicySchema, webResearchTerminalResult } from "../../src/research/web-research.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
+import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -30,6 +31,7 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     let imagePresent = true;
     let containerPresent = true;
     let transportUncertain = false;
+    let modelTurnCount = 1;
     const run = vi.fn(async (args: readonly string[]) => {
       if (args[0] === "build") return { exitCode: 0, stdout: "", stderr: "" };
       if (args[0] === "image" && args[1] === "inspect") {
@@ -56,13 +58,16 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
       if (transportUncertain) throw new DockerBrokerTransportUncertainError();
       expect(args).toEqual(["exec", "--interactive", containerId, "/usr/local/bin/node", "/runner/runner.mjs"]);
       expect(args.join(" ")).not.toContain(process.env.HOME ?? "host-home-never-present");
-      const response = await exchange({
-        type: "model_turn",
-        requestId: "turn-1",
-        prompt: "system: Plan safely.\nuser: Inspect contracts.",
-      }, new AbortController().signal) as { receipt: { response: { type: "text"; text: string } } };
+      let response: { receipt: { response: { type: "text"; text: string } } } | undefined;
+      for (let index = 0; index < modelTurnCount; index += 1) {
+        response = await exchange({
+          type: "model_turn",
+          requestId: `turn-${index + 1}`,
+          prompt: "system: Plan safely.\nuser: Inspect contracts.",
+        }, new AbortController().signal) as { receipt: { response: { type: "text"; text: string } } };
+      }
       const openCodeOutput = [
-        JSON.stringify({ type: "text", part: { type: "text", text: response.receipt.response.text } }),
+        JSON.stringify({ type: "text", part: { type: "text", text: response!.receipt.response.text } }),
         JSON.stringify({ type: "step_finish" }),
       ].join("\n");
       return {
@@ -113,10 +118,40 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
       { type: "model_started", modelId: "fixture/planner" },
       {
         type: "model_completed", modelId: "fixture/planner", outcome: "completed",
-        usage: { seconds: 0, inputTokens: 10, outputTokens: 5, costUsd: 0.01, toolCalls: 0, modelTurns: 1 },
+        usage: { seconds: 0, inputTokens: 10, outputTokens: 5, costUsd: 0.01, costUsdNano: 10_000_000, toolCalls: 0, modelTurns: 1 },
       },
       expect.objectContaining({ type: "cleanup_observed", payload: expect.objectContaining({ outcome: "completed", containerAbsent: true, imageAbsent: true }) }),
     ]);
+
+    imagePresent = true;
+    containerPresent = true;
+    modelTurnCount = 2;
+    let measuredTurn = 0;
+    const exactBroker: ModelBroker = { execute: async (modelRequest) => {
+      const costUsdNano = measuredTurn++ === 0 ? 100_000_000 : 200_000_000;
+      return { outcome: "completed", response: { type: "text", text: "exact" },
+        model: { id: modelRequest.modelId, provider: "fixture", name: "planner" },
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: costUsdNano / 1_000_000_000, costUsdNano } };
+    } };
+    const exact = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
+      ...request(repository), budget: { maxSeconds: 30, maxCostUsd: 0.3, maxInputTokens: 100, maxOutputTokens: 50 },
+    }, exactBroker, new AbortController().signal);
+    expect(exact).toMatchObject({ outcome: "completed", usage: { costUsd: 0.3, costUsdNano: 300_000_000, modelTurns: 2 } });
+
+    imagePresent = true;
+    containerPresent = true;
+    measuredTurn = 0;
+    const excessiveBroker: ModelBroker = { execute: async (modelRequest) => {
+      const costUsdNano = measuredTurn++ === 0 ? 100_000_000 : 200_000_001;
+      return { outcome: "completed", response: { type: "text", text: "excess" },
+        model: { id: modelRequest.modelId, provider: "fixture", name: "planner" },
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: costUsdNano / 1_000_000_000, costUsdNano } };
+    } };
+    const excessive = await new DockerOpenCodeReadOnlyCapsule(docker).execute({
+      ...request(repository), budget: { maxSeconds: 30, maxCostUsd: 0.3, maxInputTokens: 100, maxOutputTokens: 50 },
+    }, excessiveBroker, new AbortController().signal);
+    expect(excessive).toMatchObject({ outcome: "failed", usage: { costUsdNano: 300_000_001 } });
+    modelTurnCount = 1;
 
     for (const brokerOutcome of ["cancelled", "timed_out", "uncertain"] as const) {
       imagePresent = true;
@@ -429,21 +464,24 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
     const controlled = await controlledHttpsSource(repository, "governed MCP fact 913");
     const research = new GovernedWebResearch(journal, controlled.transport);
     const prompts: string[] = [];
-    const broker: ModelBroker = { execute: async (brokerRequest) => {
-      prompts.push(brokerRequest.prompt);
-      const citation = /\[source:[a-f0-9]{64}\]/.exec(brokerRequest.prompt)?.[0];
-      const title = brokerRequest.prompt.startsWith("system: You are a title generator");
-      return {
-        outcome: "completed" as const,
-        response: title ? { type: "text" as const, text: "Governed research" } : citation === undefined
-          ? { type: "tool_calls" as const, calls: [{ id: "research-1", name: "zentra_research_web_research", arguments: JSON.stringify({ url: "https://docs.example.com/fact", method: "GET" }) }] }
-          : { type: "text" as const, text: `Observed governed MCP fact 913 ${citation}` },
-        model: { id: brokerRequest.modelId, provider: "fixture", name: "researcher" },
-        usage: { inputTokens: 10, outputTokens: 3, costUsd: 0 },
-      };
-    } };
+    const broker = azureOpenAIModelBrokerForTest({
+      provider: "azure", endpoint: "https://zentra-test.openai.azure.com", deployment: "azure-deployment",
+      apiVersion: "2025-04-01-preview", credentialEnv: "KEY", timeoutMs: 30_000, maxResponseBytes: 1_048_576,
+      maxInputTokens: 10_000, maxOutputTokens: 1_000, maxToolCalls: 4,
+      expectedProviderModels: ["fixture-provider-model"], inputTokenRateUsdPerMillion: "0", outputTokenRateUsdPerMillion: "0",
+    }, { KEY: "host-only-secret" }, async (input) => {
+      const prompt = (JSON.parse(input.body) as { messages: readonly { content: string }[] }).messages[0]!.content;
+      prompts.push(prompt);
+      const citation = /\[source:[a-f0-9]{64}\]/.exec(prompt)?.[0];
+      const title = prompt.startsWith("system: You are a title generator");
+      const assistant = title ? { type: "text" as const, text: "Governed research" } : citation === undefined
+        ? { type: "tool_calls" as const, name: "zentra_research_web_research", arguments: JSON.stringify({ url: "https://docs.example.com/fact", method: "GET" }) }
+        : { type: "text" as const, text: `Observed governed MCP fact 913 ${citation}` };
+      return azureTransportResponse(assistant);
+    });
     const result = await new DockerOpenCodeReadOnlyCapsule().execute({
-      ...request(repository), role: "researcher", rolePrompt: "Use the governed research tool, then report the fact with its source citation.",
+      ...request(repository), role: "researcher", transportModelId: "azure-deployment",
+      rolePrompt: "Use the governed research tool, then report the fact with its source citation.",
       webResearch: policy, webResearchEnvelopeDigest: "a".repeat(64),
       securityBoundary: { ...request(repository).securityBoundary, network: "brokered_web_research" },
       timeoutMs: 60_000, budget: { maxSeconds: 60, maxCostUsd: 1, maxInputTokens: 10_000, maxOutputTokens: 1_000 },
@@ -456,11 +494,12 @@ describe("DockerOpenCodeReadOnlyCapsule real Docker path", () => {
       cleanup: "completed",
     });
     expect(controlled.requests).toBe(1);
+    expect(prompts.some((prompt) => prompt.includes("governed MCP fact 913"))).toBe(true);
     const sourceEvent = journal.readStream("web-research:task-1")[0]!;
     expect(sourceEvent.payload).toMatchObject({
       outcome: "completed", identity: { taskId: "task-1", workerId: "milestone.task", role: "researcher",
         envelopeDigest: "a".repeat(64), policyDigest: policy.digest },
-      evidence: { parent: { workerId: "milestone.task", modelId: "fixture/planner", tool: "zentra_web_research" },
+      evidence: { parent: { workerId: "milestone.task", modelId: "azure-deployment", tool: "zentra_web_research" },
         provenance: { transport: "zentra_https_broker", redirectHops: 0 } },
     });
     expect(storedEventToAgentTailEvent(sourceEvent)).toMatchObject({
@@ -534,6 +573,15 @@ function request(repositoryPath: string): OpenCodeReadOnlyCapsuleRequest {
       repositoryRevision: "a".repeat(64),
     },
   };
+}
+
+function azureTransportResponse(assistant: { readonly type: "text"; readonly text: string } | { readonly type: "tool_calls"; readonly name: string; readonly arguments: string }) {
+  const chunk = (value: object) => `data: ${JSON.stringify({ id: "chatcmpl-capsule", object: "chat.completion.chunk", created: 1, model: "fixture-provider-model", ...value })}\n\n`;
+  const choice = assistant.type === "text"
+    ? { index: 0, delta: { content: assistant.text }, finish_reason: "stop", logprobs: null }
+    : { index: 0, delta: { tool_calls: [{ index: 0, id: "research-1", type: "function", function: { name: assistant.name, arguments: assistant.arguments } }] }, finish_reason: "tool_calls", logprobs: null };
+  const body = Buffer.from(chunk({ choices: [choice] }) + chunk({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } }) + "data: [DONE]\n\n");
+  return { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" }, body, dispatched: true as const };
 }
 
 async function controlledHttpsSource(root: string, content: string) {

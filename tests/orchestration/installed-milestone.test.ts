@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
-import { OpenRouterModelBroker } from "../../src/providers/openrouter-model-broker.js";
+import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { ProjectConfigSchema } from "../../src/projects/project-config.js";
@@ -93,8 +93,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     const trace = path.join(root, "trace.jsonl");
     const sqlite = new SqliteEventJournal(database);
     const sink = AgentTailJsonlFileSink.open(root, trace);
-    const fetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const body = JSON.parse(String(init?.body)) as { model: string; messages: readonly { content: string }[] };
+    let providerFailure = false;
+    const azureDispatch = async (input: { readonly body: string }) => {
+      if (providerFailure) return { status: 500, headers: { "content-type": "application/json" }, body: Buffer.from('{"error":{"code":"InternalServerError","message":"unknown"}}'), dispatched: true as const };
+      const body = JSON.parse(input.body) as { messages: readonly { content: string }[] };
       const prompt = body.messages[0]!.content;
       let content = "Use the explicitly owned file and run the configured validation.";
       if (prompt.includes('"requiredResponse"')) {
@@ -110,17 +112,16 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
           reason: "The exact validated single-file change is approved.",
         });
       }
-      return Response.json({
-        model: body.model,
-        choices: [{ message: { content, tool_calls: [] } }],
-        usage: { prompt_tokens: 20, completion_tokens: 20, cost: 0.01 },
-      });
+      return { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" }, body: azureResponse(content), dispatched: true as const };
     };
-    const broker = new OpenRouterModelBroker(
-      { provider: "openrouter", credentialEnv: "KEY", timeoutMs: 5_000 },
-      { KEY: "consumer-controlled-secret" },
-      fetch,
-    );
+    const azureConfig = {
+      provider: "azure" as const, endpoint: "https://zentra-test.openai.azure.com",
+      deployment: "zentra-deployment", apiVersion: "2025-04-01-preview", credentialEnv: "KEY",
+      timeoutMs: 5_000, maxResponseBytes: 1_048_576, maxInputTokens: 100_000,
+      maxOutputTokens: 10_000, maxToolCalls: 4, expectedProviderModels: ["provider-model"],
+      inputTokenRateUsdPerMillion: "1", outputTokenRateUsdPerMillion: "2",
+    };
+    const broker = azureOpenAIModelBrokerForTest(azureConfig, { KEY: "consumer-controlled-secret" }, azureDispatch);
     const capsule: OpenCodeReadOnlyCapsule = {
       execute: async (request, receivedBroker, signal, observe) => {
         observe?.({ type: "resources_prepared", payload: {
@@ -129,11 +130,16 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
           imageName: request.resources.imageName, imageId: `sha256:${"c".repeat(64)}`,
           repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
         } });
+        observe?.({ type: "model_started", modelId: request.transportModelId });
         const receipt = await receivedBroker.execute({
           modelId: request.transportModelId, prompt: request.rolePrompt,
           maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens,
           maxCostUsd: request.budget.maxCostUsd,
         }, signal);
+        observe?.({ type: "model_completed", modelId: request.transportModelId,
+          outcome: receipt.outcome === "completed" ? "completed" : "failed",
+          usage: { seconds: 0, inputTokens: receipt.usage?.inputTokens ?? 0, outputTokens: receipt.usage?.outputTokens ?? 0,
+            costUsd: receipt.usage?.costUsd ?? 0, costUsdNano: receipt.usage?.costUsdNano ?? 0, toolCalls: 0, modelTurns: 1 } });
         observe?.({ type: "cleanup_observed", payload: {
           capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
           containerName: request.resources.containerName, containerId: "b".repeat(64),
@@ -190,6 +196,17 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 
     expect(result.terminalOutcome).toBe("completed");
     expect(result.result).toMatchObject({ outcome: "completed", trace: { path: trace, outcome: "emitted" } });
+    const azureEvidence = sqlite.readAll().filter((event) => event.type === "milestone.task_completed")
+      .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
+    expect(azureEvidence).toHaveLength(2);
+    expect(azureEvidence.every((payload) => /^[a-f0-9]{64}$/.test(payload.model.configurationDigest) &&
+      payload.evidence.every((item: any) => item.provenance.providerConfigurationDigest === payload.model.configurationDigest)))
+      .toBe(true);
+    const modelUsage = sqlite.readAll().filter((event) => event.type === "worker.observed")
+      .map((event) => (event.payload as any).observation).filter((observation) => observation.kind === "model" && observation.phase === "completed");
+    expect(modelUsage).toHaveLength(2);
+    expect(modelUsage.every((observation) => observation.usage.costUsdNano === 60_000 && observation.usage.costUsd === 0.00006))
+      .toBe(true);
     expect((await gitOutput(repository, ["show", "zentra/integration:src/greeting.mjs"]))).toContain("hello installed");
     expect(JSON.parse(readFileSync(writerObservation, "utf8"))).toEqual({
       brief: expect.stringContaining("Update the exact greeting"),
@@ -208,14 +225,11 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       }),
     });
     expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });
+    providerFailure = true;
     const failed = await new InstalledMilestoneRunner({
       journal: sqlite,
       sink,
-      broker: new OpenRouterModelBroker(
-        { provider: "openrouter", credentialEnv: "KEY", timeoutMs: 5_000 },
-        { KEY: "failure-secret" },
-        async () => new Response(null, { status: 500 }),
-      ),
+      broker: azureOpenAIModelBrokerForTest(azureConfig, { KEY: "failure-secret" }, azureDispatch),
       readOnlyCapsule: capsule,
     }).run({
       milestoneId: "installed-provider-failure", goal: "Provider failure", file: "src/greeting.mjs",
@@ -246,10 +260,20 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 
 function model(id: string, role: "planner" | "implementer" | "reviewer", tools: string[]) {
   return {
-    id, harness: "opencode", model: `fixture/${id}`, roles: [role], specialties: [], costTier: "low",
+    id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
     contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network: "denied",
     fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 },
   };
+}
+
+function azureResponse(content: string): Buffer {
+  const chunk = (value: unknown) => `data: ${JSON.stringify({
+    id: "chatcmpl-installed", object: "chat.completion.chunk", created: 1,
+    model: "provider-model", ...value as object,
+  })}\n\n`;
+  return Buffer.from(chunk({ choices: [{ index: 0, delta: { content }, finish_reason: "stop", logprobs: null }] }) +
+    chunk({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 20, total_tokens: 40 } }) +
+    "data: [DONE]\n\n");
 }
 
 async function gitOk(cwd: string, args: readonly string[]): Promise<void> {

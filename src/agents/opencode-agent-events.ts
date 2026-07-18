@@ -44,6 +44,7 @@ const ModelMetadataSchema = z.strictObject({
   id: IdSchema,
   provider: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   name: z.string().min(1).max(256),
+  configurationDigest: DigestSchema.optional(),
 });
 const EvidenceSchema = z.strictObject({
   kind: z.enum(["plan", "research", "finding", "review"]),
@@ -55,6 +56,7 @@ const EvidenceSchema = z.strictObject({
     capabilityId: IdSchema,
     transportModelId: IdSchema,
     repositoryRevision: DigestSchema,
+    providerConfigurationDigest: DigestSchema.optional(),
   }),
 });
 
@@ -81,7 +83,9 @@ export const OpenCodeMilestoneCompletedPayloadSchema = z.strictObject({
     const digest = createHash("sha256").update(evidence.summary, "utf8").digest("hex");
     if (digest !== evidence.sha256 || evidence.provenance.capabilityId !== payload.capabilityId ||
       evidence.provenance.transportModelId !== payload.transportModelId ||
-      (payload.model !== null && evidence.provenance.transportModelId !== payload.model.id)) {
+      (payload.model !== null && evidence.provenance.transportModelId !== payload.model.id) ||
+      (payload.model?.configurationDigest !== undefined &&
+        evidence.provenance.providerConfigurationDigest !== payload.model.configurationDigest)) {
       context.addIssue({ code: "custom", message: "OpenCode evidence provenance is invalid" });
     }
   }

@@ -26,14 +26,18 @@ const npmExecutable = realpathSync.native(path.join(path.dirname(nodeExecutable)
 const gitExecutable = realpathSync.native("/usr/bin/git");
 const dockerExecutable = "/Applications/Docker.app/Contents/Resources/bin/docker";
 const liveEnvironmentNames = [
-  "ZENTRA_LIVE_OPENROUTER_KEY",
+  "ZENTRA_LIVE_AZURE_OPENAI_API_KEY",
+  "ZENTRA_LIVE_AZURE_OPENAI_ENDPOINT",
+  "ZENTRA_LIVE_AZURE_OPENAI_DEPLOYMENT",
+  "ZENTRA_LIVE_AZURE_OPENAI_API_VERSION",
+  "ZENTRA_LIVE_AZURE_OPENAI_EXPECTED_PROVIDER_MODELS",
+  "ZENTRA_LIVE_AZURE_OPENAI_INPUT_TOKEN_RATE_USD_PER_MILLION",
+  "ZENTRA_LIVE_AZURE_OPENAI_OUTPUT_TOKEN_RATE_USD_PER_MILLION",
   "ZENTRA_LIVE_OPENCODE_EXECUTABLE",
   "ZENTRA_LIVE_OPENCODE_HOME",
   "ZENTRA_LIVE_OPENCODE_SHA256",
   "ZENTRA_LIVE_OPENCODE_VERSION",
-  "ZENTRA_LIVE_PLANNER_MODEL",
   "ZENTRA_LIVE_IMPLEMENTER_MODEL",
-  "ZENTRA_LIVE_REVIEWER_MODEL",
 ] as const;
 const liveGateEnabled = process.env.ZENTRA_LIVE_OPENCODE_E2E === "1";
 const roots: string[] = [];
@@ -92,7 +96,7 @@ describe.skipIf(!liveGateEnabled)(
       const config = path.join(root, "zentra.project.json");
       const modelSheet = path.join(root, "MODELS.md");
       const securitySheet = path.join(root, "SECURITY-SHEET.md");
-      const provider = path.join(root, "openrouter.json");
+      const provider = path.join(root, "azure.json");
       const ownedFile = "src/greeting.mjs";
       await git(root, ["init", "-b", "main", project], baseEnvironment);
       await git(project, ["config", "user.name", "Zentra Live Test"], baseEnvironment);
@@ -124,9 +128,9 @@ describe.skipIf(!liveGateEnabled)(
 ## Models
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| live-planner | opencode | ${live.plannerModel} | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| live-planner | opencode | ${live.azureDeployment} | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
 | live-implementer | opencode | ${live.implementerModel} | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
-| live-reviewer | opencode | ${live.reviewerModel} | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
+| live-reviewer | opencode | ${live.azureDeployment} | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
       writeFileSync(securitySheet, `# Zentra Security Sheet
 
@@ -158,7 +162,21 @@ local_preparation_only
 `, "utf8");
       writeFileSync(
         provider,
-        '{"provider":"openrouter","credentialEnv":"ZENTRA_LIVE_OPENROUTER_KEY","timeoutMs":120000}\n',
+        `${JSON.stringify({
+          provider: "azure",
+          endpoint: live.azureEndpoint,
+          deployment: live.azureDeployment,
+          apiVersion: live.azureApiVersion,
+          credentialEnv: "ZENTRA_LIVE_AZURE_OPENAI_API_KEY",
+          timeoutMs: 120000,
+          maxResponseBytes: 4 * 1024 * 1024,
+          maxInputTokens: 128000,
+          maxOutputTokens: 16000,
+          maxToolCalls: 4,
+          expectedProviderModels: live.azureExpectedProviderModels,
+          inputTokenRateUsdPerMillion: live.inputTokenRateUsdPerMillion,
+          outputTokenRateUsdPerMillion: live.outputTokenRateUsdPerMillion,
+        })}\n`,
         "utf8",
       );
 
@@ -188,7 +206,7 @@ local_preparation_only
         ownedFile,
       ], consumer, {
         ...baseEnvironment,
-        ZENTRA_LIVE_OPENROUTER_KEY: live.openRouterKey,
+        ZENTRA_LIVE_AZURE_OPENAI_API_KEY: live.azureApiKey,
       }, database);
       if (execution.code !== 0) {
         throw new Error(`authenticated installed milestone exited ${execution.code} without completing`);
@@ -200,7 +218,7 @@ local_preparation_only
       );
       const executionOutput = Buffer.concat([execution.stdout, execution.stderr]);
       for (const bytes of [packageOutput, executionOutput, traceBytes, ...sqliteFiles(database)]) {
-        assertBytesAbsent(bytes, live.openRouterKey, "credential appeared in retained acceptance evidence");
+        assertBytesAbsent(bytes, live.azureApiKey, "credential appeared in retained acceptance evidence");
         assertBytesAbsent(bytes, repositoryRoot, "source checkout path appeared in retained acceptance evidence");
       }
       expect(execution.observedNonterminalJournalState).toBe(true);
@@ -217,6 +235,18 @@ local_preparation_only
         kind: "milestone.completed",
         operation: { status: "completed" },
       });
+      const azureCompletions = envelopes.filter((event) => event.kind === "milestone.task_completed")
+        .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
+      expect(azureCompletions).toHaveLength(2);
+      expect(azureCompletions.every((payload) => /^[a-f0-9]{64}$/.test(payload.model.configurationDigest) &&
+        payload.evidence.every((item: any) => item.provenance.providerConfigurationDigest === payload.model.configurationDigest)))
+        .toBe(true);
+      const measuredModelCosts = envelopes.filter((event) => event.kind === "worker.observed")
+        .map((event) => (event.payload as any).observation).filter((observation) => observation?.kind === "model" && observation.phase === "completed")
+        .map((observation) => observation.usage);
+      expect(measuredModelCosts.length).toBeGreaterThan(0);
+      expect(measuredModelCosts.every((usage) => Number.isSafeInteger(usage.costUsdNano) &&
+        usage.costUsdNano >= 0 && usage.costUsd === usage.costUsdNano / 1_000_000_000)).toBe(true);
       const terminal = parseSingleJson(execution.stderr) as {
         readonly command: string;
         readonly milestoneId: string;
@@ -277,7 +307,7 @@ local_preparation_only
         Buffer.from(status.stderr, "utf8"),
       ]);
       for (const bytes of [retainedOutput, traceBytes, ...sqliteFiles(database)]) {
-        assertBytesAbsent(bytes, live.openRouterKey, "credential appeared in retained acceptance evidence");
+        assertBytesAbsent(bytes, live.azureApiKey, "credential appeared in retained acceptance evidence");
         assertBytesAbsent(bytes, repositoryRoot, "source checkout path appeared in retained evidence");
       }
 
@@ -336,9 +366,9 @@ async function liveConfiguration() {
   if (missing.length > 0) {
     throw new Error(`live conformance prerequisites are incomplete: missing ${missing.join(", ")}`);
   }
-  const openRouterKey = requiredEnvironment("ZENTRA_LIVE_OPENROUTER_KEY", 4_096);
-  if (/\s|[\u0000-\u001f\u007f]/.test(openRouterKey)) {
-    throw new Error("ZENTRA_LIVE_OPENROUTER_KEY must be one bounded credential value");
+  const azureApiKey = requiredEnvironment("ZENTRA_LIVE_AZURE_OPENAI_API_KEY", 4_096);
+  if (/\s|[\u0000-\u001f\u007f]/.test(azureApiKey)) {
+    throw new Error("ZENTRA_LIVE_AZURE_OPENAI_API_KEY must be one bounded credential value");
   }
   const requestedExecutable = requiredEnvironment("ZENTRA_LIVE_OPENCODE_EXECUTABLE", 4_096);
   const requestedHome = requiredEnvironment("ZENTRA_LIVE_OPENCODE_HOME", 4_096);
@@ -377,20 +407,40 @@ async function liveConfiguration() {
   if (/[\r\n\u0000]/.test(expectedVersion)) {
     throw new Error("ZENTRA_LIVE_OPENCODE_VERSION must be one bounded exact version line");
   }
-  const plannerModel = requiredModel("ZENTRA_LIVE_PLANNER_MODEL");
+  const azureEndpoint = requiredEnvironment("ZENTRA_LIVE_AZURE_OPENAI_ENDPOINT", 512);
+  const azureDeployment = requiredModel("ZENTRA_LIVE_AZURE_OPENAI_DEPLOYMENT");
+  const azureApiVersion = requiredEnvironment("ZENTRA_LIVE_AZURE_OPENAI_API_VERSION", 32);
+  const azureExpectedProviderModels = requiredEnvironment("ZENTRA_LIVE_AZURE_OPENAI_EXPECTED_PROVIDER_MODELS", 1024).split(",");
+  if (azureExpectedProviderModels.length === 0 || azureExpectedProviderModels.some((model, index) =>
+    !/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,254}[A-Za-z0-9])?$/.test(model) || (index > 0 && azureExpectedProviderModels[index - 1]! >= model))) {
+    throw new Error("ZENTRA_LIVE_AZURE_OPENAI_EXPECTED_PROVIDER_MODELS must be a sorted comma-separated model allowlist");
+  }
+  const inputTokenRateUsdPerMillion = requiredRate("ZENTRA_LIVE_AZURE_OPENAI_INPUT_TOKEN_RATE_USD_PER_MILLION");
+  const outputTokenRateUsdPerMillion = requiredRate("ZENTRA_LIVE_AZURE_OPENAI_OUTPUT_TOKEN_RATE_USD_PER_MILLION");
   const implementerModel = requiredModel("ZENTRA_LIVE_IMPLEMENTER_MODEL");
-  const reviewerModel = requiredModel("ZENTRA_LIVE_REVIEWER_MODEL");
   await attestOpenCodeIdentity({ openCodeExecutable, openCodeHome, expectedSha256, expectedVersion });
   return {
-    openRouterKey,
+    azureApiKey,
+    azureEndpoint,
+    azureDeployment,
+    azureApiVersion,
+    azureExpectedProviderModels,
+    inputTokenRateUsdPerMillion,
+    outputTokenRateUsdPerMillion,
     openCodeExecutable,
     openCodeHome,
     expectedSha256,
     expectedVersion,
-    plannerModel,
     implementerModel,
-    reviewerModel,
   };
+}
+
+function requiredRate(name: string): string {
+  const encoded = requiredEnvironment(name, 32);
+  if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,9})?$/.test(encoded)) throw new Error(`${name} must be a bounded decimal rate`);
+  const rate = Number(encoded);
+  if (!Number.isFinite(rate) || rate > 1_000_000) throw new Error(`${name} must be a bounded decimal rate`);
+  return encoded;
 }
 
 async function attestOpenCodeIdentity(input: {

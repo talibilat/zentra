@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { CostUsdNanoSchema, costFieldsAgree } from "../contracts/cost.js";
 
 const ModelIdentitySchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
 export const ModelToolCallIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+export const ModelToolNameSchema = z.enum(["read", "glob", "grep", "zentra_research_web_research"]);
 
 export const ModelBrokerRequestSchema = z.strictObject({
   modelId: ModelIdentitySchema,
@@ -9,6 +11,9 @@ export const ModelBrokerRequestSchema = z.strictObject({
   maxInputTokens: z.number().int().positive().max(2_000_000),
   maxOutputTokens: z.number().int().positive().max(2_000_000),
   maxCostUsd: z.number().nonnegative().max(10_000),
+  allowedTools: z.array(ModelToolNameSchema).max(4).superRefine((tools, context) => {
+    if (new Set(tools).size !== tools.length) context.addIssue({ code: "custom", message: "allowed model tools must be unique" });
+  }).optional(),
 });
 
 const AssistantResponseSchema = z.discriminatedUnion("type", [
@@ -17,7 +22,7 @@ const AssistantResponseSchema = z.discriminatedUnion("type", [
     type: z.literal("tool_calls"),
     calls: z.array(z.strictObject({
       id: ModelToolCallIdSchema,
-      name: z.enum(["read", "glob", "grep", "zentra_research_web_research"]),
+      name: ModelToolNameSchema,
       arguments: z.string().min(2).max(64 * 1024),
     })).min(1).max(16),
   }),
@@ -30,11 +35,17 @@ export const ModelBrokerReceiptSchema = z.strictObject({
     id: ModelIdentitySchema,
     provider: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
     name: z.string().min(1).max(256),
+    configurationDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).nullable(),
   usage: z.strictObject({
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
     costUsd: z.number().nonnegative(),
+    costUsdNano: CostUsdNanoSchema.optional(),
+  }).superRefine((usage, context) => {
+    if (usage.costUsdNano !== undefined && !costFieldsAgree(usage.costUsd, usage.costUsdNano)) {
+      context.addIssue({ code: "custom", message: "model usage cost fields disagree" });
+    }
   }).nullable(),
 }).superRefine((receipt, context) => {
   if (receipt.outcome === "completed" && (receipt.response === null || receipt.model === null || receipt.usage === null)) {

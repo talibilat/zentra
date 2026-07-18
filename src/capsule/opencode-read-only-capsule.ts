@@ -28,6 +28,7 @@ import {
 import { DockerBrokerTransportUncertainError, DockerClient, DockerCommandCancelledError, DockerCommandTimeoutError } from "./docker-client.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
 import { webResearchTerminalResult } from "../research/web-research.js";
+import { nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
 
 const SCRATCH_BYTES = 16 * 1024 * 1024;
 const MAX_TURNS = 32;
@@ -73,7 +74,8 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
     let turns = 0;
     let inputTokens = 0;
     let outputTokens = 0;
-    let costUsd = 0;
+    let costUsdNano = 0;
+    const maxCostUsdNano = usdNumberToNano(request.budget.maxCostUsd);
     let cleanup: "completed" | "uncertain" = "uncertain";
     let brokerTransport: "completed" | "uncertain" = "completed";
     let outcome: OpenCodeReadOnlyCapsuleResult["outcome"] = "failed";
@@ -166,8 +168,8 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         if (turns > MAX_TURNS) throw new Error("OpenCode model turn limit exceeded");
         const remainingInputTokens = request.budget.maxInputTokens - inputTokens;
         const remainingOutputTokens = request.budget.maxOutputTokens - outputTokens;
-        const remainingCostUsd = request.budget.maxCostUsd - costUsd;
-        if (remainingInputTokens <= 0 || remainingOutputTokens <= 0 || remainingCostUsd < 0) {
+        const remainingCostUsdNano = maxCostUsdNano - costUsdNano;
+        if (remainingInputTokens <= 0 || remainingOutputTokens <= 0 || remainingCostUsdNano < 0) {
           throw new Error("OpenCode model budget exhausted");
         }
         const brokerRequest = ModelBrokerRequestSchema.parse({
@@ -175,7 +177,10 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
           prompt: turn.prompt,
           maxInputTokens: remainingInputTokens,
           maxOutputTokens: remainingOutputTokens,
-          maxCostUsd: remainingCostUsd,
+          maxCostUsd: nanoToUsdDisplay(remainingCostUsdNano),
+          allowedTools: request.webResearch === null
+            ? ["read", "glob", "grep"]
+            : ["read", "glob", "grep", "zentra_research_web_research"],
         });
         observe({ type: "model_started", modelId: request.transportModelId });
         let receipt: ModelBrokerReceipt;
@@ -184,7 +189,7 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         } catch (error) {
           observe({
             type: "model_completed", modelId: request.transportModelId, outcome: "failed",
-            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 },
+            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 0 },
           });
           throw error;
         }
@@ -194,9 +199,10 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         if (receipt.usage !== null) {
           inputTokens += receipt.usage.inputTokens;
           outputTokens += receipt.usage.outputTokens;
-          costUsd += receipt.usage.costUsd;
+          costUsdNano += receipt.usage.costUsdNano ?? usdNumberToNano(receipt.usage.costUsd);
+          if (!Number.isSafeInteger(costUsdNano)) throw new Error("OpenCode model cost exceeds the safe integer bound");
         }
-        if (inputTokens > request.budget.maxInputTokens || outputTokens > request.budget.maxOutputTokens || costUsd > request.budget.maxCostUsd) {
+        if (inputTokens > request.budget.maxInputTokens || outputTokens > request.budget.maxOutputTokens || costUsdNano > maxCostUsdNano) {
           throw new Error("OpenCode model budget exceeded");
         }
         observe({
@@ -208,6 +214,7 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
             inputTokens: receipt.usage?.inputTokens ?? 0,
             outputTokens: receipt.usage?.outputTokens ?? 0,
             costUsd: receipt.usage?.costUsd ?? 0,
+            costUsdNano: receipt.usage?.costUsdNano ?? usdNumberToNano(receipt.usage?.costUsd ?? 0),
             toolCalls: 0,
             modelTurns: 1,
           },
@@ -277,7 +284,8 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         seconds: 0,
         inputTokens,
         outputTokens,
-        costUsd,
+        costUsd: nanoToUsdDisplay(costUsdNano),
+        costUsdNano,
         toolCalls: 0,
         modelTurns: turns,
       },
@@ -383,6 +391,7 @@ function parseResult(output: string): z.infer<typeof ResultSchema> {
   if (line === undefined) throw new Error("OpenCode capsule emitted no result");
   return ResultSchema.parse(JSON.parse(line));
 }
+
 
 export function parseOpenCodeFinalAssistantText(output: string): string {
   const lines = output.split(/\r?\n/).filter((line) => line.trim() !== "");
