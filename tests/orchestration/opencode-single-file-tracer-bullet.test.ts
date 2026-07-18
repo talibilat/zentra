@@ -45,10 +45,12 @@ import {
   type ReviewerAdapter,
 } from "../../src/reviews/reviewer-adapter.js";
 import { TaskService } from "../../src/tasks/task-service.js";
+import type { StoredEvent } from "../../src/contracts/event.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
 import { MilestoneRegistry, type MilestoneRecord } from "../../src/milestones/milestone-registry.js";
 import { TwoAgentMilestoneCoordinator } from "../../src/orchestration/two-agent-milestone.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
+import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 import { WorkspaceOwnershipGate } from "../../src/workspaces/workspace-ownership.js";
 import { WorktreeManager } from "../../src/workspaces/worktree-manager.js";
@@ -79,6 +81,10 @@ describe("OpenCodeSingleFileTracerBullet", () => {
       "task.validation_completed",
       "task.completed",
     ]));
+    expect(Object.values(projectWorkerLifecycle(result.allEvents).workers)[0]).toMatchObject({
+      taskId: "writer-tracer", harness: "opencode", role: "implementer",
+      status: "terminal", terminalOutcome: "completed", cleanup: "completed",
+    });
     expect(requiredTraceKinds(result.trace)).toEqual([
       "task.started",
       "task.writer_completed",
@@ -305,7 +311,7 @@ async function runTracer(
   view: Awaited<ReturnType<OpenCodeSingleFileTracerBullet["run"]>>;
   events: readonly { readonly type: string; readonly payload: unknown }[];
   trace: readonly TraceEvent[];
-  allEvents: readonly { readonly streamId: string; readonly type: string; readonly payload: unknown }[];
+  allEvents: readonly StoredEvent[];
   milestone: MilestoneRecord | null;
   worktree: string;
 }> {

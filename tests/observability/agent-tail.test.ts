@@ -5,6 +5,7 @@ import { OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import { createAuthorityAttention, createOpenCodeAdmissionPacket, digestCanonical } from "../../src/contracts/authority-attention.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+import { capabilityEnvelope } from "../../src/workers/worker-lifecycle.js";
 import {
   agentTailEventToJsonLine,
   storedEventToAgentTailEvent,
@@ -431,6 +432,56 @@ describe("Agent Tail event envelope export", () => {
       parent_span_id: "milestone:milestone-1",
       actor: { id: "reviewer-1", role: "reviewer" },
     });
+  });
+
+  it("projects generic nested workers as child spans with their own actors", () => {
+    const binding = {
+      schemaVersion: 1,
+      workerId: "research-1",
+      taskId: "task-1",
+      parentWorkerId: "writer-1",
+      harness: "opencode",
+      role: "researcher",
+      model: { capabilityId: "research-model", modelId: "provider/model" },
+      envelope: capabilityEnvelope({
+        role: "researcher", authority: "read_only", capabilities: ["read_repository"],
+        network: "denied", secrets: "none",
+        effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" },
+        resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [".env"] },
+      }),
+      budget: {
+        budgetId: "budget-1", maxSeconds: 30, maxCostUsd: 1,
+        maxInputTokens: 100, maxOutputTokens: 100, maxToolCalls: 10, maxModelTurns: 10,
+        maxActiveWorkers: 2, maxConcurrentTools: 1, maxConcurrentModelTurns: 1,
+      },
+      rootTaskId: "task-1",
+      taskContext: { kind: "milestone", milestoneId: "milestone-1" },
+      trace: { traceId: "trace-1", correlationId: "milestone-1" },
+    };
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      streamId: "worker:research-1", type: "worker.bound", payload: binding,
+    }));
+
+    expect(exported).toMatchObject({
+      span_id: "worker:research-1",
+      parent_span_id: "worker:writer-1",
+      actor: { id: "research-1", role: "researcher" },
+      operation: { name: "worker", status: "waiting" },
+    });
+  });
+
+  it("parents top-level workers to the actual standalone or milestone task span", () => {
+    const base = {
+      schemaVersion: 1, workerId: "writer-1", taskId: "task-1", rootTaskId: "task-1",
+      parentWorkerId: null, harness: "deterministic", role: "researcher", model: null,
+      envelope: capabilityEnvelope({ role: "researcher", authority: "read_only", capabilities: ["read_repository"], network: "denied", secrets: "none", effects: { worktree: "none", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "read_only", paths: ["src/**"], forbiddenPaths: [] } }),
+      budget: { budgetId: "budget-1", maxSeconds: 1, maxCostUsd: 0, maxInputTokens: 1, maxOutputTokens: 1, maxToolCalls: 1, maxModelTurns: 1, maxActiveWorkers: 1, maxConcurrentTools: 1, maxConcurrentModelTurns: 1 },
+      trace: { traceId: "trace-1", correlationId: "trace-1" },
+    } as const;
+    const standalone = storedEventToAgentTailEvent(storedEvent({ type: "worker.bound", payload: { ...base, taskContext: { kind: "standalone" } } }));
+    const milestone = storedEventToAgentTailEvent(storedEvent({ type: "worker.bound", payload: { ...base, taskContext: { kind: "milestone", milestoneId: "milestone-9" } } }));
+    expect(standalone.parent_span_id).toBe("task:task-1");
+    expect(milestone.parent_span_id).toBe("milestone:milestone-9:task:task-1");
   });
 
   it("exposes strictly validated chosen-model routing metadata", () => {

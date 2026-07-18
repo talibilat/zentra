@@ -21,6 +21,7 @@ import {
   OpenCodeResourcesPreparedPayloadSchema,
   OpenCodeTraceObservedPayloadSchema,
 } from "./opencode-agent-events.js";
+import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
 
 export interface OpenCodeReadOnlyExecutedResult extends OpenCodeReadOnlyAgentResult {
   readonly status: "executed";
@@ -118,6 +119,13 @@ export class OpenCodeReadOnlyProgram {
 
   async run(request: OpenCodeReadOnlyProgramRequest): Promise<OpenCodeReadOnlyProgramResult> {
     const eventsBeforeAdmission = this.journal.readStream(request.milestoneId);
+    const retainedWorkers = Object.values(projectWorkerLifecycle(
+      this.journal.readStream(workerStreamId(request.taskId)),
+    ).workers).filter((worker) => worker.taskId === request.taskId);
+    if (retainedWorkers.length !== 0) {
+      const states = [...new Set(retainedWorkers.map((worker) => worker.status))].sort().join(",");
+      throw new Error(`OpenCode task has retained durable worker state (${states}); redispatch requires an explicit effect reconciliation contract`);
+    }
     const planned = projectMilestone(eventsBeforeAdmission)?.plan?.tasks.find((task) => task.taskId === request.taskId);
     const capability = planned === undefined
       ? undefined
@@ -137,26 +145,41 @@ export class OpenCodeReadOnlyProgram {
       contextTokens: capability?.contextTokens ?? 1,
       requestedBudget: { ...request.budget, timeoutMs: request.timeoutMs },
     });
-    const admission = new MilestoneRegistry(this.projected).admitTask(
+    const registry = new MilestoneRegistry(this.projected);
+    const preview = registry.previewTaskAdmission(
       request.milestoneId,
       request.taskId,
       this.security,
       context,
       this.models,
     );
-    if (admission.status === "paused") {
+    if (preview.status === "paused") {
       return Object.freeze({
         status: "paused",
         operationOutcome: "paused",
-        attention: admission.attention,
+        attention: preview.attention,
         trace: Object.freeze({ outcome: this.projected.projectionFailed ? "failed" : "emitted" }),
       });
     }
+    const admission = registry.admitTask(
+      request.milestoneId, request.taskId, this.security, context, this.models,
+    );
+    if (admission.status === "paused") throw new Error("OpenCode admission changed after pure validation");
     const result = await this.agent.run({
       ...request,
       repositoryPath: admission.admission.packet.repository,
       admission: admission.admission,
     });
+    const postRunWorkers = Object.values(projectWorkerLifecycle(
+      this.journal.readStream(workerStreamId(request.taskId)),
+    ).workers).filter((worker) => worker.taskId === request.taskId);
+    if (postRunWorkers.some((worker) => worker.status === "uncertain")) {
+      return Object.freeze({
+        status: "executed",
+        ...result,
+        operationOutcome: "failed",
+      });
+    }
     const observedTraceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
     const events = this.journal.readStream(request.milestoneId);
     const correlationId = events[0]?.correlationId;

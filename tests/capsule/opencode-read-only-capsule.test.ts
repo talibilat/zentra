@@ -105,6 +105,11 @@ describe("DockerOpenCodeReadOnlyCapsule", () => {
     expect(run).toHaveBeenCalledWith(["image", "inspect", imageId], expect.any(AbortSignal), 30_000);
     expect(observations).toEqual([
       expect.objectContaining({ type: "resources_prepared", payload: expect.objectContaining({ containerId, imageId, repositoryViewPath: repository }) }),
+      { type: "model_started", modelId: "fixture/planner" },
+      {
+        type: "model_completed", modelId: "fixture/planner", outcome: "completed",
+        usage: { seconds: 0, inputTokens: 10, outputTokens: 5, costUsd: 0.01, toolCalls: 0, modelTurns: 1 },
+      },
       expect.objectContaining({ type: "cleanup_observed", payload: expect.objectContaining({ outcome: "completed", containerAbsent: true, imageAbsent: true }) }),
     ]);
 

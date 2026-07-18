@@ -235,6 +235,7 @@ export class InstalledMilestoneRunner {
       probe,
       reviewerId: reviewer.id,
       correlationId: request.milestoneId,
+      parentMilestoneId: request.milestoneId,
       signal: request.signal,
       openCodeHome: request.openCodeHome,
       onReviewReady: (handoff) => {

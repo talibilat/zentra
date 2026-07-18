@@ -55,6 +55,8 @@ import type {
   WriterCapsuleResult,
   WriterWorktreeCapsule,
 } from "./writer-worktree-capsule.js";
+import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
+import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
 
 export interface OpenCodeSingleFileTracerRequest {
   readonly project: ProjectConfig;
@@ -65,6 +67,7 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly openCodeHome?: string;
   readonly reviewerId?: string;
   readonly correlationId?: string;
+  readonly parentMilestoneId?: string;
   readonly onReviewReady?: (handoff: ValidatedChangeHandoff) => void | Promise<void>;
   readonly signal: AbortSignal;
 }
@@ -130,14 +133,7 @@ export class OpenCodeSingleFileTracerBullet {
 
   async run(request: OpenCodeSingleFileTracerRequest): Promise<TaskView> {
     const changedPath = singleOwnedFile(request.task, schedulerAuthorizedRequests.has(request));
-    if (!isVerifiedOpenCodeProbeReport(request.probe, {
-      modelId: request.model.id,
-      model: request.model.model,
-      provider: request.model.model.replace(/\/.*/, ""),
-      cwd: request.project.repositoryPath,
-    })) {
-      throw new Error("OpenCode single-file tracer requires a verified capability probe");
-    }
+    assertWriterAdmission(request, changedPath);
     this.tasks.create({
       taskId: request.task.taskId,
       projectId: request.project.projectId,
@@ -147,6 +143,48 @@ export class OpenCodeSingleFileTracerBullet {
 
     let observedWorkspace: string | null = null;
     let capsule: WriterCapsuleResult;
+    const workers = new WorkerLifecycleService(this.tasks.eventJournal());
+    const workerEvents = new OpenCodeWorkerEventAdapter();
+    const workerId = `writer-${createHash("sha256").update(`${request.task.taskId}\0${request.model.id}`, "utf8").digest("hex")}`;
+    assertWriterAdmission(request, changedPath);
+    workers.bind({
+      schemaVersion: 1,
+      workerId,
+      taskId: request.task.taskId,
+      rootTaskId: request.task.taskId,
+      parentWorkerId: null,
+      harness: "opencode",
+      role: request.task.roleAssignment.role,
+      model: { capabilityId: request.model.id, modelId: request.model.model },
+      envelope: capabilityEnvelope({
+        role: request.task.roleAssignment.role,
+        authority: request.task.risk.authority,
+        capabilities: ["read_repository", "write_worktree"],
+        network: "model_provider_only",
+        secrets: "none",
+        effects: { worktree: "assigned", pathExpansion: "none", integration: "none", release: "none", external: "none" },
+        resources: { repository: "assigned_worktree", paths: [...request.task.ownedPaths], forbiddenPaths: [...request.task.forbiddenPaths] },
+      }),
+      taskContext: request.parentMilestoneId === undefined
+        ? { kind: "standalone" }
+        : { kind: "milestone", milestoneId: request.parentMilestoneId },
+      budget: {
+        budgetId: request.task.taskId,
+        maxSeconds: request.task.budget.maxSeconds,
+        maxCostUsd: request.task.budget.maxCostUsd,
+        maxInputTokens: request.task.budget.maxInputTokens,
+        maxOutputTokens: request.task.budget.maxOutputTokens,
+        maxToolCalls: 10_000,
+        maxModelTurns: 10_000,
+        maxActiveWorkers: 1,
+        maxConcurrentTools: 1,
+        maxConcurrentModelTurns: 1,
+      },
+      trace: {
+        traceId: request.correlationId ?? request.task.taskId,
+        correlationId: request.correlationId ?? request.task.taskId,
+      },
+    });
     try {
       capsule = await this.capsule.run({
         ...request,
@@ -158,6 +196,7 @@ export class OpenCodeSingleFileTracerBullet {
           },
           onLeaseCreated: ({ lease: createdLease, baseCommit }) => {
             observedWorkspace = createdLease.path;
+            workers.observe(request.task.taskId, workerId, workerEvents.resourceObservation("assigned_worktree", "completed"));
             this.tasks.append(request.task.taskId, "task.leased", {
               leaseOwner: request.model.id,
               workspace: createdLease.path,
@@ -165,17 +204,33 @@ export class OpenCodeSingleFileTracerBullet {
             void baseCommit;
           },
           onWriterStarted: ({ lease: writerLease }) => {
+            workers.start(request.task.taskId, workerId);
             this.tasks.append(request.task.taskId, "task.started", {
               workerId: request.model.id,
             }, null);
             void writerLease;
           },
           onWriterCompleted: (report) => {
+            workers.observe(request.task.taskId, workerId, workerEvents.processObservation(
+              "opencode", report.outcome,
+            ));
+            workers.cleanup(request.task.taskId, workerId, "completed");
+            workers.terminate(request.task.taskId, workerId, report.outcome);
             this.tasks.append(request.task.taskId, "task.writer_completed", writerSummary(report), null);
           },
         },
       });
     } catch (error) {
+      const worker = workers.inspect(request.task.taskId).workers[workerId];
+      if (worker !== undefined && worker.status !== "terminal" && worker.status !== "uncertain") {
+        if (error instanceof WorkspaceCreationUncertainError || error instanceof IntegrationBranchCreationUncertainError || this.current(request.task.taskId).lifecycle === "running") {
+          workers.uncertain(request.task.taskId, workerId, errorMessage(error));
+          workers.cleanup(request.task.taskId, workerId, "uncertain");
+        } else {
+          workers.cleanup(request.task.taskId, workerId, "completed");
+          workers.terminate(request.task.taskId, workerId, error instanceof WorkspaceGitTerminationError ? error.outcome : "failed");
+        }
+      }
       if (
         error instanceof WorkspaceCreationUncertainError ||
         error instanceof IntegrationBranchCreationUncertainError
@@ -823,6 +878,25 @@ function singleOwnedFile(task: PlannedTask, schedulerAdmitted: boolean): string 
     throw new Error("OpenCode single-file tracer requires one concrete owned file, scheduler admission for dependencies, and no retries");
   }
   return parsed.ownedPaths[0]!;
+}
+
+function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changedPath: string): void {
+  const task = PlannedTaskSchema.parse(request.task);
+  if (task.roleAssignment.role !== "implementer" || task.roleAssignment.harness !== "opencode" ||
+    task.roleAssignment.agentId !== request.model.id || task.risk.authority !== "workspace_write" ||
+    request.model.harness !== "opencode" || !request.model.roles.includes("implementer") ||
+    !request.model.toolPermissions.includes("read_repository") || !request.model.toolPermissions.includes("write_worktree") ||
+    request.model.toolPermissions.some((tool) => tool !== "read_repository" && tool !== "write_worktree") ||
+    request.model.network !== "denied" || request.model.contextTokens < task.budget.maxInputTokens + task.budget.maxOutputTokens ||
+    !request.security.allowedRepositories.includes(request.project.repositoryPath) ||
+    !request.security.allowedFileScopes.some((scope) => scope === changedPath || scope === "**" || (scope.endsWith("/**") && changedPath.startsWith(scope.slice(0, -3) + "/"))) ||
+    request.security.forbiddenPaths.some((scope) => scope === changedPath || (scope.endsWith("/**") && changedPath.startsWith(scope.slice(0, -3) + "/")))) {
+    throw new Error("OpenCode writer request is outside its exact durable admission");
+  }
+  if (!isVerifiedOpenCodeProbeReport(request.probe, {
+    modelId: request.model.id, model: request.model.model,
+    provider: request.model.model.replace(/\/.*/, ""), cwd: request.project.repositoryPath,
+  })) throw new Error("OpenCode single-file tracer requires a verified capability probe");
 }
 
 function assertSingleChange(result: WriterCapsuleResult, expectedPath: string): void {

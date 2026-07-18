@@ -214,11 +214,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       tracePath: trace, project, models: pausedModels, security, openCodeExecutable: executable, openCodeHome,
       signal: AbortSignal.timeout(20_000),
     });
-    expect(paused).toMatchObject({
-      lifecycle: "paused",
-      terminalOutcome: null,
-      attention: { reason: "plan_not_ready" },
-    });
+    expect(paused).toMatchObject({ lifecycle: "ready", terminalOutcome: null, attention: null });
+    expect(sqlite.readStream("installed-authority-pause").map((event) => event.type)).not.toContain("milestone.paused");
     sink.close();
     sqlite.close();
     const retained = Buffer.concat([readFileSync(database), readFileSync(trace)]).toString("utf8");

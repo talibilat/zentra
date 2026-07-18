@@ -246,7 +246,7 @@ describe("publishable CLI package", () => {
     expect(programmatic.stderr).toBe("");
     expect(JSON.parse(programmatic.stdout)).toEqual({ status: "paused", reason: "missing_authority" });
     expect(existsSync(programmaticDatabase)).toBe(true);
-    expect(readFileSync(programmaticTrace, "utf8")).toContain('"kind":"milestone.paused"');
+    expect(readFileSync(programmaticTrace, "utf8")).toBe("");
 
     const milestoneRoot = path.join(consumer, "installed-milestone");
     mkdirSync(milestoneRoot);
@@ -364,8 +364,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     ], consumer, harnessEnvironment);
     expect(pausedRun.code).toBe(1);
     expect(JSON.parse(pausedRun.stderr)).toMatchObject({
-      command: "milestone.run", lifecycle: "paused", outcome: null, tracePath: pauseTrace,
-      attention: { reason: "plan_not_ready" },
+      command: "milestone.run", lifecycle: "ready", outcome: null, tracePath: pauseTrace,
     });
 
     const failureDatabase = path.join(milestoneRoot, "provider-failure.sqlite");

@@ -32,6 +32,7 @@ import { canonicalValidationDigest } from "../../src/reviews/reviewer-adapter.js
 import type { ReviewDecision } from "../../src/reviews/reviewer-adapter.js";
 import { TaskService } from "../../src/tasks/task-service.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
+import { WorkerLifecycleService, capabilityEnvelope } from "../../src/workers/worker-lifecycle.js";
 import {
   GitClient,
   type CommandResult,
@@ -399,6 +400,28 @@ function replaceLastPayload(
 }
 
 describe("RecoveryService", () => {
+  it("retains generic worker uncertainty across restart and forbids effect redispatch", async () => {
+    const testFixture = await fixture();
+    const first = openSystem(testFixture);
+    createTask(first.tasks);
+    const workers = new WorkerLifecycleService(first.journal);
+    workers.bind({
+      schemaVersion: 1, workerId: "worker-uncertain", taskId: "task-9", rootTaskId: "task-9",
+      parentWorkerId: null, harness: "deterministic", role: "implementer", model: null,
+      envelope: capabilityEnvelope({ role: "implementer", authority: "workspace_write", capabilities: ["read_repository", "write_worktree"], network: "denied", secrets: "none", effects: { worktree: "assigned", pathExpansion: "none", integration: "none", release: "none", external: "none" }, resources: { repository: "assigned_worktree", paths: ["greeting.txt"], forbiddenPaths: [".env"] } }),
+      budget: { budgetId: "task-9", maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, maxToolCalls: 10, maxModelTurns: 10, maxActiveWorkers: 1, maxConcurrentTools: 1, maxConcurrentModelTurns: 1 },
+      taskContext: { kind: "standalone" }, trace: { traceId: "task-9", correlationId: "task-9" },
+    });
+    workers.start("task-9", "worker-uncertain");
+    workers.uncertain("task-9", "worker-uncertain", "process acknowledgement missing");
+    closeJournal(first.journal);
+
+    const restarted = openSystem(testFixture);
+    await expect(restarted.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "await_reconciliation",
+      reason: expect.stringContaining("redispatch is forbidden"),
+    });
+  });
   it("resumes safe preparation after task creation before worktree creation", async () => {
     const testFixture = await fixture();
     const first = openSystem(testFixture);

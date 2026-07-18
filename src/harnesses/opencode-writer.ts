@@ -5,6 +5,7 @@ import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
+import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
 
 export interface WriterTaskPacket {
   readonly brief: string;
@@ -97,6 +98,7 @@ export class OpenCodeWriter {
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
       },
     }, signal, "opencode_writer");
+    new OpenCodeWorkerEventAdapter().assertNoDelegation(result.events);
     return report(request, executable, cwd, argv, packet, result, startedAt);
   }
 }

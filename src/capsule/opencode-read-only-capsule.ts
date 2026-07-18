@@ -26,6 +26,7 @@ import {
   openCodeWorkerDockerfile,
 } from "./docker-capsule.js";
 import { DockerBrokerTransportUncertainError, DockerClient, DockerCommandCancelledError, DockerCommandTimeoutError } from "./docker-client.js";
+import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
 
 const SCRATCH_BYTES = 16 * 1024 * 1024;
 const MAX_TURNS = 32;
@@ -129,7 +130,17 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
           maxOutputTokens: remainingOutputTokens,
           maxCostUsd: remainingCostUsd,
         });
-        const receipt = ModelBrokerReceiptSchema.parse(await broker.execute(brokerRequest, exchangeSignal));
+        observe({ type: "model_started", modelId: request.transportModelId });
+        let receipt: ModelBrokerReceipt;
+        try {
+          receipt = ModelBrokerReceiptSchema.parse(await broker.execute(brokerRequest, exchangeSignal));
+        } catch (error) {
+          observe({
+            type: "model_completed", modelId: request.transportModelId, outcome: "failed",
+            usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 },
+          });
+          throw error;
+        }
         if (receipt.model !== null && receipt.model.id !== request.transportModelId) {
           throw new Error("model broker receipt identity mismatch");
         }
@@ -141,6 +152,19 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         if (inputTokens > request.budget.maxInputTokens || outputTokens > request.budget.maxOutputTokens || costUsd > request.budget.maxCostUsd) {
           throw new Error("OpenCode model budget exceeded");
         }
+        observe({
+          type: "model_completed",
+          modelId: request.transportModelId,
+          outcome: receipt.outcome === "completed" ? "completed" : receipt.outcome === "cancelled" ? "cancelled" : receipt.outcome === "timed_out" ? "timed_out" : "failed",
+          usage: {
+            seconds: 0,
+            inputTokens: receipt.usage?.inputTokens ?? 0,
+            outputTokens: receipt.usage?.outputTokens ?? 0,
+            costUsd: receipt.usage?.costUsd ?? 0,
+            toolCalls: 0,
+            modelTurns: 1,
+          },
+        });
         brokerState.receipt = receipt;
         if (receipt.outcome === "uncertain") {
           brokerTransport = "uncertain";
@@ -154,6 +178,7 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         };
       });
       const result = parseResult(run.stdout);
+      new OpenCodeWorkerEventAdapter().assertNoDelegation(parseJsonLines(result.stdout));
       outcome = run.exitCode === 0 && result.exitCode === 0 && brokerState.receipt?.outcome === "completed" ? "completed" : "failed";
       if (outcome === "completed") {
         evidence = [{
@@ -198,6 +223,14 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
       evidence,
       cleanup,
       brokerTransport,
+      usage: {
+        seconds: 0,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        toolCalls: 0,
+        modelTurns: turns,
+      },
     });
   }
 
@@ -238,6 +271,10 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
       containerId: containerRemoval.id, imageId: imageRemoval.id, containerAbsent, imageAbsent, repositoryViewAbsent,
     };
   }
+}
+
+function parseJsonLines(output: string): readonly unknown[] {
+  return output.split(/\r?\n/).filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as unknown);
 }
 
 function createRunnerAssets(request: OpenCodeReadOnlyCapsuleRequest): string {

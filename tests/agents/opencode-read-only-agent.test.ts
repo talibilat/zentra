@@ -17,6 +17,7 @@ import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
 
 const roots: string[] = [];
 
@@ -122,6 +123,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
           evidence: [{ kind: "plan", summary: receipt.response?.type === "text" ? receipt.response.text : "" }],
           cleanup: "completed",
           brokerTransport: "completed",
+          usage: { seconds: 1, inputTokens: 12, outputTokens: 14, costUsd: 0.01, toolCalls: 0, modelTurns: 1 },
         };
       }),
     };
@@ -151,6 +153,12 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       "milestone.agent_cleanup_observed",
       "milestone.task_completed",
     ]);
+    const worker = Object.values(projectWorkerLifecycle(journal.readAll()).workers)[0];
+    expect(worker).toMatchObject({
+      taskId: "plan-18", parentWorkerId: null, harness: "opencode", role: "planner",
+      status: "terminal", terminalOutcome: "completed", cleanup: "completed",
+      usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 },
+    });
     sink.close();
     const lines = (await import("node:fs")).readFileSync(path.join(root, "trace.jsonl"), "utf8")
       .trim().split("\n").map((line) => JSON.parse(line));
@@ -484,7 +492,10 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       });
       expect(result.outcome).toBe(expected);
       expect(result.trace).toEqual({ outcome: "not_configured" });
-      expect(new MilestoneRegistry(journal).inspect(`milestone-${capsuleOutcome}`)?.tasks["task-1"]?.terminalOutcome).toBe(expected);
+      expect(new MilestoneRegistry(journal).inspect(`milestone-${capsuleOutcome}`)?.tasks["task-1"]?.terminalOutcome).toBeNull();
+      expect(Object.values(projectWorkerLifecycle(journal.readAll()).workers)[0]).toMatchObject({
+        status: "uncertain", terminalOutcome: null, cleanup: "uncertain",
+      });
     } finally {
       journal.close();
     }
