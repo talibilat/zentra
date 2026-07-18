@@ -311,7 +311,7 @@ function createProgram(
 ): Command {
   const program = new Command()
     .name("zentra")
-    .description("Run the deterministic local Zentra MVP orchestrator.")
+    .description("Run bounded local software-development workflows with durable evidence.")
     .exitOverride()
     .configureOutput({ writeOut: stdout, writeErr: () => {} });
 
@@ -353,17 +353,17 @@ function createProgram(
       });
     });
 
-  const milestone = program.command("milestone").description("Plan and inspect milestones.");
+  const milestone = program.command("milestone").description("Run and inspect installed OpenCode workflows.");
   milestone
     .command("run")
-    .description("Run one installed OpenCode milestone from an explicitly bounded goal.")
+    .description("Run an authenticated host OpenCode writer with user-OS provider transport and brokered review.")
     .requiredOption("--goal <sentence>", "one natural-language goal; wording grants no authority")
     .requiredOption("--config <path>", "canonical project configuration file")
     .requiredOption("--database <path>", "canonical SQLite event journal path")
     .requiredOption("--model-sheet <path>", "canonical Markdown model sheet")
     .requiredOption("--security-sheet <path>", "canonical Markdown security sheet")
     .requiredOption("--provider <path>", "canonical fixed-endpoint provider configuration")
-    .requiredOption("--opencode <path>", "canonical OpenCode executable")
+    .requiredOption("--opencode <path>", "canonical host OpenCode executable; provider transport uses user OS network authority")
     .requiredOption("--opencode-home <path>", "canonical explicit OpenCode home for writer and probe")
     .requiredOption("--agent-tail-jsonl <path>", "canonical new Agent Tail JSONL trace path")
     .requiredOption("--file <path>", "one explicit security-authorized relative file")

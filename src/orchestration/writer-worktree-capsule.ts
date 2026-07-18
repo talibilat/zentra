@@ -209,7 +209,8 @@ function writerPacket(task: PlannedTask, security: SecuritySheet): WriterTaskPac
       validationAuthority: "zentra_named_validations_only",
       integrationAuthority: "none",
       shellAuthority: "none",
-      network: "denied",
+      modelToolNetwork: "denied",
+      harnessProviderTransport: "user_os_network_authority",
       parentSecretInheritance: "denied",
     }),
   });

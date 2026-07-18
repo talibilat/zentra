@@ -17,7 +17,8 @@ export interface WriterTaskPacket {
     readonly validationAuthority: "zentra_named_validations_only";
     readonly integrationAuthority: "none";
     readonly shellAuthority: "none";
-    readonly network: "denied";
+    readonly modelToolNetwork: "denied";
+    readonly harnessProviderTransport: "user_os_network_authority";
     readonly parentSecretInheritance: "denied";
   };
 }
@@ -42,6 +43,10 @@ export interface OpenCodeWriterReport {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly packetSha256: string;
+  readonly networkBoundary: {
+    readonly modelTools: "denied";
+    readonly harnessProviderTransport: "user_os_network_authority";
+  };
   readonly stdoutSha256: string;
   readonly stderrSha256: string;
   readonly stdout: string;
@@ -114,6 +119,10 @@ function report(
     argv: Object.freeze(redactedArgv(argv)),
     cwd,
     packetSha256: sha256(packet),
+    networkBoundary: Object.freeze({
+      modelTools: request.packet.securityBoundary.modelToolNetwork,
+      harnessProviderTransport: request.packet.securityBoundary.harnessProviderTransport,
+    }),
     stdoutSha256: sha256(result.rawStdout),
     stderrSha256: sha256(result.stderr),
     stdout: result.rawStdout,

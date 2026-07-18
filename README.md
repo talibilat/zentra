@@ -8,11 +8,18 @@ Zoe is a client of Zentra rather than part of this repository, and Zentra does n
 
 ## MVP Boundary
 
-The current MVP runs on one local machine for one user and executes one deterministic tracer-bullet task at a time against one configured Git project.
+The current MVP runs on one local machine for one user and executes one bounded software-development workflow at a time against one configured Git project.
 
-It uses a bundled deterministic worker fixture and an internally fixed deterministic reviewer subprocess to prove the orchestration contracts without exposing a general coding harness or shell interface.
+The `task run` command retains the bundled deterministic tracer bullet for local contract verification.
 
-Real coding harnesses, high concurrency, distributed execution, plugin APIs, and Zoe personal capabilities are explicitly not included yet.
+The `milestone run` command is the installed real-harness workflow: a brokered OpenRouter planner, an authenticated OpenCode writer in an isolated Git worktree, named validations, an independent brokered reviewer, and validated candidate integration.
+
+The planner and reviewer run OpenCode in short-lived Docker capsules with sanitized read-only repository views and model turns brokered by the host.
+
+The writer runs the exact operator-supplied OpenCode executable on the host with a dedicated explicit home and authority to edit only the configured owned file in its assigned worktree.
+Its model tools have no web or general network authority, but OpenCode's own provider transport uses the user's operating-system network authority and is not sandboxed in Trusted-Project mode.
+
+High concurrency, distributed execution, plugin APIs, and Zoe personal capabilities are not included.
 
 The MVP is evidence for the local orchestration path, not a production sandbox or a multi-tenant security boundary.
 
@@ -30,17 +37,29 @@ The package declares its supported operating system and CPU through npm `os` and
 npm rejects other targets with `EBADPLATFORM` before installing Zentra, rather than allowing an operator to reach operational commands with an untested process, filesystem, Git, SQLite, or native-addon stack.
 
 The repository is not currently published through npm or an automated release channel.
-The instructions below describe development from a source checkout.
-Local tarballs produced by `npm pack` are tested installation artifacts, but no supported release-download, upgrade, rollback, or provenance procedure exists yet.
+Local tarballs produced by `npm pack` are the tested installation artifacts, but no supported release-download, upgrade, rollback, or provenance procedure exists yet.
 
-Install dependencies and build the CLI from the repository root.
+Install dependencies, build, and verify the package from the repository root.
 
 ```bash
 pnpm install
 pnpm build
+pnpm package:verify
+pnpm package:contents
 ```
 
-Run the built CLI through the package script.
+Create a tarball and install it into a new consumer directory.
+
+```bash
+npm pack --pack-destination /absolute/path/to/artifacts
+mkdir /absolute/path/to/consumer
+cd /absolute/path/to/consumer
+npm init -y
+npm install /absolute/path/to/artifacts/zentra-0.1.0.tgz
+./node_modules/.bin/zentra --help
+```
+
+For source-checkout development, run the built CLI through the package script.
 
 ```bash
 pnpm start -- --help
@@ -115,6 +134,7 @@ pnpm start -- project validate --config /absolute/path/to/zentra.project.json
 ```
 
 Run the deterministic tracer bullet and return exit code `0` only when the terminal outcome is `completed`.
+This command is retained for local deterministic conformance and is separate from the installed OpenCode workflow.
 
 ```bash
 pnpm start -- task run \
@@ -254,6 +274,7 @@ zentra milestone run \
 
 Every path argument is explicit and canonical.
 The command does not resolve fixtures, source checkouts, package-development paths, alternate executables, provider URLs, or provider headers.
+Use the executable at `node_modules/.bin/zentra` from an installed tarball for package acceptance.
 The provider configuration is strict JSON:
 
 ```json
@@ -270,6 +291,9 @@ The credential is resolved only by the host broker and is not written to the jou
 Planner and reviewer model turns use this host broker.
 The host OpenCode writer remains a separate boundary and may use auth already configured inside the exact canonical `--opencode-home` directory.
 The writer and probe receive that directory as their minimal `HOME`; they do not inherit ambient `HOME`, arbitrary parent secrets, or the raw broker credential.
+Use a dedicated authenticated OpenCode home created for this workflow rather than a general interactive home containing unrelated configuration or credentials.
+The implementer model in `MODELS.md` must be a model identity understood by that OpenCode installation and authenticated home.
+The planner and reviewer model values must be exact OpenRouter transport model identities.
 Cancellation proven before POST dispatch is `cancelled`.
 After POST dispatch begins, transport rejection, timeout, or cancellation is `uncertain` because remote completion and usage are unknown, and it is never retried automatically.
 Redirects, malformed or oversized received responses, model drift, invalid tool arguments, disallowed tools, and budget excess are `failed`.
@@ -277,13 +301,18 @@ Redirects, malformed or oversized received responses, model drift, invalid tool 
 The fixed plan has exactly one planner, one implementer, and one independent reviewer selected from unambiguous approved model-sheet capabilities.
 Only the explicit `--file`, project validations, configured integration branch, security sheet, and model sheet grant authority.
 Goal wording cannot add files, tools, network destinations, credentials, commands, approval, integration targets, or release authority.
+The Model Sheet `network: denied` value and durable admission packet describe model tool and web-research authority.
+They do not claim that the host OpenCode process lacks provider transport or operating-system network access.
+Durable `task.writer_completed` evidence records this split as denied model tools and `user_os_network_authority` harness provider transport.
 The command always retains Agent Tail JSONL and streams the same JSONL on stdout while running.
 Its final compact replay-backed JSON is written to stderr and contains only the command, milestone and project identities, canonical terminal outcome, and trace path/outcome.
+Standard output bytes are the retained trace bytes, so consumers can validate JSONL incrementally and compare the completed stream byte-for-byte with `--agent-tail-jsonl`.
 Exit codes are `0` for `completed`, `1` for failed, nonterminal, or trace failure, `2` for `cancelled`, `3` for `denied`, and `4` for `timed_out`.
 The production CLI owns and closes both the trace sink and SQLite journal on every path.
 The package root does not export the CLI runtime, provider transport, broker implementation, credential-bearing Fetch seam, or capsule-construction seam.
-Packed tests invoke the actual installed binary and use an external test-only Node preload to intercept the fixed endpoint and capsule module; there is no product option for a provider URL, arbitrary headers, transport, or capsule.
-The real authenticated OpenRouter smoke test remains separately environment-gated under issue #35.
+Hermetic packed tests invoke the installed binary with test-only interception to exercise failure paths without provider traffic.
+The separate live package smoke test forbids preload, fetch, capsule, and OpenCode substitution and exercises the real fixed endpoint, Docker capsule, OpenCode executable, and authenticated OpenCode home.
+There is no product option for a provider URL, arbitrary headers, transport, or capsule implementation.
 
 Replay exact task status from the SQLite event journal and return exit code `0` only when the task exists and can be projected.
 
@@ -343,6 +372,9 @@ Using executable and argument arrays with `shell: false` prevents shell-string i
 This Trusted-Project MVP is intended only for projects that the operator controls and configures themselves.
 
 Hostile repositories, hostile or untrusted project configuration, hostile validation code, and multi-user operation are prohibited.
+
+Docker containment applies to the read-only planner and reviewer capsules, not to configured validations or the host OpenCode writer.
+Those host processes run with the same operating-system filesystem and network authority as the user, constrained by direct argument invocation, minimal environments, denied web and general network tools, OpenCode tool policy, exact file ownership checks, review, and disposable-candidate integration rather than by a host sandbox.
 
 Repository owner Md Talib explicitly accepted this Trusted-Project MVP authority model on 2026-07-12.
 
@@ -420,3 +452,33 @@ pnpm start -- --help
 ```
 
 The CLI integration tests create real temporary Git repositories and exercise deterministic task execution, caller-selected reviewer rejection, retained-patch byte limits, exact journal replay, recovery decisions, unsafe input rejection, stable JSON and exit codes, secret redaction, signal cancellation, and the built help entry point.
+
+Run the Docker-gated OpenCode capsule test when Docker Desktop and the approved OpenCode capsule prerequisites are available.
+
+```bash
+ZENTRA_OPENCODE_DOCKER_E2E=1 pnpm test -- tests/capsule/opencode-read-only-capsule.test.ts
+```
+
+Run the final installed-package smoke only with a real OpenRouter credential, a canonical OpenCode executable, a dedicated canonical authenticated OpenCode home, operator-attested executable identity, and explicit models for all three roles.
+
+```bash
+ZENTRA_LIVE_OPENCODE_E2E=1 \
+ZENTRA_LIVE_OPENROUTER_KEY='<redacted>' \
+ZENTRA_LIVE_OPENCODE_EXECUTABLE=/canonical/path/to/opencode \
+ZENTRA_LIVE_OPENCODE_HOME=/canonical/path/to/dedicated-opencode-home \
+ZENTRA_LIVE_OPENCODE_SHA256='<redacted-lowercase-sha256>' \
+ZENTRA_LIVE_OPENCODE_VERSION='<redacted-exact-version-line>' \
+ZENTRA_LIVE_PLANNER_MODEL=provider/planner-model \
+ZENTRA_LIVE_IMPLEMENTER_MODEL=opencode-provider/implementer-model \
+ZENTRA_LIVE_REVIEWER_MODEL=provider/reviewer-model \
+pnpm test -- tests/package/installed-milestone-live.e2e.test.ts
+```
+
+`ZENTRA_LIVE_OPENCODE_SHA256` is the expected lowercase SHA-256 of the exact canonical executable, and `ZENTRA_LIVE_OPENCODE_VERSION` is the exact single-line identifier produced by `opencode --version` after trimming its line ending.
+These values are operator-provided identity evidence and are shown redacted here; matching them proves consistency with the operator's expectation, not a vendor signature, notarization, or supply-chain provenance claim.
+Before creating the package or any project, Git, Docker, or provider effect, the test computes the executable digest and runs bounded `--version` with the dedicated home, failing on any mismatch without printing the configured values.
+It repeats the same operator-identity check immediately before invoking the installed workflow; Zentra's production probe then measures the executable used at runtime, and the writer rejects an executable change after that probe.
+The test performs no OpenCode, capsule, fetch, preload, provider endpoint, or executable substitution.
+The live test then packs Zentra, installs it into an empty consumer, invokes the installed binary, validates a concurrently nonterminal SQLite milestone snapshot when live stdout JSONL first arrives, compares stdout with the retained trace byte-for-byte, replays terminal status, verifies only the owned file reached the integration branch, proves ticket and candidate worktrees and branches were removed, scans retained evidence for credential and source-checkout leakage, and confirms all recorded capsule resources are absent.
+When `ZENTRA_LIVE_OPENCODE_E2E` is unset, the test reports a gated skip that does not satisfy final live acceptance.
+When the gate is `1`, every prerequisite is mandatory and a missing or invalid value fails the test rather than skipping.
