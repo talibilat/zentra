@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { OpenCodeTaskAdmissionContext } from "../../src/contracts/authority-attention.js";
@@ -14,6 +17,10 @@ import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-wri
 import { WriterResourceGovernor } from "../../src/orchestration/writer-resource-governor.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+import { RoleCapabilityEnvelopeService, buildRoleCapabilityBinding } from "../../src/workers/role-capability-envelope.js";
+import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../../src/contracts/capability-boundary.js";
+import { TaskService } from "../../src/tasks/task-service.js";
+import { WorkerLifecycleService } from "../../src/workers/worker-lifecycle.js";
 
 describe("MultiWriterOwnershipScheduler", () => {
   it("runs a deterministic non-overlapping wave concurrently and holds review behind the writer barrier", async () => {
@@ -146,6 +153,236 @@ describe("MultiWriterOwnershipScheduler", () => {
       journal.close();
     }
   });
+
+  it("retains a claimed writer and does not redispatch after post-worker capability replanning", async () => {
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const request = singleWriterSchedule(plan);
+    const { journal, registry } = claimedRegistry(plan, request, false);
+    let executions = 0;
+    try {
+      const execution = {
+        run: async () => {
+          executions += 1;
+          const milestone = registry.inspect(plan.milestoneId)!;
+          const scheduled = request.tasks[0]!;
+          const task = plan.tasks.find((candidate) => candidate.taskId === "writer-a")!;
+          const configured = scheduled.execution as any;
+          const model = configured.model;
+          const binding = buildRoleCapabilityBinding({
+            milestoneId: plan.milestoneId, taskId: task.taskId, projectId: plan.projectId,
+            correlationId: milestone.traceId, role: "implementer", actorId: model.id,
+            repository: configured.project.repositoryPath,
+            planDigest: digestCanonical(plan), securityDigest: digestCanonical(request.security),
+            model: { capabilityId: model.id, transportModelId: model.model, digest: digestCanonical(model), harness: model.harness, roles: model.roles, toolPermissions: model.toolPermissions, network: model.network },
+            budget: task.budget, admissionDigest: milestone.tasks[task.taskId]!.admissionDigest!,
+            configuredReadPaths: request.security.allowedFileScopes, ownedPaths: task.ownedPaths,
+            forbiddenPaths: [...new Set([...task.forbiddenPaths, ...request.security.forbiddenPaths])],
+          });
+          const policy = new RoleCapabilityEnvelopeService(journal);
+          policy.accept(binding);
+          const decision = policy.evaluate(binding, { kind: "write", path: "outside.ts" });
+          const evidence = { workspace: "/retained/worktree", ownership: { outcome: "rejected" } };
+          const workers = new WorkerLifecycleService(journal);
+          workers.bind({ schemaVersion: 1, workerId: "writer-worker", taskId: task.taskId, rootTaskId: task.taskId,
+            parentWorkerId: null, harness: "opencode", role: "implementer",
+            model: { capabilityId: model.id, modelId: model.model }, envelope: binding.envelope,
+            budget: { budgetId: task.taskId, maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000, maxToolCalls: 10, maxModelTurns: 10, maxActiveWorkers: 1, maxConcurrentTools: 1, maxConcurrentModelTurns: 1 },
+            taskContext: { kind: "milestone", milestoneId: plan.milestoneId }, trace: { traceId: milestone.traceId, correlationId: milestone.traceId } });
+          workers.start(task.taskId, "writer-worker"); workers.cleanup(task.taskId, "writer-worker", "completed"); workers.terminate(task.taskId, "writer-worker", "completed");
+          const tasks = new TaskService(journal);
+          tasks.create({ taskId: task.taskId, projectId: plan.projectId, title: task.title, correlationId: milestone.traceId });
+          const occurrence = createCapabilityBoundaryOccurrence({ binding, decision,
+            evaluationEvent: policy.evaluationEvent(binding, decision.decisionId), phase: "post_worker",
+            workerSettlement: { workerId: "writer-worker", cleanup: "completed", terminalOutcome: "completed" }, evidence,
+            taskHead: capabilityTaskHead(tasks.readStream(task.taskId)) });
+          registry.pauseForCapabilityBoundary(plan.milestoneId, occurrence, evidence);
+          return tasks.get(task.taskId)!;
+        },
+      };
+      const scheduler = new MultiWriterOwnershipScheduler(registry, execution);
+      const first = await scheduler.run(request);
+      expect(first).toMatchObject({ lifecycle: "paused", terminalOutcome: null,
+        capabilityBoundary: { status: "replan", phase: "post_worker" },
+        writerOwnership: { "writer-a": { status: "claimed" } },
+      });
+      await scheduler.run(request);
+      expect(executions).toBe(1);
+      expect(registry.inspect(plan.milestoneId)?.writerOwnership["writer-a"]?.status).toBe("claimed");
+    } finally { journal.close(); }
+  });
+
+  it("repairs milestone-first pause and resolution crashes after SQLite reopen without redispatch", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "zentra-capability-crash-"));
+    const database = path.join(root, "journal.sqlite");
+    const plan = planWithPaths("src/a.ts", "src/b.ts");
+    const request = singleWriterSchedule(plan);
+    try {
+      const first = claimedRegistry(plan, request, true, database);
+      const prepared = preparePostWorkerPause(first.journal, first.registry, plan, request);
+      expect(() => first.registry.pauseForCapabilityBoundary(plan.milestoneId, prepared.occurrence, prepared.evidence, {
+        afterMilestoneAppend: () => { throw new Error("crash after authoritative milestone pause"); },
+      })).toThrow("crash after authoritative milestone pause");
+      expect(first.journal.readStream(plan.milestoneId).at(-1)?.type).toBe("milestone.capability_boundary_paused");
+      expect(first.journal.readStream("writer-a").some((event) => event.type === "task.capability_boundary_paused")).toBe(false);
+      first.journal.close();
+
+      const secondJournal = new SqliteEventJournal(database);
+      const second = new MilestoneRegistry(secondJournal);
+      const paused = second.inspect(plan.milestoneId)!;
+      expect(paused).toMatchObject({ lifecycle: "paused", terminalOutcome: null,
+        capabilityBoundary: { status: "replan" }, writerOwnership: { "writer-a": { status: "claimed" } } });
+      expect(new TaskService(secondJournal).get("writer-a")).toMatchObject({ paused: true, terminalOutcome: null });
+      let executions = 0;
+      await new MultiWriterOwnershipScheduler(second, { run: async () => { executions += 1; return completedTask("writer-a"); } }).run(request);
+      expect(executions).toBe(0);
+
+      const pause = second.inspect(plan.milestoneId)!;
+      expect(() => second.resolveCapabilityBoundary({
+        milestoneId: plan.milestoneId,
+        attentionId: pause.capabilityBoundary!.attentionId,
+        decisionId: pause.capabilityBoundary!.decisionId,
+        pauseEventId: pause.capabilityBoundaryPauseOccurrence!.eventId,
+        pauseStreamVersion: pause.capabilityBoundaryPauseOccurrence!.streamVersion,
+        action: "supersede_for_replan",
+        decidedBy: "operator-1",
+        afterMilestoneAppend: () => { throw new Error("crash after authoritative milestone resolution"); },
+      })).toThrow("crash after authoritative milestone resolution");
+      expect(secondJournal.readStream(plan.milestoneId).at(-1)?.type).toBe("milestone.capability_boundary_resolved");
+      expect(secondJournal.readStream("writer-a").some((event) => event.type === "task.capability_boundary_resolved")).toBe(false);
+      secondJournal.close();
+
+      const thirdJournal = new SqliteEventJournal(database);
+      const third = new MilestoneRegistry(thirdJournal);
+      expect(third.inspect(plan.milestoneId)).toMatchObject({ lifecycle: "ready", terminalOutcome: null,
+        capabilityResolution: { action: "supersede_for_replan" },
+        tasks: { "writer-a": { status: "superseded" } }, writerOwnership: { "writer-a": { status: "claimed" } } });
+      expect(new TaskService(thirdJournal).get("writer-a")).toMatchObject({ paused: false, superseded: true,
+        capabilityResolution: { action: "supersede_for_replan" }, terminalOutcome: null });
+      expect(thirdJournal.readAll().find((event) => event.type === "milestone.capability_boundary_resolved")!.globalPosition)
+        .toBeLessThan(thirdJournal.readAll().find((event) => event.type === "task.capability_boundary_resolved")!.globalPosition);
+      await new MultiWriterOwnershipScheduler(third, { run: async () => { executions += 1; return completedTask("writer-a"); } }).run(request);
+      expect(executions).toBe(0);
+      const resolvedMilestone = third.inspect(plan.milestoneId)!;
+      const resolutionEvent = thirdJournal.readStream(plan.milestoneId).find((event) => event.type === "milestone.capability_boundary_resolved")!;
+      const replacementId = "writer-a-replanned";
+      const candidatePlan = {
+        ...plan,
+        tasks: plan.tasks.map((task) => task.taskId === "writer-a"
+          ? { ...task, taskId: replacementId, dependencies: [], budget: { maxSeconds: 1, maxRetries: 0, maxCostUsd: 0, maxInputTokens: 1, maxOutputTokens: 1 } }
+          : { ...task, dependencies: task.dependencies.map((dependency) => dependency === "writer-a" ? replacementId : dependency), budget: { maxSeconds: 1, maxRetries: 0, maxCostUsd: 0, maxInputTokens: 1, maxOutputTokens: 1 } }),
+      };
+      const revision = third.revisePlan({
+        revisionId: "capability-replan-1", milestoneId: plan.milestoneId,
+        priorPlanDigest: digestCanonical(resolvedMilestone.plan), candidatePlan,
+        security: request.security, modelSheet: request.modelSheet, requestedBy: "operator-1",
+        evidence: [{ streamId: plan.milestoneId, eventId: resolutionEvent.eventId, streamVersion: resolutionEvent.streamVersion,
+          eventType: resolutionEvent.type, payloadDigest: digestCanonical(resolutionEvent.payload) }],
+        linkedTaskStreamIds: [], supersessions: [{ priorTaskId: "writer-a", replacementTaskId: replacementId }],
+      });
+      expect(revision).toMatchObject({ status: "accepted", revision: { supersessions: [{ priorTaskId: "writer-a", replacementTaskId: replacementId }] },
+        milestone: { tasks: { [replacementId]: { status: "planned" } } } });
+      thirdJournal.close();
+
+      const abandon = claimedRegistry(plan, request, true, path.join(root, "abandon.sqlite"));
+      const abandonPrepared = preparePostWorkerPause(abandon.journal, abandon.registry, plan, request);
+      const abandonedPause = abandon.registry.pauseForCapabilityBoundary(plan.milestoneId, abandonPrepared.occurrence, abandonPrepared.evidence);
+      const abandoned = abandon.registry.resolveCapabilityBoundary({
+        milestoneId: plan.milestoneId,
+        attentionId: abandonedPause.capabilityBoundary!.attentionId,
+        decisionId: abandonedPause.capabilityBoundary!.decisionId,
+        pauseEventId: abandonedPause.capabilityBoundaryPauseOccurrence!.eventId,
+        pauseStreamVersion: abandonedPause.capabilityBoundaryPauseOccurrence!.streamVersion,
+        action: "abandon_request",
+        decidedBy: "operator-1",
+      });
+      expect(abandoned).toMatchObject({ lifecycle: "running", terminalOutcome: null,
+        capabilityResolution: { action: "abandon_request" }, tasks: { "writer-a": { status: "running" } } });
+      expect(new TaskService(abandon.journal).get("writer-a")).toMatchObject({ paused: false, superseded: false,
+        capabilityResolution: { action: "abandon_request" }, lifecycle: "queued", terminalOutcome: null });
+      abandon.journal.close();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["cancelled", "advanced"] as const)(
+    "resolves a %s task-head race between capability precheck and milestone append without a task pause",
+    async (race) => {
+      const root = mkdtempSync(path.join(tmpdir(), `zentra-capability-${race}-race-`));
+      const database = path.join(root, "journal.sqlite");
+      const plan = planWithPaths("src/a.ts", "src/b.ts");
+      const request = singleWriterSchedule(plan);
+      try {
+        const first = claimedRegistry(plan, request, true, database);
+        const prepared = preparePostWorkerPause(first.journal, first.registry, plan, request);
+        const second = new SqliteEventJournal(database);
+        const result = first.registry.pauseForCapabilityBoundary(plan.milestoneId, prepared.occurrence, prepared.evidence, {
+          beforeMilestoneAppend: () => {
+            const tasks = new TaskService(second);
+            if (race === "cancelled") tasks.append("writer-a", "task.cancelled", { reason: "operator cancellation won race" }, null);
+            else tasks.append("writer-a", "task.leased", { leaseOwner: "competing-worker" }, null);
+          },
+        });
+        expect(result).toMatchObject({
+          lifecycle: race === "cancelled" ? "ready" : "running",
+          terminalOutcome: null,
+          capabilityBoundary: null,
+          capabilityResolution: { action: "stale_task_state", competingTaskHead: { eventType: race === "cancelled" ? "task.cancelled" : "task.leased" } },
+          tasks: { "writer-a": race === "cancelled"
+            ? { status: "completed", terminalOutcome: "cancelled" }
+            : { status: "running", terminalOutcome: null } },
+        });
+        expect(first.journal.readStream("writer-a").some((event) => event.type === "task.capability_boundary_paused")).toBe(false);
+        expect(first.journal.readStream(plan.milestoneId).map((event) => event.type).slice(-2)).toEqual([
+          "milestone.capability_boundary_paused", "milestone.capability_boundary_resolved",
+        ]);
+        second.close(); first.journal.close();
+
+        const reopenedJournal = new SqliteEventJournal(database);
+        const reopened = new MilestoneRegistry(reopenedJournal);
+        const before = reopenedJournal.readAll().length;
+        expect(reopened.list()).toEqual(expect.arrayContaining([expect.objectContaining({ milestoneId: plan.milestoneId, lifecycle: race === "cancelled" ? "ready" : "running" })]));
+        expect(reopened.inspect(plan.milestoneId)?.capabilityResolution).toMatchObject({ action: "stale_task_state" });
+        expect(reopenedJournal.readAll()).toHaveLength(before);
+        let executions = 0;
+        await new MultiWriterOwnershipScheduler(reopened, { run: async () => { executions += 1; return completedTask("writer-a"); } }).run(request);
+        expect(executions).toBe(0);
+        reopenedJournal.close();
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    },
+  );
+
+  it.each(["cancelled", "leased"] as const)(
+    "derives the exact %s lifecycle when a competing transition lands before task-head capture",
+    (race) => {
+      const root = mkdtempSync(path.join(tmpdir(), `zentra-capability-before-${race}-`));
+      const database = path.join(root, "journal.sqlite");
+      const plan = planWithPaths("src/a.ts", "src/b.ts");
+      const request = singleWriterSchedule(plan);
+      try {
+        const first = claimedRegistry(plan, request, true, database);
+        const second = new SqliteEventJournal(database);
+        const prepared = preparePostWorkerPause(first.journal, first.registry, plan, request, () => {
+          const tasks = new TaskService(second);
+          if (race === "cancelled") tasks.append("writer-a", "task.cancelled", { reason: "cancelled before capture" }, null);
+          else tasks.append("writer-a", "task.leased", { leaseOwner: "competing-worker" }, null);
+        });
+        expect(prepared.occurrence.taskHead).toMatchObject({
+          eventType: race === "cancelled" ? "task.cancelled" : "task.leased",
+          lifecycle: race === "cancelled" ? "terminal" : "leased",
+          terminalOutcome: race === "cancelled" ? "cancelled" : null,
+        });
+        const result = first.registry.pauseForCapabilityBoundary(plan.milestoneId, prepared.occurrence, prepared.evidence);
+        if (race === "cancelled") {
+          expect(result).toMatchObject({ lifecycle: "ready", capabilityBoundary: null,
+            capabilityResolution: { action: "stale_task_state", competingTaskHead: { lifecycle: "terminal", terminalOutcome: "cancelled" } } });
+          expect(first.journal.readStream("writer-a").some((event) => event.type === "task.capability_boundary_paused")).toBe(false);
+        } else {
+          expect(result).toMatchObject({ lifecycle: "paused", capabilityBoundary: { taskHead: { lifecycle: "leased", terminalOutcome: null } } });
+          expect(new TaskService(first.journal).get("writer-a")).toMatchObject({ lifecycle: "leased", paused: true });
+        }
+        second.close(); first.journal.close();
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    },
+  );
 
   it("retains ownership and never retries a nonterminal uncertain writer stream", async () => {
     const plan = planWithPaths("src/a.ts", "src/b.ts");
@@ -664,8 +901,8 @@ function singleWriterSchedule(plan: MilestonePlan) {
   return { ...request, tasks: [request.tasks[0]!] };
 }
 
-function claimedRegistry(plan: MilestonePlan, request: ReturnType<typeof singleWriterSchedule>, start: boolean) {
-  const journal = new SqliteEventJournal(":memory:");
+function claimedRegistry(plan: MilestonePlan, request: ReturnType<typeof singleWriterSchedule>, start: boolean, database = ":memory:") {
+  const journal = new SqliteEventJournal(database);
   const registry = new MilestoneRegistry(journal);
   registry.register({
     milestoneId: plan.milestoneId,
@@ -702,6 +939,49 @@ function claimedRegistry(plan: MilestonePlan, request: ReturnType<typeof singleW
   });
   if (start) registry.startTask(plan.milestoneId, writer.taskId, writer.roleAssignment.agentId, "implementer");
   return { journal, registry };
+}
+
+function preparePostWorkerPause(
+  journal: SqliteEventJournal,
+  registry: MilestoneRegistry,
+  plan: MilestonePlan,
+  request: ReturnType<typeof singleWriterSchedule>,
+  beforeCapture?: () => void,
+) {
+  const milestone = registry.inspect(plan.milestoneId)!;
+  const scheduled = request.tasks[0]!;
+  const configured = scheduled.execution as any;
+  const task = plan.tasks.find((candidate) => candidate.taskId === "writer-a")!;
+  const model = configured.model;
+  const binding = buildRoleCapabilityBinding({
+    milestoneId: plan.milestoneId, taskId: task.taskId, projectId: plan.projectId,
+    correlationId: milestone.traceId, role: "implementer", actorId: model.id,
+    repository: configured.project.repositoryPath,
+    planDigest: digestCanonical(plan), securityDigest: digestCanonical(request.security),
+    model: { capabilityId: model.id, transportModelId: model.model, digest: digestCanonical(model), harness: model.harness, roles: model.roles, toolPermissions: model.toolPermissions, network: model.network },
+    budget: task.budget, admissionDigest: milestone.tasks[task.taskId]!.admissionDigest!,
+    configuredReadPaths: request.security.allowedFileScopes, ownedPaths: task.ownedPaths,
+    forbiddenPaths: [...new Set([...task.forbiddenPaths, ...request.security.forbiddenPaths])],
+  });
+  const policy = new RoleCapabilityEnvelopeService(journal);
+  policy.accept(binding);
+  const decision = policy.evaluate(binding, { kind: "write", path: "outside.ts" });
+  const evidence = { workspace: "/retained/worktree", ownership: { outcome: "rejected" } };
+  const workers = new WorkerLifecycleService(journal);
+  workers.bind({ schemaVersion: 1, workerId: "writer-worker", taskId: task.taskId, rootTaskId: task.taskId,
+    parentWorkerId: null, harness: "opencode", role: "implementer",
+    model: { capabilityId: model.id, modelId: model.model }, envelope: binding.envelope,
+    budget: { budgetId: task.taskId, maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000, maxToolCalls: 10, maxModelTurns: 10, maxActiveWorkers: 1, maxConcurrentTools: 1, maxConcurrentModelTurns: 1 },
+    taskContext: { kind: "milestone", milestoneId: plan.milestoneId }, trace: { traceId: milestone.traceId, correlationId: milestone.traceId } });
+  workers.start(task.taskId, "writer-worker"); workers.cleanup(task.taskId, "writer-worker", "completed"); workers.terminate(task.taskId, "writer-worker", "completed");
+  const tasks = new TaskService(journal);
+  tasks.create({ taskId: task.taskId, projectId: plan.projectId, title: task.title, correlationId: milestone.traceId });
+  beforeCapture?.();
+  const occurrence = createCapabilityBoundaryOccurrence({ binding, decision,
+    evaluationEvent: policy.evaluationEvent(binding, decision.decisionId), phase: "post_worker",
+    workerSettlement: { workerId: "writer-worker", cleanup: "completed", terminalOutcome: "completed" }, evidence,
+    taskHead: capabilityTaskHead(tasks.readStream(task.taskId)) });
+  return { occurrence, evidence };
 }
 
 function appendCompletedWriterStream(journal: SqliteEventJournal, taskId: string, reviewerId: string): void {

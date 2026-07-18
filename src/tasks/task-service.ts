@@ -15,6 +15,7 @@ import {
   UncertainEffectPayloadSchema,
   type UncertainEffectPayload,
 } from "../contracts/uncertain-effect.js";
+import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, verifyCapabilityPauseSource, verifyCapabilityResolutionSource } from "../contracts/capability-boundary.js";
 
 export class TaskService {
   constructor(private readonly journal: EventJournal) {}
@@ -99,7 +100,9 @@ export class TaskService {
 
   get(taskId: string): TaskView | null {
     const events = this.journal.readStream(taskId);
-    return projectTask(events);
+    const view = projectTask(events);
+    this.verifyCapabilityBoundaries(events);
+    return view;
   }
 
   readStream(taskId: string): readonly StoredEvent[] {
@@ -108,6 +111,20 @@ export class TaskService {
 
   eventJournal(): EventJournal {
     return this.journal;
+  }
+
+  pauseForCapabilityBoundary(taskId: string, payload: unknown, causationId: string | null = null): TaskView {
+    const parsed = CapabilityBoundaryPausedPayloadSchema.parse(payload);
+    const source = verifyCapabilityPauseSource(this.journal, parsed.occurrence);
+    if (causationId !== source.eventId) throw new Error("task capability pause causation must match its authoritative milestone source");
+    return this.append(taskId, "task.capability_boundary_paused", parsed, causationId);
+  }
+
+  resolveCapabilityBoundary(taskId: string, payload: unknown, causationId: string | null = null): TaskView {
+    const parsed = CapabilityBoundaryResolvedPayloadSchema.parse(payload);
+    const source = verifyCapabilityResolutionSource(this.journal, parsed.resolution);
+    if (causationId !== source.eventId) throw new Error("task capability resolution causation must match its authoritative milestone source");
+    return this.append(taskId, "task.capability_boundary_resolved", parsed, causationId);
   }
 
   pauseForUncertainEffect(
@@ -134,6 +151,20 @@ export class TaskService {
       EffectReconciliationPayloadSchema.parse(payload),
       causationId,
     );
+  }
+
+
+  private verifyCapabilityBoundaries(events: readonly StoredEvent[]): void {
+    for (const event of events) {
+      if (event.type !== "task.capability_boundary_paused") continue;
+      const source = verifyCapabilityPauseSource(this.journal, CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence);
+      if (event.causationId !== source.eventId) throw new Error("task capability pause causation contradicts its authoritative milestone source");
+    }
+    for (const event of events) {
+      if (event.type !== "task.capability_boundary_resolved") continue;
+      const source = verifyCapabilityResolutionSource(this.journal, CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution);
+      if (event.causationId !== source.eventId) throw new Error("task capability resolution causation contradicts its authoritative milestone source");
+    }
   }
 }
 

@@ -16,6 +16,7 @@ import {
   type UncertainEffectPayload,
 } from "../contracts/uncertain-effect.js";
 import type { StopAndAskState } from "../contracts/milestone.js";
+import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
 
 export interface TaskView {
   readonly taskId: string;
@@ -28,6 +29,9 @@ export interface TaskView {
   readonly paused: boolean;
   readonly stopAndAsk: StopAndAskState | null;
   readonly uncertainEffect: UncertainEffectPayload | null;
+  readonly capabilityBoundary?: CapabilityBoundaryOccurrence | null;
+  readonly capabilityResolution?: CapabilityBoundaryResolution | null;
+  readonly superseded?: boolean;
 }
 
 type TaskProjectionState = {
@@ -41,6 +45,9 @@ type TaskProjectionState = {
   paused: boolean;
   stopAndAsk: StopAndAskState | null;
   uncertainEffect: UncertainEffectPayload | null;
+  capabilityBoundary: CapabilityBoundaryOccurrence | null;
+  capabilityResolution: CapabilityBoundaryResolution | null;
+  superseded: boolean;
 };
 
 const VALID_TRANSITIONS: Record<TaskLifecycleState, readonly string[]> = {
@@ -155,6 +162,9 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     paused: false,
     stopAndAsk: null,
     uncertainEffect: null,
+    capabilityBoundary: null,
+    capabilityResolution: null,
+    superseded: false,
   };
   const singleOccurrenceEvents = new Set<string>();
   let integrationPrepared = false;
@@ -180,7 +190,8 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     }
     if (
       state.paused &&
-      event.type !== "task.effect_reconciled"
+      event.type !== "task.effect_reconciled" &&
+      event.type !== "task.capability_boundary_resolved"
     ) {
       throw new Error("task is paused pending explicit reconciliation");
     }
@@ -189,6 +200,33 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
       isArtifactRecordedEventType(event.type) ||
       event.type === ARTIFACT_PROTOCOL_MARKER_EVENT_TYPE
     ) {
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+
+    if (event.type === "task.capability_boundary_paused") {
+      const occurrence = CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence;
+      if (occurrence.taskId !== state.taskId || occurrence.projectId !== state.projectId || state.capabilityBoundary !== null) {
+        throw new Error("task capability boundary binding is invalid");
+      }
+      if (occurrence.priorTaskLifecycle !== state.lifecycle) throw new Error("task capability boundary prior lifecycle is invalid");
+      state.paused = true;
+      state.capabilityBoundary = occurrence;
+      state.streamVersion = event.streamVersion;
+      continue;
+    }
+    if (event.type === "task.capability_boundary_resolved") {
+      const resolution = CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution;
+      if (state.capabilityBoundary === null || resolution.attentionId !== state.capabilityBoundary.attentionId ||
+        resolution.bindingDigest !== state.capabilityBoundary.bindingDigest || resolution.decisionId !== state.capabilityBoundary.decisionId ||
+        resolution.taskId !== state.taskId || resolution.projectId !== state.projectId || resolution.milestoneId !== state.capabilityBoundary.milestoneId) {
+        throw new Error("task capability boundary resolution is invalid");
+      }
+      if (resolution.action === "stale_task_state") throw new Error("stale task state is resolved only by the authoritative milestone");
+      state.paused = false;
+      state.capabilityResolution = resolution;
+      state.capabilityBoundary = null;
+      state.superseded = resolution.action === "supersede_for_replan";
       state.streamVersion = event.streamVersion;
       continue;
     }

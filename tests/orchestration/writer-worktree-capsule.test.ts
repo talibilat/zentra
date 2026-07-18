@@ -86,6 +86,7 @@ describe("WriterWorktreeCapsule", () => {
         modelToolNetwork: "denied",
         harnessProviderTransport: "user_os_network_authority",
         parentSecretInheritance: "denied",
+        runtimeIsolation: "trusted_project_policy_not_os_sandbox",
       },
     });
     expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");

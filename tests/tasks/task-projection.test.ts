@@ -79,6 +79,9 @@ describe("projectTask", () => {
       paused: false,
       stopAndAsk: null,
       uncertainEffect: null,
+      capabilityBoundary: null,
+      capabilityResolution: null,
+      superseded: false,
     });
   });
 
@@ -575,6 +578,9 @@ describe("TaskService", () => {
       paused: false,
       stopAndAsk: null,
       uncertainEffect: null,
+      capabilityBoundary: null,
+      capabilityResolution: null,
+      superseded: false,
     });
   });
 

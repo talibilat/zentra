@@ -53,7 +53,7 @@ export class OpenCodeReadOnlyProgram {
     this.projected = journal instanceof ProjectingEventJournal
       ? journal
       : new ProjectingEventJournal(journal, agentTailSink);
-    this.agent = new OpenCodeReadOnlyAgent(this.projected, capsule, broker, models);
+    this.agent = new OpenCodeReadOnlyAgent(this.projected, capsule, broker, models, security);
   }
 
   async reconcile(request: {

@@ -6,7 +6,9 @@ import { parseRoutingEventPayload } from "../routing/routing-events.js";
 import { MilestoneAuthorityEnvelopePayloadSchema, PlanRevisionPayloadSchema, ReplanningPausedPayloadSchema, ReplanningPolicyBoundPayloadSchema, ReplanningResolutionPayloadSchema } from "../contracts/replanning.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { parseReleaseEventPayload, ReleaseMilestoneTaskCompletedPayloadSchema } from "../release/release-events.js";
-import { parseWorkerEventPayload } from "../workers/worker-lifecycle.js";
+import { envelopeReadPaths, envelopeWritePaths, parseWorkerEventPayload, type WorkerBinding } from "../workers/worker-lifecycle.js";
+import { parseRoleCapabilityEventPayload } from "../workers/role-capability-envelope.js";
+import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema } from "../contracts/capability-boundary.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -64,7 +66,11 @@ export function storedEventsToAgentTailEvents(
 
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
   assertAgentTailCompatibleEvent(event);
-  const payload = event.type === "milestone.paused"
+  const payload = event.type === "milestone.capability_boundary_resolved" || event.type === "task.capability_boundary_resolved"
+    ? CapabilityBoundaryResolvedPayloadSchema.parse(event.payload)
+    : event.type === "milestone.capability_boundary_paused" || event.type === "task.capability_boundary_paused"
+    ? redactedCapabilityBoundaryPayload(event.payload)
+    : event.type === "milestone.paused"
     ? parseMilestonePausedPayload(event.payload)
     : event.type === "milestone.plan_revised"
       ? redactedRevisionPayload(event.payload)
@@ -82,8 +88,10 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
       ? parseRoutingEventPayload(event.type, event.payload)
+    : event.type.startsWith("capability_envelope.")
+      ? redactedRoleCapabilityPayload(event.type, event.payload)
     : event.type.startsWith("worker.")
-      ? parseWorkerEventPayload(event.type, event.payload)
+      ? redactedWorkerPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
       ? parseOpenCodeMilestonePayload(event.type, event.payload)
       : event.payload;
@@ -150,6 +158,7 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("capability_envelope.")) return `capability-envelope:${event.streamId}`;
   if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
@@ -177,6 +186,8 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
+  if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
   if (event.type.startsWith("worker.")) {
     return { id: payloadString(event.payload, "workerId")!, role: payloadString(event.payload, "role")! };
   }
@@ -268,6 +279,8 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type.includes("capability_boundary_")) return "capability_boundary";
+  if (event.type.startsWith("capability_envelope.")) return "capability_envelope";
   if (event.type.startsWith("worker.")) return "worker";
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
   if (event.type === "milestone.release_operation_bound") return "release_preparation";
@@ -281,6 +294,8 @@ function operationName(event: StoredEvent): string {
   if (event.type.startsWith("routing.")) return "model_routing";
   if (isOpenCodeRoleEvent(event)) return "opencode_agent";
   const type = event.type;
+  if (type === "milestone.capability_boundary_paused" || type === "task.capability_boundary_paused") return "waiting";
+  if (type === "milestone.capability_boundary_resolved" || type === "task.capability_boundary_resolved") return "completed";
   if (type === "capsule.proxy_interaction_observed") return "network_policy";
   if (type.startsWith("capsule.github_broker_") || type === "capsule.github_grant_consumed") return "github_effect";
   if (type === "capsule.cleanup_observed") return "cleanup";
@@ -295,7 +310,8 @@ function operationName(event: StoredEvent): string {
     type === "task.started"
   ) return "writer";
   if (type === "task.denied") {
-    return payloadString(event.payload, "stage") === "ownership" ? "ownership" : "review";
+    const stage = payloadString(event.payload, "stage");
+    return stage === "ownership" ? "ownership" : stage === "capability_envelope" ? "capability_envelope" : "review";
   }
   if (type.includes("validation")) return "validation";
   if (type.includes("review")) return "review";
@@ -307,6 +323,10 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (type === "capability_envelope.accepted") return "completed";
+  if (type === "capability_envelope.evaluated") {
+    return payloadString(payloadRecord(event.payload, "decision"), "status") === "allowed" ? "completed" : "waiting";
+  }
   if (type === "worker.bound") return "waiting";
   if (type === "worker.started" || type === "worker.observed") return "running";
   if (type === "worker.cleanup_observed") {
@@ -561,5 +581,73 @@ function redactedEnvelopePayload(payload: unknown): unknown {
     authorityCategoryCount: envelope.authorityCategories.length,
     roleBoundaryCount: envelope.roleBoundaries.length,
     capabilityCount: envelope.capabilities.length,
+  });
+}
+
+function redactedRoleCapabilityPayload(type: string, payload: unknown): unknown {
+  const parsed = parseRoleCapabilityEventPayload(type, payload) as Readonly<Record<string, unknown>>;
+  if (type === "capability_envelope.evaluated") {
+    const decision = parsed["decision"] as Readonly<Record<string, unknown>>;
+    return Object.freeze({
+      bindingDigest: parsed["bindingDigest"],
+      requestDigest: decision["requestDigest"],
+      decisionId: decision["decisionId"],
+      status: decision["status"],
+      reason: decision["reason"],
+      effectPerformed: decision["effectPerformed"],
+    });
+  }
+  const binding = (parsed["binding"] as Readonly<Record<string, unknown>>);
+  const access = binding["access"] as { readonly readPaths: readonly unknown[]; readonly writePaths: readonly unknown[]; readonly forbiddenPaths: readonly unknown[] };
+  const envelope = binding["envelope"] as Readonly<Record<string, unknown>>;
+  return Object.freeze({
+    schemaVersion: binding["schemaVersion"],
+    milestoneId: binding["milestoneId"],
+    taskId: binding["taskId"],
+    projectId: binding["projectId"],
+    role: binding["role"],
+    actorId: binding["actorId"],
+    bindingDigest: binding["digest"],
+    envelopeDigest: envelope["digest"],
+    planDigest: binding["planDigest"],
+    securityDigest: binding["securityDigest"],
+    modelDigest: binding["modelDigest"],
+    repositoryDigest: binding["repositoryDigest"],
+    ownershipDigest: binding["ownershipDigest"],
+    budgetDigest: binding["budgetDigest"],
+    admissionDigest: binding["admissionDigest"],
+    providerTransport: binding["providerTransport"],
+    readScopeCount: access.readPaths.length,
+    writeScopeCount: access.writePaths.length,
+    forbiddenScopeCount: access.forbiddenPaths.length,
+    reviewEvidenceBound: binding["review"] !== null,
+  });
+}
+
+function redactedWorkerPayload(type: string, payload: unknown): unknown {
+  const parsed = parseWorkerEventPayload(type, payload);
+  if (type !== "worker.bound") return parsed;
+  const binding = parsed as WorkerBinding;
+  return Object.freeze({
+    ...binding,
+    envelope: Object.freeze({
+      digest: binding.envelope.digest,
+      role: binding.envelope.role,
+      authority: binding.envelope.authority,
+      repository: binding.envelope.resources.repository,
+      readScopeCount: envelopeReadPaths(binding.envelope).length,
+      writeScopeCount: envelopeWritePaths(binding.envelope).length,
+      forbiddenScopeCount: binding.envelope.resources.forbiddenPaths.length,
+      capabilityDigest: digestCanonical(binding.envelope.capabilities),
+      effectDigest: digestCanonical(binding.envelope.effects),
+    }),
+  });
+}
+
+function redactedCapabilityBoundaryPayload(payload: unknown): unknown {
+  const parsed = CapabilityBoundaryPausedPayloadSchema.parse(payload);
+  return Object.freeze({
+    occurrence: parsed.occurrence,
+    evidenceDigest: digestCanonical(parsed.evidence),
   });
 }

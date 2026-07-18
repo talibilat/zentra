@@ -467,7 +467,10 @@ describe("Agent Tail event envelope export", () => {
       parent_span_id: "worker:writer-1",
       actor: { id: "research-1", role: "researcher" },
       operation: { name: "worker", status: "waiting" },
+      payload: { envelope: { readScopeCount: 1, writeScopeCount: 0, forbiddenScopeCount: 1 } },
     });
+    expect(JSON.stringify(exported.payload)).not.toContain("src/**");
+    expect(JSON.stringify(exported.payload)).not.toContain(".env");
   });
 
   it("parents top-level workers to the actual standalone or milestone task span", () => {

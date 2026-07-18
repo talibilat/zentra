@@ -315,6 +315,9 @@ describe("TracerBulletOrchestrator", () => {
       paused: false,
       stopAndAsk: null,
       uncertainEffect: null,
+      capabilityBoundary: null,
+      capabilityResolution: null,
+      superseded: false,
     });
     expect(tasks.get("task-greeting")).toEqual(result);
     expect(

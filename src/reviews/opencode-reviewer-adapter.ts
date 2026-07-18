@@ -116,6 +116,11 @@ export class OpenCodeReviewerAdapter implements ReviewerAdapter {
       rolePrompt,
       budget: this.assignment.budget,
       timeoutMs: this.assignment.timeoutMs,
+      reviewEvidence: {
+        workerId: input.workerId,
+        diffSha256: challenged.diffSha256,
+        validationSha256: challenged.validationSha256,
+      },
       signal,
     });
     if (result.status === "paused") {

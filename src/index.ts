@@ -88,6 +88,42 @@ export {
   OpenCodeReviewerAdapter,
   OpenCodeReviewerUncertainError,
 } from "./reviews/opencode-reviewer-adapter.js";
+export {
+  RoleCapabilityBindingSchema,
+  RoleCapabilityDecisionSchema,
+  RoleCapabilityEnvelopeService,
+  RoleCapabilityRequestSchema,
+  assertRoleModelCapability,
+  buildRoleCapabilityBinding,
+  evaluateRoleCapabilityRequest,
+  roleCapabilityStreamId,
+  roleModelSupports,
+  roleToolPermissions,
+  verifyRoleCapabilityBinding,
+} from "./workers/role-capability-envelope.js";
+export {
+  CapabilityBoundaryOccurrenceSchema,
+  CapabilityBoundaryPausedPayloadSchema,
+  CapabilityBoundaryResolvedPayloadSchema,
+  CapabilityBoundaryResolutionSchema,
+  CapabilityTaskHeadSchema,
+  capabilityTaskHead,
+  createCapabilityBoundaryOccurrence,
+  createCapabilityBoundaryResolution,
+  verifyCapabilityBoundaryOccurrence,
+  verifyCapabilityPauseSource,
+  verifyCapabilityResolutionSource,
+  verifyCurrentCapabilityTaskHead,
+} from "./contracts/capability-boundary.js";
+export type { CapabilityBoundaryOccurrence, CapabilityBoundaryResolution } from "./contracts/capability-boundary.js";
+export type {
+  GovernedRole,
+  RoleCapabilityBinding,
+  RoleCapabilityBindingInput,
+  RoleCapabilityDecision,
+  RoleCapabilityExpectedDigests,
+  RoleCapabilityRequest,
+} from "./workers/role-capability-envelope.js";
 export { LocalReleaseCoordinator } from "./release/local-release-coordinator.js";
 export type { LocalReleaseCoordinatorResult } from "./release/local-release-coordinator.js";
 export { ReleasePreparationConfigSchema } from "./projects/project-config.js";

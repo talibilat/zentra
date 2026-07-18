@@ -47,8 +47,9 @@ import {
   type MilestoneTerminalResult,
 } from "../contracts/milestone-result.js";
 import { ReleaseOperationBoundPayloadSchema, type ReleaseOperationBoundPayload } from "../release/release-events.js";
+import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
 
-export type PlannedTaskStatus = "planned" | "ready" | "running" | "blocked" | "completed";
+export type PlannedTaskStatus = "planned" | "ready" | "running" | "blocked" | "superseded" | "completed";
 
 export interface PlannedTaskView {
   readonly taskId: string;
@@ -69,6 +70,9 @@ export interface MilestoneView {
   readonly stopAndAsk: StopAndAskState | null;
   readonly attention: AuthorityAttention | null;
   readonly replanningAttention: ReplanningAttention | null;
+  readonly capabilityBoundary?: CapabilityBoundaryOccurrence | null;
+  readonly capabilityResolution?: CapabilityBoundaryResolution | null;
+  readonly capabilityBoundaryPauseOccurrence?: { readonly eventId: string; readonly streamVersion: number } | null;
   readonly tasks: Readonly<Record<string, PlannedTaskView>>;
   readonly historicalTasks: Readonly<Record<string, PlannedTaskView>>;
   readonly authorityEnvelope: MilestoneAuthorityEnvelope | null;
@@ -119,6 +123,9 @@ interface MilestoneState {
   stopAndAsk: StopAndAskState | null;
   attention: AuthorityAttention | null;
   replanningAttention: ReplanningAttention | null;
+  capabilityBoundary: CapabilityBoundaryOccurrence | null;
+  capabilityResolution: CapabilityBoundaryResolution | null;
+  capabilityBoundaryPauseOccurrence: { eventId: string; streamVersion: number } | null;
   tasks: Map<string, PlannedTaskView>;
   historicalTasks: Map<string, PlannedTaskView>;
   authorityEnvelope: MilestoneAuthorityEnvelope | null;
@@ -167,6 +174,9 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
     stopAndAsk: null,
     attention: null,
     replanningAttention: null,
+    capabilityBoundary: null,
+    capabilityResolution: null,
+    capabilityBoundaryPauseOccurrence: null,
     tasks: new Map(),
     historicalTasks: new Map(),
     authorityEnvelope: null,
@@ -197,7 +207,8 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       event.type !== "milestone.cancelled" &&
       event.type !== "milestone.denied" &&
       event.type !== "milestone.plan_replaced" &&
-      event.type !== "milestone.replanning_resolved"
+      event.type !== "milestone.replanning_resolved" &&
+      event.type !== "milestone.capability_boundary_resolved"
     ) {
       throw new Error("milestone is paused pending plan replacement");
     }
@@ -232,6 +243,7 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
       state.stopAndAsk = null;
       state.attention = null;
       state.replanningAttention = null;
+      state.capabilityBoundary = null;
       continue;
     }
 
@@ -275,6 +287,12 @@ export function projectMilestone(events: readonly StoredEvent[]): MilestoneView 
         break;
       case "milestone.paused":
         applyPaused(state, event);
+        break;
+      case "milestone.capability_boundary_paused":
+        applyCapabilityBoundaryPaused(state, event);
+        break;
+      case "milestone.capability_boundary_resolved":
+        applyCapabilityBoundaryResolved(state, event);
         break;
       case "milestone.plan_replaced":
         applyPlanReplaced(state, event);
@@ -624,6 +642,56 @@ function applyPaused(state: MilestoneState, event: StoredEvent): void {
   }) : null;
 }
 
+function applyCapabilityBoundaryPaused(state: MilestoneState, event: StoredEvent): void {
+  const occurrence = CapabilityBoundaryPausedPayloadSchema.parse(objectPayload(event)).occurrence;
+  const task = state.tasks.get(occurrence.taskId);
+  if (occurrence.milestoneId !== state.milestoneId || occurrence.projectId !== state.projectId ||
+    task === undefined || state.capabilityBoundary !== null ||
+    (occurrence.phase === "post_worker" && task.status !== "running")) {
+    throw new Error("milestone capability boundary binding is invalid");
+  }
+  state.lifecycle = "paused";
+  state.capabilityBoundary = occurrence;
+  state.capabilityBoundaryPauseOccurrence = { eventId: event.eventId, streamVersion: event.streamVersion };
+  state.attention = null;
+  state.replanningAttention = null;
+  state.stopAndAsk = null;
+}
+
+function applyCapabilityBoundaryResolved(state: MilestoneState, event: StoredEvent): void {
+  const resolution = CapabilityBoundaryResolvedPayloadSchema.parse(objectPayload(event)).resolution;
+  const occurrence = state.capabilityBoundary;
+  const pause = state.capabilityBoundaryPauseOccurrence;
+  const task = state.tasks.get(resolution.taskId);
+  if (occurrence === null || pause === null || task === undefined ||
+    resolution.milestoneId !== state.milestoneId || resolution.projectId !== state.projectId ||
+    resolution.attentionId !== occurrence.attentionId || resolution.bindingDigest !== occurrence.bindingDigest ||
+    resolution.decisionId !== occurrence.decisionId || resolution.pauseEventId !== pause.eventId ||
+    resolution.pauseStreamVersion !== pause.streamVersion) {
+    throw new Error("milestone capability boundary resolution is invalid");
+  }
+  if (resolution.action === "stale_task_state") {
+    const competing = resolution.competingTaskHead;
+    if (competing === null || competing.streamId !== occurrence.taskId ||
+      (competing.streamVersion < occurrence.taskHead.streamVersion) ||
+      (competing.streamVersion === occurrence.taskHead.streamVersion && competing.eventId === occurrence.taskHead.eventId && occurrence.taskHead.lifecycle !== "terminal")) {
+      throw new Error("milestone stale task resolution binding is invalid");
+    }
+    state.tasks.set(resolution.taskId, Object.freeze({
+      ...task,
+      status: competing.lifecycle === "terminal" ? "completed" : "running",
+      terminalOutcome: competing.terminalOutcome,
+      blockedReason: "capability_boundary_stale_task_state",
+    }));
+  }
+  if (resolution.action === "supersede_for_replan") {
+    state.tasks.set(resolution.taskId, Object.freeze({ ...task, status: "superseded", blockedReason: "capability_boundary_superseded" }));
+  }
+  state.capabilityResolution = resolution;
+  state.capabilityBoundary = null;
+  state.lifecycle = [...state.tasks.values()].some((candidate) => candidate.status === "running") ? "running" : "ready";
+}
+
 function applyAuthorityEnvelope(state: MilestoneState, event: StoredEvent): void {
   if (state.plan === null || state.replanningPolicy === null || state.authorityEnvelope !== null || state.startedTasks.size > 0) {
     throw new Error("milestone authority envelope must bind the unexecuted baseline plan exactly once");
@@ -700,6 +768,7 @@ function applyPlanRevised(state: MilestoneState, event: StoredEvent): void {
 function validateRevisionEvidence(state: MilestoneState, revision: PlanRevisionPayload): void {
   const seen = new Map(state.seenEvents.map((event) => [event.eventId, event] as const));
   let completion: StoredEvent | null = null;
+  let capabilityResolution: StoredEvent | null = null;
   for (const reference of revision.priorEvidence) {
     if (reference.streamId !== state.milestoneId) continue;
     const event = seen.get(reference.eventId);
@@ -708,8 +777,16 @@ function validateRevisionEvidence(state: MilestoneState, revision: PlanRevisionP
       throw new Error("milestone plan revision evidence binding is invalid");
     }
     if (event.type === "milestone.task_completed") completion = event;
+    if (event.type === "milestone.capability_boundary_resolved") capabilityResolution = event;
   }
-  if (completion === null) throw new Error("milestone plan revision requires same-stream completion evidence");
+  if (completion === null && capabilityResolution === null) throw new Error("milestone plan revision requires same-stream completion or supersession evidence");
+  if (completion === null) {
+    const resolution = CapabilityBoundaryResolvedPayloadSchema.parse(capabilityResolution!.payload).resolution;
+    if (resolution.action !== "supersede_for_replan" || state.tasks.get(resolution.taskId)?.status !== "superseded") {
+      throw new Error("milestone plan revision supersession evidence is invalid");
+    }
+    return;
+  }
   const taskId = payloadString(completion, "taskId");
   const task = state.tasks.get(taskId);
   if (task?.status !== "completed" || task.terminalOutcome === null) {
@@ -909,6 +986,9 @@ function freezeView(state: MilestoneState): MilestoneView {
     stopAndAsk: state.stopAndAsk,
     attention: state.attention,
     replanningAttention: state.replanningAttention,
+    capabilityBoundary: state.capabilityBoundary,
+    capabilityResolution: state.capabilityResolution,
+    capabilityBoundaryPauseOccurrence: state.capabilityBoundaryPauseOccurrence === null ? null : Object.freeze({ ...state.capabilityBoundaryPauseOccurrence }),
     tasks: Object.freeze(Object.fromEntries(state.tasks)),
     historicalTasks: Object.freeze(Object.fromEntries(state.historicalTasks)),
     authorityEnvelope: state.authorityEnvelope,

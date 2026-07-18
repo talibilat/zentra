@@ -15,6 +15,8 @@ import {
 } from "../contracts/uncertain-effect.js";
 import type { EventJournal } from "../journal/journal.js";
 import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
+import { CapabilityBoundaryPausedPayloadSchema } from "../contracts/capability-boundary.js";
+import { MilestoneRegistry } from "../milestones/milestone-registry.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { ProjectRegistry } from "../projects/project-registry.js";
 import {
@@ -225,6 +227,14 @@ export class RecoveryService {
     if (!isSafeTaskId(taskId)) {
       return decision(taskId, "record_failure", "task id must be one safe path and ref component");
     }
+    try {
+      const source = this.journal.readAll().find((event) => event.type === "milestone.capability_boundary_paused" &&
+        CapabilityBoundaryPausedPayloadSchema.safeParse(event.payload).success &&
+        CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence.taskId === taskId);
+      if (source !== undefined) new MilestoneRegistry(this.journal).inspect(source.streamId);
+    } catch (error) {
+      return decision(taskId, "record_failure", `capability boundary reconciliation failed closed: ${errorMessage(error)}`);
+    }
     let events: readonly StoredEvent[];
     try {
       events = this.journal.readStream(taskId);
@@ -237,6 +247,9 @@ export class RecoveryService {
         "record_failure",
         `diagnostic only: task ${taskId} was not found in the journal; no event append is implied`,
       );
+    }
+    if (events.at(-1)?.type === "task.capability_boundary_paused") {
+      return decision(taskId, "await_reconciliation", "capability boundary requires an explicit operator attention or replanning resolution");
     }
     try {
       const worker = projectWorkerLifecycle(this.journal.readStream(workerStreamId(taskId)));

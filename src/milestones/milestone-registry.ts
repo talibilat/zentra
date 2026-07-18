@@ -56,6 +56,18 @@ import {
   verifyMilestoneTerminalResult,
 } from "./milestone-result.js";
 import { ReleaseOperationBoundPayloadSchema, type ReleaseOperationBoundPayload } from "../release/release-events.js";
+import {
+  CapabilityBoundaryPausedPayloadSchema,
+  CapabilityBoundaryResolvedPayloadSchema,
+  capabilityTaskHead,
+  createCapabilityBoundaryResolution,
+  verifyCurrentCapabilityTaskHead,
+  verifyCapabilityBoundaryOccurrence,
+  verifyCapabilityResolutionSource,
+  type CapabilityBoundaryOccurrence,
+  type CapabilityBoundaryResolution,
+} from "../contracts/capability-boundary.js";
+import { TaskService } from "../tasks/task-service.js";
 
 export interface RegisterMilestoneInput {
   readonly milestoneId: string;
@@ -224,6 +236,7 @@ export class MilestoneRegistry {
       assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
       verifyStoredWriterIntegrations(this.journal, events, view);
       verifyStoredWriterReleases(this.journal, events, view);
+      verifyCapabilityBoundaryEvents(this.journal, events);
       const record = withTrace(view, events);
       if (record.result !== null) verifyMilestoneTerminalResult(this.journal, record, record.result);
       return Object.freeze({
@@ -692,6 +705,88 @@ export class MilestoneRegistry {
     return this.appendTransition(milestoneId, "milestone.paused", { attention });
   }
 
+  pauseForCapabilityBoundary(
+    milestoneId: string,
+    occurrence: CapabilityBoundaryOccurrence,
+    evidence: unknown = null,
+    options: { readonly beforeMilestoneAppend?: () => void; readonly afterMilestoneAppend?: () => void } = {},
+  ): MilestoneRecord {
+    const verified = verifyCapabilityBoundaryOccurrence(this.journal, occurrence);
+    const payload = CapabilityBoundaryPausedPayloadSchema.parse({ occurrence: verified, evidence });
+    if (verified.milestoneId !== milestoneId) throw new Error("capability boundary milestone identity mismatch");
+    const current = this.inspect(milestoneId);
+    if (current === null) throw new Error(`milestone ${milestoneId} does not exist`);
+    if (current.lifecycle === "paused" && current.capabilityBoundary?.attentionId === verified.attentionId) {
+      this.reconcileCapabilityTaskProjection(current);
+      return current;
+    }
+    verifyCurrentCapabilityTaskHead(this.journal, verified);
+    options.beforeMilestoneAppend?.();
+    let paused: MilestoneRecord;
+    try {
+      paused = this.appendTransition(milestoneId, "milestone.capability_boundary_paused", payload);
+    } catch (error) {
+      if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      const raced = this.inspect(milestoneId);
+      if (raced?.capabilityBoundary?.attentionId !== verified.attentionId) throw error;
+      this.reconcileCapabilityTaskProjection(raced);
+      return raced;
+    }
+    options.afterMilestoneAppend?.();
+    return this.reconcileCapabilityTaskProjection(paused) ? this.inspect(milestoneId)! : paused;
+  }
+
+  resolveCapabilityBoundary(input: {
+    readonly milestoneId: string;
+    readonly attentionId: string;
+    readonly decisionId: string;
+    readonly pauseEventId: string;
+    readonly pauseStreamVersion: number;
+    readonly action: "abandon_request" | "supersede_for_replan";
+    readonly decidedBy: string;
+    readonly afterMilestoneAppend?: () => void;
+  }): MilestoneRecord {
+    const current = this.inspect(input.milestoneId);
+    if (current === null) throw new Error(`milestone ${input.milestoneId} does not exist`);
+    if (current.capabilityResolution !== null && current.capabilityResolution !== undefined) {
+      const expected = createCapabilityBoundaryResolution({
+        milestoneId: current.milestoneId, projectId: current.projectId, taskId: current.capabilityResolution.taskId,
+        attentionId: input.attentionId, bindingDigest: current.capabilityResolution.bindingDigest,
+        decisionId: input.decisionId, pauseEventId: input.pauseEventId, pauseStreamVersion: input.pauseStreamVersion,
+        action: input.action, decidedBy: input.decidedBy,
+      });
+      if (expected.resolutionId !== current.capabilityResolution.resolutionId) throw new Error("capability boundary resolution identity is already bound");
+      this.reconcileCapabilityTaskProjection(current);
+      return current;
+    }
+    const occurrence = current.capabilityBoundary;
+    const pause = current.capabilityBoundaryPauseOccurrence;
+    if (current.lifecycle !== "paused" || occurrence === null || occurrence === undefined || pause === null || pause === undefined ||
+      occurrence.attentionId !== input.attentionId || occurrence.decisionId !== input.decisionId ||
+      pause.eventId !== input.pauseEventId || pause.streamVersion !== input.pauseStreamVersion) {
+      throw new Error("capability boundary resolution binding is stale");
+    }
+    const resolution = createCapabilityBoundaryResolution({
+      milestoneId: current.milestoneId, projectId: current.projectId, taskId: occurrence.taskId,
+      attentionId: occurrence.attentionId, bindingDigest: occurrence.bindingDigest, decisionId: occurrence.decisionId,
+      pauseEventId: pause.eventId, pauseStreamVersion: pause.streamVersion,
+      action: input.action, decidedBy: input.decidedBy,
+    });
+    let resolved: MilestoneRecord;
+    try {
+      resolved = this.appendTransition(input.milestoneId, "milestone.capability_boundary_resolved", { resolution });
+    } catch (error) {
+      if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+      const raced = this.inspect(input.milestoneId);
+      if (raced?.capabilityResolution?.resolutionId !== resolution.resolutionId) throw error;
+      this.reconcileCapabilityTaskProjection(raced);
+      return raced;
+    }
+    input.afterMilestoneAppend?.();
+    this.reconcileCapabilityTaskProjection(resolved);
+    return resolved;
+  }
+
   finish(
     milestoneId: string,
     outcome: TerminalOutcome,
@@ -907,7 +1002,7 @@ export class MilestoneRegistry {
     if (taskEvents.some((event) => event.correlationId !== milestoneEvents[0]!.correlationId)) {
       throw new Error("writer task stream is not bound to the milestone trace");
     }
-    return projectTask(taskEvents);
+    return new TaskService(this.journal).get(writerTaskId);
   }
 
   inspect(milestoneId: string): MilestoneRecord | null {
@@ -918,7 +1013,9 @@ export class MilestoneRegistry {
     assertWriterClaimProvenance(view, Object.values(view.writerOwnership));
     verifyStoredWriterIntegrations(this.journal, events, view);
     verifyStoredWriterReleases(this.journal, events, view);
+    verifyCapabilityBoundaryEvents(this.journal, events);
     const record = withTrace(view, events);
+    if (this.reconcileCapabilityTaskProjection(record)) return this.inspect(milestoneId);
     if (record.result !== null) verifyMilestoneTerminalResult(this.journal, record, record.result);
     return record;
   }
@@ -931,6 +1028,88 @@ export class MilestoneRegistry {
     const view = this.inspect(milestoneId);
     if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
     return view;
+  }
+
+  private reconcileCapabilityTaskProjection(milestone: MilestoneRecord): boolean {
+    const milestoneEvents = this.journal.readStream(milestone.milestoneId);
+    const pauses = milestoneEvents.filter((event) => event.type === "milestone.capability_boundary_paused");
+    const resolutions = milestoneEvents.filter((event) => event.type === "milestone.capability_boundary_resolved");
+    const tasks = new TaskService(this.journal);
+    for (const pauseEvent of pauses) {
+      const payload = CapabilityBoundaryPausedPayloadSchema.parse(pauseEvent.payload);
+      const authoritativeResolution = resolutions.find((event) =>
+        CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.attentionId === payload.occurrence.attentionId);
+      if (authoritativeResolution !== undefined &&
+        CapabilityBoundaryResolvedPayloadSchema.parse(authoritativeResolution.payload).resolution.action === "stale_task_state") continue;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const existing = this.journal.readStream(payload.occurrence.taskId)
+          .find((event) => event.type === "task.capability_boundary_paused" &&
+            CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence.attentionId === payload.occurrence.attentionId);
+        if (existing !== undefined) {
+          const retained = CapabilityBoundaryPausedPayloadSchema.parse(existing.payload);
+          if (existing.causationId !== pauseEvent.eventId || digestCanonical(retained) !== digestCanonical(payload)) {
+            throw new Error("task capability pause contradicts its authoritative milestone source");
+          }
+          break;
+        }
+        const taskEvents = this.journal.readStream(payload.occurrence.taskId);
+        const currentHead = taskEvents.at(-1);
+        const currentTask = projectTask(taskEvents);
+        if (currentHead === undefined || currentTask === null) throw new Error("capability boundary task stream disappeared during reconciliation");
+        if (payload.occurrence.taskHead.lifecycle === "terminal" || currentHead.eventId !== payload.occurrence.taskHead.eventId || currentHead.streamVersion !== payload.occurrence.taskHead.streamVersion ||
+          currentHead.type !== payload.occurrence.taskHead.eventType || digestCanonical(currentHead.payload) !== payload.occurrence.taskHead.payloadDigest) {
+          const resolution = createCapabilityBoundaryResolution({
+            milestoneId: milestone.milestoneId, projectId: milestone.projectId, taskId: payload.occurrence.taskId,
+            attentionId: payload.occurrence.attentionId, bindingDigest: payload.occurrence.bindingDigest,
+            decisionId: payload.occurrence.decisionId, pauseEventId: pauseEvent.eventId, pauseStreamVersion: pauseEvent.streamVersion,
+            action: "stale_task_state", decidedBy: "zentra-capability-reconciler",
+            competingTaskHead: capabilityTaskHead(taskEvents),
+          });
+          const existingResolution = this.journal.readStream(milestone.milestoneId).find((event) =>
+            event.type === "milestone.capability_boundary_resolved" &&
+            CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.attentionId === payload.occurrence.attentionId);
+          if (existingResolution === undefined) {
+            try {
+              this.appendTransition(milestone.milestoneId, "milestone.capability_boundary_resolved", { resolution });
+            } catch (error) {
+              if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
+              const raced = this.journal.readStream(milestone.milestoneId).find((event) => event.type === "milestone.capability_boundary_resolved" &&
+                CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.resolutionId === resolution.resolutionId);
+              if (raced === undefined) throw error;
+            }
+          }
+          return true;
+        }
+        try {
+          tasks.pauseForCapabilityBoundary(payload.occurrence.taskId, payload, pauseEvent.eventId);
+          break;
+        } catch (error) {
+          if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message) || attempt === 7) throw error;
+        }
+      }
+      const resolutionEvent = authoritativeResolution;
+      if (resolutionEvent === undefined) continue;
+      const resolvedPayload = CapabilityBoundaryResolvedPayloadSchema.parse(resolutionEvent.payload);
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const existing = this.journal.readStream(payload.occurrence.taskId)
+          .find((event) => event.type === "task.capability_boundary_resolved" &&
+            CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.attentionId === payload.occurrence.attentionId);
+        if (existing !== undefined) {
+          const retained = CapabilityBoundaryResolvedPayloadSchema.parse(existing.payload);
+          if (existing.causationId !== resolutionEvent.eventId || digestCanonical(retained) !== digestCanonical(resolvedPayload)) {
+            throw new Error("task capability resolution contradicts its authoritative milestone source");
+          }
+          break;
+        }
+        try {
+          tasks.resolveCapabilityBoundary(payload.occurrence.taskId, resolvedPayload, resolutionEvent.eventId);
+          break;
+        } catch (error) {
+          if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message) || attempt === 7) throw error;
+        }
+      }
+    }
+    return false;
   }
 
   private terminalizeFromEvidence(milestoneId: string, outcome: TerminalOutcome): MilestoneRecord {
@@ -1009,6 +1188,16 @@ export class MilestoneRegistry {
       causationId: null,
       correlationId: events[0]!.correlationId,
     };
+  }
+}
+
+function verifyCapabilityBoundaryEvents(journal: EventJournal, events: readonly StoredEvent[]): void {
+  for (const event of events) {
+    if (event.type === "milestone.capability_boundary_paused") {
+      verifyCapabilityBoundaryOccurrence(journal, CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence);
+    } else if (event.type === "milestone.capability_boundary_resolved") {
+      verifyCapabilityResolutionSource(journal, CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution);
+    }
   }
 }
 
@@ -1114,7 +1303,8 @@ function assessRevision(
   if (currentPolicy.securityDigest !== view.authorityEnvelope.securityDigest) return "security";
   if (currentPolicy.modelSheetDigest !== view.authorityEnvelope.modelSheetDigest) return "model_sheet";
   if (view.hasUncertainEffects) return "uncertain_effect";
-  if (view.hasActiveEffects || view.executedTaskIds.some((taskId) => view.tasks[taskId]?.status !== "completed")) return "active_effect";
+  if (view.hasActiveEffects || view.executedTaskIds.some((taskId) =>
+    view.tasks[taskId]?.status !== "completed" && view.tasks[taskId]?.status !== "superseded")) return "active_effect";
 
   if (input.linkedTaskStreamIds.length > 0) return "evidence";
   const globallyRelatedTaskStreams = new Set(journal.readAll()
@@ -1133,7 +1323,7 @@ function assessRevision(
     }
     if (task === null) return "evidence";
     if (task.paused && task.uncertainEffect !== null) return "uncertain_effect";
-    if (task.lifecycle !== "terminal") return "active_effect";
+    if (task.lifecycle !== "terminal" && !(task.superseded === true && task.capabilityResolution?.action === "supersede_for_replan")) return "active_effect";
   }
 
   if (!validEvidence(input.evidence, view.milestoneId, journal)) return "evidence";
@@ -1166,7 +1356,7 @@ function validEvidence(
       event === undefined || event.streamVersion !== parsed.data.streamVersion ||
       event.type !== parsed.data.eventType || digestCanonical(event.payload) !== parsed.data.payloadDigest
     ) return false;
-    if (event.type === "milestone.task_completed") executionInformed = true;
+    if (event.type === "milestone.task_completed" || event.type === "milestone.capability_boundary_resolved") executionInformed = true;
   }
   return executionInformed;
 }

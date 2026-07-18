@@ -1021,7 +1021,7 @@ function taskRunResult(task: TaskView, tracePath?: string, traceProjectionFailed
     exitCode: task.terminalOutcome === "completed" && !traceProjectionFailed ? 0 : 1,
     value: {
       command: "task.run",
-      outcome: task.terminalOutcome,
+      outcome: task.capabilityBoundary?.status ?? task.terminalOutcome,
       task,
       ...(tracePath === undefined ? {} : {
         tracePath,

@@ -139,6 +139,50 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
   });
 
+  it("pauses nonterminal for out-of-envelope changed paths after worker settlement", async () => {
+    const fixture = await fixtureProject("hello");
+    const result = await runTracer(fixture, "__OUTSIDE__", true, new ApprovingReviewer(), true);
+    expect(result.view).toMatchObject({ lifecycle: "running", terminalOutcome: null, paused: true,
+      capabilityBoundary: { phase: "post_worker", status: "replan", reason: "path_not_owned", workerSettlement: { cleanup: "completed", terminalOutcome: "completed" } },
+    });
+    expect(result.events.find((event) => event.type === "task.capability_boundary_paused")?.payload).toMatchObject({
+      occurrence: { status: "replan", reason: "path_not_owned" },
+      evidence: { ownership: { outcome: "rejected" }, workspace: result.worktree },
+    });
+    expect(result.events.map((event) => event.type)).not.toContain("task.validation_started");
+    expect(result.allEvents.filter((event) => event.type === "capability_envelope.evaluated")
+      .some((event) => JSON.stringify(event.payload).includes('"reason":"path_not_owned"'))).toBe(true);
+    expect(result.allEvents.find((event) => event.type === "milestone.capability_boundary_paused")!.globalPosition)
+      .toBeLessThan(result.allEvents.find((event) => event.type === "task.capability_boundary_paused")!.globalPosition);
+  });
+
+  it("maps an OpenCode denied tool event to nonterminal durable attention", async () => {
+    const fixture = await fixtureProject("hello");
+    const result = await runTracer(fixture, "__DENIED_TOOL__", true, new ApprovingReviewer(), true);
+    expect(result.view).toMatchObject({ terminalOutcome: null, paused: true,
+      capabilityBoundary: { status: "attention", reason: "forbidden_effect", phase: "post_worker" },
+    });
+    expect(result.events.find((event) => event.type === "task.capability_boundary_paused")?.payload).toMatchObject({
+      occurrence: { status: "attention", reason: "forbidden_effect" },
+      evidence: { deniedToolRequests: [{ tool: "webfetch", path: null }] },
+    });
+    expect(result.events.map((event) => event.type)).not.toContain("task.validation_started");
+  });
+
+  it("pauses the milestone, retains ownership, and does not redispatch after post-writer replanning", async () => {
+    const fixture = await fixtureProject("hello");
+    const first = await runTracer(fixture, "__OUTSIDE__", true, new ApprovingReviewer(), true);
+    expect(first.milestone).toMatchObject({
+      lifecycle: "paused", terminalOutcome: null,
+      capabilityBoundary: { status: "replan", phase: "post_worker" },
+      tasks: { "writer-tracer": { status: "running", terminalOutcome: null }, "review-tracer": { status: "planned" } },
+    });
+    expect(existsSync(first.worktree)).toBe(true);
+    expect(first.events.map((event) => event.type)).not.toContain("task.validation_started");
+    expect(Object.values(projectWorkerLifecycle(first.allEvents).workers)[0]).toMatchObject({ status: "terminal", cleanup: "completed" });
+    expect(first.milestone?.writerOwnership["writer-tracer"]).toBeUndefined();
+  });
+
   it("commits the reviewed file and integrates through the validated default branch candidate", async () => {
     const fixture = await fixtureProject("hello from OpenCode");
     const reviewer = new OpenCodeReviewerAdapter(
@@ -388,7 +432,8 @@ async function runTracer(
       },
       authority: { security: securitySheet, modelSheet },
     });
-    milestone = await new TwoAgentMilestoneCoordinator(registry, integratedTracer).run({
+    const coordinator = new TwoAgentMilestoneCoordinator(registry, integratedTracer);
+    const coordinatedRequest = {
       milestoneId: "two-agent-milestone",
       writerTaskId: writer.taskId,
       reviewerTaskId: reviewTask.taskId,
@@ -397,7 +442,13 @@ async function runTracer(
       writerAdmission: admissionContext(fixture.repository, model, writer),
       reviewerAdmission: admissionContext(fixture.repository, reviewerModel(), reviewTask),
       execution: { ...commonRequest, reviewerId: "reviewer-1" },
-    });
+    };
+    milestone = await coordinator.run(coordinatedRequest);
+    if (milestone.lifecycle === "paused") {
+      const taskVersion = tasks.get(writer.taskId)!.streamVersion;
+      milestone = await coordinator.run(coordinatedRequest);
+      expect(tasks.get(writer.taskId)!.streamVersion).toBe(taskVersion);
+    }
     view = tasks.get(writer.taskId)!;
   } else if (integrate) {
     view = await integratedTracer.run({ ...commonRequest, reviewerId: "reviewer-1" });
@@ -415,7 +466,7 @@ async function runTracer(
   const reopened = new SqliteEventJournal(databasePath);
   const events = reopened.readStream("writer-tracer");
   const allEvents = reopened.readAll();
-  const replayed = projectTask(events);
+  const replayed = new TaskService(reopened).get("writer-tracer");
   const replayedMilestone = milestone === null
     ? null
     : new MilestoneRegistry(reopened).inspect(milestone.milestoneId);
@@ -622,6 +673,8 @@ if (!packet.brief.includes("greeting")) process.exit(9);
 const source = path.join(workspace, packet.ownedPaths[0]);
 const current = readFileSync(source, "utf8");
 writeFileSync(source, current.replace("hello", ${JSON.stringify(replacement)}));
+${replacement === "__OUTSIDE__" ? 'writeFileSync(path.join(workspace, "README.md"), "outside scope\\n");' : ""}
+${replacement === "__DENIED_TOOL__" ? 'process.stdout.write(JSON.stringify({ type: "tool.denied", tool: "webfetch", status: "denied" }) + "\\n");' : ""}
 process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 `, { mode: 0o755 });
   return realpathSync.native(executable);

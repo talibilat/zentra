@@ -6,10 +6,20 @@ import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
+import {
+  CapabilityEnvelopeSchema,
+  envelopeReadPaths,
+  envelopeWritePaths,
+  type CapabilityEnvelope,
+} from "../workers/worker-lifecycle.js";
 
 export interface WriterTaskPacket {
   readonly brief: string;
   readonly ownedPaths: readonly string[];
+  readonly readPaths?: readonly string[];
+  readonly writePaths?: readonly string[];
+  readonly toolPermissions?: readonly string[];
+  readonly capabilityEnvelopeDigest?: string;
   readonly forbiddenPaths: readonly string[];
   readonly acceptanceCriteria: readonly string[];
   readonly budget: MilestoneBudget;
@@ -21,6 +31,7 @@ export interface WriterTaskPacket {
     readonly modelToolNetwork: "denied";
     readonly harnessProviderTransport: "user_os_network_authority";
     readonly parentSecretInheritance: "denied";
+    readonly runtimeIsolation: "trusted_project_policy_not_os_sandbox";
   };
 }
 
@@ -33,6 +44,7 @@ export interface OpenCodeWriterRequest {
   readonly timeoutMs: number;
   readonly expectedExecutableSha256?: string;
   readonly home?: string;
+  readonly capabilityEnvelope?: CapabilityEnvelope;
 }
 
 export interface OpenCodeWriterReport {
@@ -54,6 +66,7 @@ export interface OpenCodeWriterReport {
   readonly stderr: string;
   readonly startedAt: string;
   readonly finishedAt: string;
+  readonly deniedToolRequests: readonly { readonly tool: string; readonly path: string | null }[];
 }
 
 export class OpenCodeWriter {
@@ -71,6 +84,7 @@ export class OpenCodeWriter {
     const cwd = canonicalDirectory(request.workspace.path);
     if (cwd !== request.workspace.path) throw new Error("OpenCode writer workspace must be canonical");
     const packet = JSON.stringify(request.packet);
+    assertCapabilityPacket(request);
     const argv = [
       "--pure",
       "run",
@@ -92,7 +106,7 @@ export class OpenCodeWriter {
       timeoutMs: request.timeoutMs,
       environment: {
         ...(request.home === undefined ? {} : { HOME: canonicalDirectory(request.home) }),
-        OPENCODE_CONFIG_CONTENT: writerConfiguration(request.model, request.packet.ownedPaths),
+        OPENCODE_CONFIG_CONTENT: writerConfiguration(request.model, request.packet),
         OPENCODE_DISABLE_AUTOUPDATE: "1",
         OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
@@ -131,6 +145,7 @@ function report(
     stderr: result.stderr,
     startedAt,
     finishedAt: new Date().toISOString(),
+    deniedToolRequests: Object.freeze(deniedToolRequests(result.events)),
   });
 }
 
@@ -143,10 +158,16 @@ function redactedArgv(argv: readonly string[]): readonly string[] {
   return retained;
 }
 
-function writerConfiguration(model: ModelCapability, ownedPaths: readonly string[]): string {
+function writerConfiguration(model: ModelCapability, packet: WriterTaskPacket): string {
+  const tools = new Set(packet.toolPermissions ?? ["read_repository", "write_worktree"]);
+  const writePaths = packet.writePaths ?? packet.ownedPaths;
+  const read = packet.readPaths === undefined ? "allow" : Object.fromEntries([
+    ["*", "deny"],
+    ...packet.readPaths.map((scope) => [scope, "allow"] as const),
+  ]);
   const edit = Object.fromEntries([
     ["*", "deny"],
-    ...ownedPaths.map((scope) => [scope, "allow"] as const),
+    ...writePaths.map((scope) => [scope, "allow"] as const),
   ]);
   return JSON.stringify({
     share: "disabled",
@@ -164,10 +185,10 @@ function writerConfiguration(model: ModelCapability, ownedPaths: readonly string
         model: model.model,
         permission: {
           "*": "deny",
-          read: "allow",
-          glob: "allow",
-          grep: "allow",
-          edit,
+          read: tools.has("read_repository") ? read : "deny",
+          glob: tools.has("read_repository") ? read : "deny",
+          grep: tools.has("read_repository") ? read : "deny",
+          edit: tools.has("write_worktree") ? edit : "deny",
           bash: "deny",
           task: "deny",
           webfetch: "deny",
@@ -176,6 +197,35 @@ function writerConfiguration(model: ModelCapability, ownedPaths: readonly string
       },
     },
   });
+}
+
+function assertCapabilityPacket(request: OpenCodeWriterRequest): void {
+  if (request.capabilityEnvelope === undefined) return;
+  const envelope = CapabilityEnvelopeSchema.parse(request.capabilityEnvelope);
+  const packetTools = [...(request.packet.toolPermissions ?? [])].sort();
+  if (
+    request.packet.capabilityEnvelopeDigest !== envelope.digest ||
+    JSON.stringify(packetTools) !== JSON.stringify([...envelope.capabilities].sort()) ||
+    JSON.stringify([...(request.packet.readPaths ?? [])]) !== JSON.stringify(envelopeReadPaths(envelope)) ||
+    JSON.stringify([...(request.packet.writePaths ?? [])]) !== JSON.stringify(envelopeWritePaths(envelope))
+  ) throw new Error("OpenCode writer packet does not match the accepted capability envelope digest");
+}
+
+function deniedToolRequests(events: readonly unknown[]): { readonly tool: string; readonly path: string | null }[] {
+  const denied: { tool: string; path: string | null }[] = [];
+  for (const event of events) {
+    if (typeof event !== "object" || event === null || Array.isArray(event)) continue;
+    const record = event as Readonly<Record<string, unknown>>;
+    const part = typeof record["part"] === "object" && record["part"] !== null && !Array.isArray(record["part"])
+      ? record["part"] as Readonly<Record<string, unknown>> : null;
+    const status = record["status"] ?? part?.["status"];
+    const type = record["type"] ?? part?.["type"];
+    if (status !== "denied" && type !== "permission.denied" && type !== "tool.denied") continue;
+    const tool = typeof record["tool"] === "string" ? record["tool"] : typeof part?.["tool"] === "string" ? part["tool"] : "unknown";
+    const candidate = record["path"] ?? part?.["path"];
+    denied.push({ tool, path: typeof candidate === "string" ? candidate : null });
+  }
+  return denied;
 }
 
 function canonicalDirectory(candidate: string): string {
