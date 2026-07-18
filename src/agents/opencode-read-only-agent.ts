@@ -32,7 +32,7 @@ import {
 import { createReadOnlyRepositoryView, createReadOnlyRepositoryViewAtCommit } from "./read-only-repository-view.js";
 import { GitClient } from "../workspaces/git-client.js";
 import { openCodeResourceIdentity } from "./opencode-resource-identity.js";
-import { WorkerLifecycleService, capabilityEnvelope } from "../workers/worker-lifecycle.js";
+import { WorkerLifecycleService, capabilityEnvelope, workerStreamId } from "../workers/worker-lifecycle.js";
 import { OpenCodeWorkerEventAdapter } from "./opencode-worker-event-adapter.js";
 import {
   RoleCapabilityEnvelopeService,
@@ -41,6 +41,7 @@ import {
   type RoleCapabilityBinding,
 } from "../workers/role-capability-envelope.js";
 import { CostUsdNanoSchema, costFieldsAgree, usdNumberToNano } from "../contracts/cost.js";
+import { ModelBrokerFailureReasonSchema, ModelToolNameSchema, isModelBrokerToolFailureReason, type ModelBrokerFailureReason, type ModelToolName } from "../capsule/model-broker.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const EvidenceSchema = z.strictObject({
@@ -77,6 +78,7 @@ export const OpenCodeReadOnlyCapsuleRequestSchema = z.strictObject({
   rolePrompt: z.string().min(1).max(64 * 1024),
   capabilityId: z.string().min(1).max(256),
   transportModelId: z.string().min(1).max(256),
+  trace: z.strictObject({ traceId: z.string().min(1).max(512), correlationId: z.string().min(1).max(512) }),
   resources: z.strictObject({
     resourceLabel: z.string().min(1).max(512),
     containerName: z.string().min(1).max(255),
@@ -114,12 +116,20 @@ export const OpenCodeReadOnlyCapsuleResultSchema = z.strictObject({
   evidence: z.array(EvidenceSchema).max(128),
   cleanup: z.enum(["completed", "uncertain"]),
   brokerTransport: z.enum(["completed", "uncertain"]),
+  brokerFailureReason: ModelBrokerFailureReasonSchema.nullable().optional(),
+  brokerFailureTool: ModelToolNameSchema.optional(),
   usage: OpenCodeUsageSchema.optional(),
 }).superRefine((result, context) => {
   if (result.outcome === "completed" && (
     result.cleanup !== "completed" || result.brokerTransport !== "completed" ||
     result.openCode === null || result.model === null || result.evidence.length === 0
   )) context.addIssue({ code: "custom", message: "completed OpenCode result lacks required evidence" });
+  if (result.outcome === "completed" && result.brokerFailureReason != null) {
+    context.addIssue({ code: "custom", message: "completed OpenCode result cannot contain a broker failure reason" });
+  }
+  if (result.brokerFailureTool !== undefined && !isModelBrokerToolFailureReason(result.brokerFailureReason)) {
+    context.addIssue({ code: "custom", message: "OpenCode broker failure tool requires a tool-call failure reason" });
+  }
 });
 
 export type OpenCodeReadOnlyCapsuleRequest = z.infer<typeof OpenCodeReadOnlyCapsuleRequestSchema>;
@@ -151,7 +161,7 @@ export type OpenCodeCapsuleObservation =
   | { readonly type: "resources_prepared"; readonly payload: Omit<z.infer<typeof OpenCodeResourcesPreparedPayloadSchema>, "taskId"> }
   | { readonly type: "cleanup_observed"; readonly payload: Omit<z.infer<typeof OpenCodeCleanupObservedPayloadSchema>, "taskId"> }
   | { readonly type: "model_started"; readonly modelId: string }
-  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed"; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly costUsdNano: number; readonly toolCalls: number; readonly modelTurns: number } }
+  | { readonly type: "model_completed"; readonly modelId: string; readonly outcome: "completed" | "cancelled" | "timed_out" | "failed" | "uncertain"; readonly failureReason?: ModelBrokerFailureReason | null; readonly failureTool?: ModelToolName; readonly usage: { readonly seconds: number; readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly costUsdNano: number; readonly toolCalls: number; readonly modelTurns: number } }
   | { readonly type: "research_started"; readonly requestId: string }
   | { readonly type: "research_completed"; readonly requestId: string; readonly result: WebResearchResult };
 
@@ -167,6 +177,7 @@ export interface OpenCodeReadOnlyAgentRequest {
   readonly repositoryRevision?: string;
   readonly repositoryCommit?: string;
   readonly deferMilestoneCompletion?: boolean;
+  readonly requiredWebResearch?: { readonly method: "GET"; readonly url: string; readonly maxRequests: 1 };
   readonly admission: {
     readonly packet: OpenCodeAdmissionPacket;
     readonly digest: string;
@@ -237,7 +248,11 @@ export class OpenCodeReadOnlyAgent {
         forbiddenPaths: [...new Set([...task.forbiddenPaths, ...this.security.forbiddenPaths])],
         ...(model.network === "declared" ? { webResearch: {
           allowedDestinations: this.security.network.allowedDestinations,
-          timeoutMs: request.timeoutMs,
+          ...(request.requiredWebResearch === undefined ? {} : {
+            destinations: [requiredResearchDestination(request.requiredWebResearch.url, this.security.network.allowedDestinations)],
+            requiredRequest: request.requiredWebResearch,
+          }),
+          timeoutMs: Math.min(request.timeoutMs, 120_000),
         } } : {}),
         ...(request.reviewEvidence === undefined ? {} : { review: request.reviewEvidence }),
       });
@@ -357,6 +372,7 @@ export class OpenCodeReadOnlyAgent {
       rolePrompt: request.rolePrompt,
       capabilityId: model.id,
       transportModelId: model.model,
+      trace: { traceId: correlationId, correlationId },
       resources: {
         resourceLabel: identity.resourceLabel,
         containerName: identity.containerName,
@@ -463,10 +479,27 @@ export class OpenCodeReadOnlyAgent {
           return;
         }
         if (observation.type === "model_completed") {
-          workers.observe(request.taskId, workerId, {
+          const modelObservation = {
             kind: "model", name: observation.modelId, phase: "completed",
-            outcome: observation.outcome, usage: observation.usage,
-          });
+            outcome: observation.outcome,
+            ...(observation.failureReason === undefined ? {} : { failureReason: observation.failureReason }),
+            ...(observation.failureTool === undefined ? {} : { failureTool: observation.failureTool }),
+            usage: observation.usage,
+          } as const;
+          const currentWorker = workers.inspect(request.taskId).workers[workerId];
+          if (currentWorker?.activeModelTurns === 0) {
+            const retained = this.journal.readStream(workerStreamId(request.taskId)).findLast((event) =>
+              event.type === "worker.observed" && typeof event.payload === "object" && event.payload !== null &&
+              (event.payload as { readonly workerId?: string }).workerId === workerId &&
+              (event.payload as { readonly observation?: { readonly kind?: string; readonly phase?: string } }).observation?.kind === "model" &&
+              (event.payload as { readonly observation?: { readonly phase?: string } }).observation?.phase === "completed");
+            const retainedObservation = typeof retained?.payload === "object" && retained.payload !== null
+              ? (retained.payload as { readonly observation?: unknown }).observation
+              : undefined;
+            if (retainedObservation !== undefined &&
+              digestCanonical(retainedObservation) === digestCanonical(modelObservation)) return;
+          }
+          workers.observe(request.taskId, workerId, modelObservation);
           return;
         }
         const type = "milestone.agent_resources_prepared";
@@ -487,6 +520,7 @@ export class OpenCodeReadOnlyAgent {
         evidence: [],
         cleanup: "uncertain",
         brokerTransport: "completed",
+        brokerFailureReason: "broker_receipt_invalid",
       };
     } finally {
       try {
@@ -561,6 +595,8 @@ export class OpenCodeReadOnlyAgent {
       evidence,
       cleanup: result.cleanup,
       brokerTransport: result.brokerTransport,
+      brokerFailureReason: result.brokerFailureReason ?? null,
+      ...(result.brokerFailureTool === undefined ? {} : { brokerFailureTool: result.brokerFailureTool }),
     });
     workers.observe(request.taskId, workerId, workerEvents.processObservation("opencode", outcome));
     const uncertainWorker = result.cleanup === "uncertain" || result.brokerTransport === "uncertain";
@@ -723,4 +759,16 @@ function pathForScope(repository: string, scope: string): string {
 function existingReadScopes(repository: string, scopes: readonly string[]): readonly string[] {
   const existing = scopes.filter((scope) => scope === "**" || existsSync(pathForScope(repository, scope)));
   return existing.length > 0 ? existing : scopes;
+}
+
+function requiredResearchDestination(
+  sourceUrl: string,
+  allowedOrigins: readonly string[],
+): { readonly origin: string; readonly pathPrefix: string } {
+  const source = new URL(sourceUrl);
+  if (source.protocol !== "https:" || source.search !== "" || source.hash !== "" ||
+    !allowedOrigins.includes(source.origin)) {
+    throw new Error("required web research source is outside exact security authority");
+  }
+  return { origin: source.origin, pathPrefix: source.pathname };
 }

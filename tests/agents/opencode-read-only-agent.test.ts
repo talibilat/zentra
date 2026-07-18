@@ -20,6 +20,8 @@ import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
 import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
 import { GovernedWebResearch } from "../../src/research/web-research.js";
+import { digestCanonical } from "../../src/contracts/authority-attention.js";
+import type { EventJournal } from "../../src/journal/journal.js";
 
 const roots: string[] = [];
 
@@ -28,7 +30,7 @@ afterEach(() => {
 });
 
 describe("OpenCodeReadOnlyAgent milestone path", () => {
-  it("runs a brokered planning role without a writable worktree and journals trace evidence", async () => {
+  it("runs a journaled cold-preparation and model turn within one bounded deadline", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-read-only-agent-")));
     roots.push(root);
     mkdirSync(path.join(root, "src"));
@@ -63,20 +65,30 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     });
     const admission = registry.admitTask(
       "milestone-18", "plan-18", admissionSecurity(root, ["src/**"]),
-      admissionContext(root, "opencode-planner", "planner", { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500, timeoutMs: 20_000 }),
+      admissionContext(root, "opencode-planner", "planner", { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500, timeoutMs: 300 }),
     );
     if (admission.status !== "admitted") throw new Error("expected admission");
 
+    let executionStartedAt = 0;
+    let modelStartedAt = 0;
+    let modelSignal: AbortSignal | null = null;
     const broker: ModelBroker = {
-      execute: vi.fn(async (request): Promise<ModelBrokerReceipt> => ({
-        outcome: "completed",
-        response: { type: "text", text: "1. Inspect contracts.\n2. Add the bounded adapter." },
-        model: { id: request.modelId, provider: "fixture", name: "planner-v1" },
-        usage: { inputTokens: 12, outputTokens: 14, costUsd: 0.01 },
-      })),
+      execute: vi.fn(async (request, signal): Promise<ModelBrokerReceipt> => {
+        modelStartedAt = Date.now();
+        modelSignal = signal;
+        expect(signal.aborted).toBe(false);
+        return {
+          outcome: "completed",
+          response: { type: "text", text: "1. Inspect contracts.\n2. Add the bounded adapter." },
+          model: { id: request.modelId, provider: "fixture", name: "planner-v1" },
+          usage: { inputTokens: 12, outputTokens: 14, costUsd: 0.01 },
+        };
+      }),
     };
     const capsule: OpenCodeReadOnlyCapsule = {
       execute: vi.fn(async (request, receivedBroker, signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
+        expect(signal.aborted).toBe(false);
+        await new Promise((resolve) => setTimeout(resolve, 116));
         expect(signal.aborted).toBe(false);
         expect(request).not.toHaveProperty("worktree");
         expect(request).not.toHaveProperty("workspace");
@@ -130,6 +142,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       }),
     };
 
+    executionStartedAt = Date.now();
     const result = await new OpenCodeReadOnlyAgent(journal, capsule, broker, modelSheet("planner")).run({
       milestoneId: "milestone-18",
       taskId: "plan-18",
@@ -137,12 +150,21 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       role: "planner",
       rolePrompt: "Plan the bounded change and cite the supplied evidence.",
       budget: { maxSeconds: 30, maxCostUsd: 1, maxInputTokens: 1_000, maxOutputTokens: 500 },
-      timeoutMs: 20_000,
+      timeoutMs: 300,
       signal: new AbortController().signal,
       admission: admission.admission,
     });
 
     expect(result.outcome).toBe("completed");
+    expect(modelStartedAt - executionStartedAt).toBeGreaterThanOrEqual(100);
+    expect(modelSignal).not.toBeNull();
+    await new Promise<void>((resolve) => {
+      if (modelSignal!.aborted) resolve();
+      else modelSignal!.addEventListener("abort", () => resolve(), { once: true });
+    });
+    expect(Date.now() - modelStartedAt).toBeGreaterThan(0);
+    expect(Date.now() - modelStartedAt).toBeLessThan(280);
+    expect(Date.now() - executionStartedAt).toBeLessThan(500);
     expect(result.trace).toEqual({ outcome: "emitted" });
     expect(registry.inspect("milestone-18")?.tasks["plan-18"]).toMatchObject({
       status: "completed",
@@ -532,7 +554,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       const attention = await research!.execute({ schemaVersion: 1, requestId: "outside-1", taskId: request.taskId, workerId: request.capsuleId,
         role: "researcher", modelId: request.transportModelId, tool: "zentra_web_research", method: "GET",
         url: "https://outside.example/path?secret=hidden", envelopeDigest: request.webResearchEnvelopeDigest,
-        policyDigest: request.webResearch!.digest }, request.webResearch, signal);
+        policyDigest: request.webResearch!.digest, trace: request.trace }, request.webResearch, signal);
       expect(attention).toMatchObject({ outcome: "denied", reason: "capability_attention" });
       observe?.({ type: "research_started", requestId: "outside-1" });
       observe?.({ type: "research_completed", requestId: "outside-1", result: attention });
@@ -569,7 +591,8 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     const capsule: OpenCodeReadOnlyCapsule = { execute: vi.fn(async (request, _broker, signal, observe, research) => {
       const source = await research!.execute({ schemaVersion: 1, requestId: "source-1", taskId: request.taskId, workerId: request.capsuleId,
         role: "researcher", modelId: request.transportModelId, tool: "zentra_web_research", method: "GET", url: "https://docs.example.com/fact",
-        envelopeDigest: request.webResearchEnvelopeDigest, policyDigest: request.webResearch!.digest }, request.webResearch, signal);
+        envelopeDigest: request.webResearchEnvelopeDigest, policyDigest: request.webResearch!.digest,
+        trace: request.trace }, request.webResearch, signal);
       observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
         containerName: request.resources.containerName, containerId: null, imageName: request.resources.imageName, imageId: null,
         repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
@@ -585,16 +608,24 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       signal: new AbortController().signal, admission: fixture.admission,
     });
     expect(fixture.registry.inspect("milestone-replay")?.tasks["research-replay"]).toMatchObject({ status: "completed" });
-    for (const mode of ["removed", "substituted"] as const) {
+    for (const mode of ["removed", "substituted", "trace_substituted", "correlation_substituted"] as const) {
       const hostile = new SqliteEventJournal(":memory:");
       const versions = new Map<string, number>();
       for (const event of journal.readAll()) {
         if (mode === "removed" && event.type === "web_research.observed") continue;
-        const payload = mode === "substituted" && event.type === "web_research.observed"
+        let payload = mode === "substituted" && event.type === "web_research.observed"
           ? { ...(event.payload as any), evidence: { ...(event.payload as any).evidence, contentSha256: "b".repeat(64) } }
           : event.payload;
+        if (mode === "trace_substituted" && event.type === "web_research.observed") {
+          const { eventDigest: _digest, ...body } = payload as any;
+          const forgedBody = { ...body, identity: { ...body.identity,
+            trace: { traceId: "forged-trace", correlationId: "forged-trace" } } };
+          payload = { ...forgedBody, eventDigest: digestCanonical(forgedBody) };
+        }
         const version = versions.get(event.streamId) ?? 0;
-        hostile.append(event.streamId, version, [{ streamId: event.streamId, type: event.type, payload, causationId: event.causationId, correlationId: event.correlationId }]);
+        hostile.append(event.streamId, version, [{ streamId: event.streamId, type: event.type, payload,
+          causationId: event.causationId,
+          correlationId: mode === "correlation_substituted" && event.type === "web_research.observed" ? "forged-trace" : event.correlationId }]);
         versions.set(event.streamId, version + 1);
       }
       expect(() => new MilestoneRegistry(hostile).inspect("milestone-replay")).toThrow(/source|evidence|digest/i);
@@ -613,6 +644,149 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     expect(new MilestoneRegistry(partial).inspect("milestone-replay")?.tasks["research-replay"]).toMatchObject({ status: "completed", terminalOutcome: "failed" });
     partial.close();
     journal.close();
+  });
+
+  it.each([
+    ["substituted model", "provider_model_mismatch", 3, 10_000_000, 1],
+    ["cumulative cost overflow", "cost_budget_exceeded", 3, 2_000_000_000, 1],
+    ["cumulative token overflow", "token_budget_exceeded", 101, 0, 1],
+  ] as const)("settles %s before cleanup, terminal failure, replay, and blocked redispatch", async (
+    _name,
+    failureReason,
+    inputTokens,
+    costUsdNano,
+    modelTurns,
+  ) => {
+    const journal = new SqliteEventJournal(":memory:");
+    const admission = readyMilestone(journal, `milestone-${failureReason}`);
+    const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
+      observe?.({ type: "model_started", modelId: request.transportModelId });
+      observe?.({ type: "model_completed", modelId: request.transportModelId, outcome: "failed", failureReason,
+        usage: { seconds: 0, inputTokens, outputTokens: 0, costUsd: costUsdNano / 1_000_000_000,
+          costUsdNano, toolCalls: 0, modelTurns } });
+      observe?.({ type: "cleanup_observed", payload: {
+        capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: null,
+        imageName: request.resources.imageName, imageId: null,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false,
+      } });
+      return {
+        outcome: "failed", openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
+        model: null, evidence: [], cleanup: "completed", brokerTransport: "completed",
+        brokerFailureReason: failureReason,
+        usage: { seconds: 0, inputTokens, outputTokens: 0, costUsd: costUsdNano / 1_000_000_000,
+          costUsdNano, toolCalls: 0, modelTurns },
+      };
+    });
+    const agent = new OpenCodeReadOnlyAgent(journal, { execute }, { execute: vi.fn() }, modelSheet("researcher"));
+    const request = {
+      milestoneId: `milestone-${failureReason}`, taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher" as const, rolePrompt: "Research.",
+      budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      timeoutMs: 1_000, signal: new AbortController().signal, admission,
+    };
+    await expect(agent.run(request)).resolves.toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: failureReason });
+    const worker = Object.values(projectWorkerLifecycle(journal.readAll()).workers)[0]!;
+    expect(worker).toMatchObject({ status: "terminal", terminalOutcome: "failed", cleanup: "completed",
+      activeModelTurns: 0 });
+    expect(journal.readAll().filter((event) => event.type === "worker.observed" &&
+      (event.payload as any).observation?.kind === "model").map((event) => (event.payload as any).observation.phase))
+      .toEqual(["started", "completed"]);
+    expect(new MilestoneRegistry(journal).inspect(`milestone-${failureReason}`)?.tasks["task-1"])
+      .toMatchObject({ status: "completed", terminalOutcome: "failed" });
+    await expect(agent.run(request)).rejects.toThrow(/task must be ready|retained durable worker/i);
+    expect(execute).toHaveBeenCalledTimes(1);
+    journal.close();
+  });
+
+  it("fails a pre-effect model-turn denial without creating a model reservation or retry", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const admission = readyMilestone(journal, "milestone-model-turn-pre-effect");
+    const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
+      observe?.({ type: "cleanup_observed", payload: {
+        capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: null,
+        imageName: request.resources.imageName, imageId: null,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false,
+      } });
+      return { outcome: "failed", openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
+        model: null, evidence: [], cleanup: "completed", brokerTransport: "completed",
+        brokerFailureReason: "model_turn_budget_exceeded",
+        usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0,
+          toolCalls: 0, modelTurns: 32 } };
+    });
+    const agent = new OpenCodeReadOnlyAgent(journal, { execute }, { execute: vi.fn() }, modelSheet("researcher"));
+    const request = { milestoneId: "milestone-model-turn-pre-effect", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher" as const, rolePrompt: "Research.",
+      budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 1_000,
+      signal: new AbortController().signal, admission };
+    await expect(agent.run(request)).resolves.toMatchObject({ outcome: "failed", cleanup: "completed",
+      brokerFailureReason: "model_turn_budget_exceeded" });
+    expect(journal.readAll().filter((event) => event.type === "worker.observed" &&
+      (event.payload as any).observation?.kind === "model")).toEqual([]);
+    const worker = Object.values(projectWorkerLifecycle(journal.readAll()).workers)[0]!;
+    expect(worker).toMatchObject({ activeModelTurns: 0, cleanup: "completed", status: "terminal", terminalOutcome: "failed" });
+    expect(new MilestoneRegistry(journal).inspect("milestone-model-turn-pre-effect")?.tasks["task-1"])
+      .toMatchObject({ status: "completed", terminalOutcome: "failed" });
+    await expect(agent.run(request)).rejects.toThrow(/task must be ready|retained durable worker/i);
+    expect(execute).toHaveBeenCalledTimes(1);
+    journal.close();
+  });
+
+  it("retries an identical model completion after append-then-throw without duplicating the durable observation", async () => {
+    const sqlite = new SqliteEventJournal(":memory:");
+    let completionAppendThrew = false;
+    const journal: EventJournal = {
+      append: (streamId, expectedVersion, events) => {
+        const stored = sqlite.append(streamId, expectedVersion, events);
+        if (!completionAppendThrew && events.some((event) => event.type === "worker.observed" &&
+          typeof event.payload === "object" && event.payload !== null &&
+          (event.payload as any).observation?.kind === "model" && (event.payload as any).observation?.phase === "completed")) {
+          completionAppendThrew = true;
+          throw new Error("simulated observer append acknowledgement loss");
+        }
+        return stored;
+      },
+      readStream: (streamId, afterVersion) => sqlite.readStream(streamId, afterVersion),
+      readAll: (afterPosition) => sqlite.readAll(afterPosition),
+    };
+    const admission = readyMilestone(journal, "milestone-observer-retry");
+    const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {
+      observe?.({ type: "model_started", modelId: request.transportModelId });
+      const completion = { type: "model_completed" as const, modelId: request.transportModelId,
+        outcome: "failed" as const, failureReason: "provider_model_mismatch" as const,
+        usage: { seconds: 0, inputTokens: 1, outputTokens: 1, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 1 } };
+      try { observe?.(completion); } catch { observe?.(completion); }
+      observe?.({ type: "cleanup_observed", payload: {
+        capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: null,
+        imageName: request.resources.imageName, imageId: null,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false,
+      } });
+      return { outcome: "failed", openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
+        model: null, evidence: [], cleanup: "completed", brokerTransport: "completed",
+        brokerFailureReason: "provider_model_mismatch" };
+    });
+    const agent = new OpenCodeReadOnlyAgent(journal, { execute }, { execute: vi.fn() }, modelSheet("researcher"));
+    const runRequest = { milestoneId: "milestone-observer-retry", taskId: "task-1", repositoryPath: process.cwd(),
+      role: "researcher" as const, rolePrompt: "Research.",
+      budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 1_000,
+      signal: new AbortController().signal, admission };
+    await expect(agent.run(runRequest)).resolves.toMatchObject({ outcome: "failed", cleanup: "completed" });
+    const modelPhases = sqlite.readAll().filter((event) => event.type === "worker.observed" &&
+      (event.payload as any).observation?.kind === "model").map((event) => (event.payload as any).observation.phase);
+    expect(modelPhases).toEqual(["started", "completed"]);
+    const worker = Object.values(projectWorkerLifecycle(sqlite.readAll()).workers)[0]!;
+    expect(worker).toMatchObject({ activeModelTurns: 0, cleanup: "completed", status: "terminal", terminalOutcome: "failed" });
+    expect(new MilestoneRegistry(sqlite).inspect("milestone-observer-retry")?.tasks["task-1"])
+      .toMatchObject({ status: "completed", terminalOutcome: "failed" });
+    await expect(agent.run(runRequest)).rejects.toThrow(/task must be ready|retained durable worker/i);
+    expect(execute).toHaveBeenCalledTimes(1);
+    sqlite.close();
   });
 });
 
@@ -635,7 +809,7 @@ function readyWebMilestone(journal: SqliteEventJournal, root: string, milestoneI
 }
 
 function readyMilestone(
-  journal: SqliteEventJournal | ProjectingEventJournal,
+  journal: EventJournal,
   milestoneId: string,
   roleOrRepository: "researcher" | "reviewer" | string = "researcher",
   timeoutMs = 1_000,

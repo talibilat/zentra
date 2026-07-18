@@ -17,7 +17,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import Database from "better-sqlite3";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, onTestFailed } from "vitest";
+import { liveFailureDiagnostics } from "./live-diagnostics.js";
+import { classifyArtifactRetention, classifyLiveGate } from "./live-gate.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = realpathSync.native(path.resolve(import.meta.dirname, "../.."));
@@ -39,11 +41,28 @@ const liveEnvironmentNames = [
   "ZENTRA_LIVE_OPENCODE_VERSION",
   "ZENTRA_LIVE_IMPLEMENTER_MODEL",
 ] as const;
-const liveGateEnabled = process.env.ZENTRA_LIVE_OPENCODE_E2E === "1";
+const liveGate = classifyLiveGate(process.env.ZENTRA_LIVE_OPENCODE_E2E);
+const liveGateEnabled = liveGate === "run";
+const artifactRetention = classifyArtifactRetention(process.env.ZENTRA_LIVE_KEEP_ARTIFACTS, liveGate);
 const roots: string[] = [];
+const preservedRoots = new Set<string>();
 
 afterAll(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0)) {
+    if (!preservedRoots.has(root)) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+describe.skipIf(liveGate !== "invalid")("installed milestone live gate configuration", () => {
+  it("fails closed for a nonempty value other than exact 0 or 1", () => {
+    throw new Error("ZENTRA_LIVE_OPENCODE_E2E must be exactly 0, 1, empty, or unset");
+  });
+});
+
+describe.skipIf(artifactRetention !== "invalid")("installed milestone live artifact retention configuration", () => {
+  it("accepts artifact retention only for an enabled live gate", () => {
+    throw new Error("ZENTRA_LIVE_KEEP_ARTIFACTS must be exactly 0, empty, or unset unless the live gate is exactly 1");
+  });
 });
 
 describe.skipIf(!liveGateEnabled)(
@@ -55,6 +74,12 @@ describe.skipIf(!liveGateEnabled)(
       const live = await liveConfiguration();
       const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-installed-live-")));
       roots.push(root);
+      if (artifactRetention === "keep") {
+        onTestFailed(() => {
+          preservedRoots.add(root);
+          process.stderr.write(`${root}\n`);
+        });
+      }
       const home = path.join(root, "consumer-home");
       const artifacts = path.join(root, "artifacts");
       const consumer = path.join(root, "consumer");
@@ -129,7 +154,7 @@ describe.skipIf(!liveGateEnabled)(
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | live-planner | opencode | ${live.azureDeployment} | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
-| live-researcher | opencode | ${live.azureDeployment} | researcher | research | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| live-researcher | opencode | ${live.azureDeployment} | researcher | research | low | 128000 | 1 | read_repository,web_research | declared | none | 1/1 |
 | live-implementer | opencode | ${live.implementerModel} | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
 | live-reviewer | opencode | ${live.azureDeployment} | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
@@ -147,6 +172,8 @@ describe.skipIf(!liveGateEnabled)(
 
 ## Network
 Default: denied
+Allowed Destinations:
+- https://www.iana.org
 
 ## Secret Handling
 - Do not retain or expose credentials.
@@ -186,7 +213,7 @@ local_preparation_only
         "milestone",
         "run",
         "--goal",
-        `Change only ${ownedFile} so it exports greeting as 'hello from live milestone'. Do not change any other file.`,
+        `Research https://www.iana.org/help/example-domains through the governed GET-only tool first, then change only ${ownedFile} so it exports greeting as 'hello from live milestone'. Do not change any other file.`,
         "--config",
         config,
         "--database",
@@ -214,7 +241,7 @@ local_preparation_only
         ZENTRA_LIVE_AZURE_OPENAI_API_KEY: live.azureApiKey,
       }, database);
       if (execution.code !== 0) {
-        throw new Error(`authenticated installed milestone exited ${execution.code} without completing`);
+        throw new Error(JSON.stringify(liveFailureDiagnostics(execution.stdout, execution.stderr)));
       }
       const traceBytes = readFileSync(trace);
       const packageOutput = Buffer.from(
@@ -240,9 +267,21 @@ local_preparation_only
         kind: "milestone.completed",
         operation: { status: "completed" },
       });
-      const azureCompletions = envelopes.filter((event) => event.kind === "milestone.task_completed")
-        .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
-      expect(azureCompletions).toHaveLength(2);
+       const azureCompletions = envelopes.filter((event) =>
+         event.kind === "milestone.task_completed" || event.kind === "milestone.agent_execution_completed")
+         .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
+       expect(azureCompletions).toHaveLength(3);
+       expect(new Set(azureCompletions.map((payload) => payload.role))).toEqual(new Set(["planner", "researcher", "reviewer"]));
+       const runningBudgets = new Map(envelopes.filter((event) => event.kind === "milestone.task_running")
+         .map((event) => event.payload as any).filter((payload) => ["planner", "researcher", "reviewer"].includes(payload.role))
+         .map((payload) => [payload.role, payload.budget]));
+       expect(runningBudgets.get("planner")).toEqual({ maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 8_000, maxOutputTokens: 2_000 });
+       expect(runningBudgets.get("researcher")).toEqual({ maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 32_000, maxOutputTokens: 2_000 });
+       expect(runningBudgets.get("reviewer")).toEqual({ maxSeconds: 300, maxCostUsd: 1, maxInputTokens: 8_000, maxOutputTokens: 2_000 });
+       expect(envelopes.filter((event) => event.kind === "milestone.task_running")
+         .map((event) => event.payload as any)
+         .filter((payload) => ["planner", "researcher", "reviewer"].includes(payload.role))
+         .every((payload) => payload.timeoutMs === 300_000)).toBe(true);
       expect(azureCompletions.every((payload) => /^[a-f0-9]{64}$/.test(payload.model.configurationDigest) &&
         payload.evidence.every((item: any) => item.provenance.providerConfigurationDigest === payload.model.configurationDigest)))
         .toBe(true);
@@ -250,8 +289,52 @@ local_preparation_only
         .map((event) => (event.payload as any).observation).filter((observation) => observation?.kind === "model" && observation.phase === "completed")
         .map((observation) => observation.usage);
       expect(measuredModelCosts.length).toBeGreaterThan(0);
-      expect(measuredModelCosts.every((usage) => Number.isSafeInteger(usage.costUsdNano) &&
-        usage.costUsdNano >= 0 && usage.costUsd === usage.costUsdNano / 1_000_000_000)).toBe(true);
+       expect(measuredModelCosts.every((usage) => Number.isSafeInteger(usage.costUsdNano) &&
+         usage.costUsdNano >= 0 && usage.costUsd === usage.costUsdNano / 1_000_000_000)).toBe(true);
+       const rootWorkers = envelopes.filter((event) => event.kind === "worker.bound")
+         .map((event) => event.payload as any).filter((payload) => payload.parentWorkerId === null);
+       expect(rootWorkers).toHaveLength(4);
+       expect(new Set(rootWorkers.map((payload) => payload.role))).toEqual(new Set(["planner", "researcher", "implementer", "reviewer"]));
+       expect(new Set(rootWorkers.map((payload) => payload.workerId)).size).toBe(4);
+       expect(envelopes.filter((event) => event.kind === "worker.bound")
+         .every((event) => (event.payload as any).parentWorkerId === null)).toBe(true);
+       const source = envelopes.find((event) => event.kind === "web_research.observed");
+       expect(source).toMatchObject({
+         actor: { role: "researcher" }, operation: { status: "completed" },
+         payload: {
+           outcome: "completed", reason: "completed", identity: { role: "researcher", tool: "zentra_web_research" },
+           usage: { requests: 1 }, evidence: {
+           evidenceId: expect.stringMatching(/^[a-f0-9]{64}$/), sourceHost: "www.iana.org",
+             sourcePathDigest: expect.stringMatching(/^[a-f0-9]{64}$/), method: "GET", status: 200,
+             contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/), compressedBytes: expect.any(Number), decompressedBytes: expect.any(Number),
+             provenance: { transport: "zentra_https_broker" },
+           },
+         },
+       });
+       expect(JSON.stringify(source)).not.toContain("example-domains");
+       expect(JSON.stringify(source)).not.toContain("Example Domains");
+       expect((source!.payload as any).evidence.compressedBytes).toBeGreaterThan(0);
+       expect((source!.payload as any).evidence.decompressedBytes).toBeGreaterThan(0);
+       expect((source!.payload as any).identity.trace).toEqual({
+         traceId: source!.trace_id,
+         correlationId: source!.trace_id,
+       });
+       const researchCompletion = azureCompletions.find((payload) => payload.role === "researcher");
+       const sourceId = (source!.payload as any).evidence.evidenceId;
+       expect(researchCompletion.evidence).toEqual([expect.objectContaining({
+         kind: "research", sourceEvidenceIds: [sourceId], summary: expect.stringContaining(`[source:${sourceId}]`),
+       })]);
+       const writerCompletion = envelopes.find((event) => event.kind === "task.writer_completed");
+       expect(writerCompletion?.payload).toMatchObject({
+         outcome: "completed", rawOutputPolicy: "not_retained", protocolFailure: null,
+         eventChain: { events: expect.arrayContaining([expect.objectContaining({ type: "step_finish" })]) },
+         networkBoundary: { modelTools: "denied", harnessProviderTransport: "user_os_network_authority" },
+       });
+       expect(envelopes.map((event) => event.kind)).toEqual(expect.arrayContaining([
+         "task.validation_started", "task.validation_completed", "task.review_requested",
+         "task.review_dispatch_intent", "task.review_approved", "task.integration_started",
+         "task.integration_prepared", "task.integration_observed", "task.cleanup_completed",
+       ]));
       const terminal = parseSingleJson(execution.stderr) as {
         readonly command: string;
         readonly milestoneId: string;
@@ -276,7 +359,7 @@ local_preparation_only
         "--milestone-id",
         terminal.milestoneId,
       ], consumer, baseEnvironment, 30_000);
-      expect(parseSingleJson(Buffer.from(status.stdout, "utf8"))).toMatchObject({
+       expect(parseSingleJson(Buffer.from(status.stdout, "utf8"))).toMatchObject({
         command: "milestone.status",
         milestone: {
           milestoneId: terminal.milestoneId,
@@ -284,7 +367,9 @@ local_preparation_only
           terminalOutcome: "completed",
           result: { outcome: "completed", trace: { path: trace, outcome: "emitted" } },
         },
-      });
+       });
+       const replayedTerminal = parseSingleJson(Buffer.from(status.stdout, "utf8")) as any;
+       expect(replayedTerminal.milestone.terminalOutcome).toBe((envelopes.at(-1)!.operation as any).status);
       expect((await git(project, ["rev-parse", "main"], baseEnvironment)).stdout.trim()).toBe(mainOid);
       expect((await git(project, ["diff", "--name-only", "main..zentra/integration"], baseEnvironment)).stdout)
         .toBe(`${ownedFile}\n`);

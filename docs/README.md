@@ -1,5 +1,10 @@
 # Zentra Documentation
 
+## Codebase Atlas
+
+- `codebase-map.html` is a self-contained, source-derived interactive map of current features, functions, schemas, tests, and end-to-end data flows.
+- Regenerate it with `pnpm docs:codebase-map` after executable declarations or module relationships change.
+
 ## Design
 
 - `design/orchestrator.md` defines the approved long-term product and architecture.

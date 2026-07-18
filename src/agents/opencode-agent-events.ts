@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 
 import { TerminalOutcomeSchema } from "../contracts/task.js";
+import { ModelBrokerFailureReasonSchema, ModelToolNameSchema, isModelBrokerToolFailureReason } from "../capsule/model-broker.js";
 
 const IdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -74,11 +75,19 @@ export const OpenCodeMilestoneCompletedPayloadSchema = z.strictObject({
   evidence: z.array(EvidenceSchema).max(128),
   cleanup: z.enum(["completed", "uncertain"]),
   brokerTransport: z.enum(["completed", "uncertain"]),
+  brokerFailureReason: ModelBrokerFailureReasonSchema.nullable().default(null),
+  brokerFailureTool: ModelToolNameSchema.optional(),
 }).superRefine((payload, context) => {
   if (payload.outcome === "completed" && (
     payload.cleanup !== "completed" || payload.brokerTransport !== "completed" ||
     payload.measuredHarness === null || payload.model === null || payload.evidence.length === 0
   )) context.addIssue({ code: "custom", message: "completed OpenCode event lacks required evidence" });
+  if (payload.outcome === "completed" && payload.brokerFailureReason !== null) {
+    context.addIssue({ code: "custom", message: "completed OpenCode event cannot contain a broker failure reason" });
+  }
+  if (payload.brokerFailureTool !== undefined && !isModelBrokerToolFailureReason(payload.brokerFailureReason)) {
+    context.addIssue({ code: "custom", message: "OpenCode broker failure tool requires a tool-call failure reason" });
+  }
   for (const evidence of payload.evidence) {
     const digest = createHash("sha256").update(evidence.summary, "utf8").digest("hex");
     if (digest !== evidence.sha256 || evidence.provenance.capabilityId !== payload.capabilityId ||

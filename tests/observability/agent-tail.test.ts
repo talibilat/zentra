@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { StoredEvent } from "../../src/contracts/event.js";
-import { OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
+import { OpenCodeMilestoneCompletedPayloadSchema, OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
 import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
 import { createAuthorityAttention, createOpenCodeAdmissionPacket, digestCanonical } from "../../src/contracts/authority-attention.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
@@ -483,6 +483,43 @@ describe("Agent Tail event envelope export", () => {
       },
     }));
     expect(observed.payload).toMatchObject({ observation: { usage: { costUsd: 0.3, costUsdNano: 300_000_000 } } });
+    const failedPayload = {
+      ...(observed.payload as any),
+      observation: {
+        kind: "model", name: "provider/model", phase: "completed", outcome: "failed",
+        failureReason: "tool_call_arguments_schema_invalid", failureTool: "read",
+        usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 1 },
+      },
+    };
+    const failed = storedEventToAgentTailEvent(storedEvent({
+      streamId: "worker-task:task-1", type: "worker.observed", payload: failedPayload,
+    }));
+    expect(failed.payload).toMatchObject({ observation: {
+      failureReason: "tool_call_arguments_schema_invalid", failureTool: "read",
+    } });
+    expect(JSON.stringify(failed)).not.toContain("host-secret");
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      streamId: "worker-task:task-1", type: "worker.observed",
+      payload: { ...failedPayload, observation: { ...failedPayload.observation, failureReason: "host-secret" } },
+    }))).toThrow();
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      streamId: "worker-task:task-1", type: "worker.observed",
+      payload: { ...failedPayload, observation: { ...failedPayload.observation,
+        failureReason: "provider_model_mismatch", failureTool: "read" } },
+    }))).toThrow(/failure tool/i);
+
+    const terminalPayload = OpenCodeMilestoneCompletedPayloadSchema.parse({
+      taskId: "task-1", capsuleId: "research-1", outcome: "failed", actorId: "researcher-1", role: "researcher",
+      harness: "opencode", capabilityId: "researcher-1", transportModelId: "provider/model",
+      measuredHarness: null, model: null, evidence: [], cleanup: "completed", brokerTransport: "completed",
+      brokerFailureReason: "tool_call_arguments_schema_invalid", brokerFailureTool: "read",
+    });
+    const terminal = storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1", type: "milestone.task_completed", payload: terminalPayload,
+    }));
+    expect(terminal.payload).toMatchObject({
+      brokerFailureReason: "tool_call_arguments_schema_invalid", brokerFailureTool: "read",
+    });
   });
 
   it("parents top-level workers to the actual standalone or milestone task span", () => {

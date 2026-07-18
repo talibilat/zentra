@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,10 +10,13 @@ import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import type { EventJournal } from "../../src/journal/journal.js";
 import type { NewEvent } from "../../src/contracts/event.js";
+import { derivePlanAuthority } from "../../src/contracts/replanning.js";
+import { GovernedWebResearch, type WebResearchTransport } from "../../src/research/web-research.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { ProjectConfigSchema } from "../../src/projects/project-config.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 import {
+  INSTALLED_MILESTONE_RESEARCH_URL,
   InstalledMilestoneRunner,
   createInstalledMilestonePlan,
 } from "../../src/orchestration/installed-milestone.js";
@@ -59,6 +62,16 @@ describe("createInstalledMilestonePlan", () => {
       implementerId: "implementer", reviewerId: "reviewer",
     });
     expect(another.tasks[2]!.description).not.toBe(plan.tasks[2]!.description);
+    expect(plan.tasks[1]).toMatchObject({
+      description: expect.stringContaining(INSTALLED_MILESTONE_RESEARCH_URL),
+      acceptanceCriteria: [expect.stringContaining(INSTALLED_MILESTONE_RESEARCH_URL)],
+      budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 32_000, maxOutputTokens: 2_000 },
+    });
+    expect(plan.tasks[0]?.budget).toMatchObject({ maxSeconds: 300, maxInputTokens: 8_000, maxOutputTokens: 2_000, maxCostUsd: 1 });
+    expect(plan.tasks[3]?.budget).toMatchObject({ maxSeconds: 300, maxInputTokens: 8_000, maxOutputTokens: 2_000, maxCostUsd: 1 });
+    expect(derivePlanAuthority(plan).aggregateBudgetCeiling).toEqual({
+      maxSeconds: 1_200, maxRetries: 0, maxCostUsd: 5, maxInputTokens: 64_000, maxOutputTokens: 10_000,
+    });
   });
 
   it("composes the current brokered read-only, writer, validation, review, integration, result, and trace path", async () => {
@@ -135,10 +148,24 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       inputTokenRateUsdPerMillion: "1", outputTokenRateUsdPerMillion: "2",
     };
     const broker = azureOpenAIModelBrokerForTest(azureConfig, { KEY: "consumer-controlled-secret" }, azureDispatch);
+    let researchMethod: "GET" | "HEAD" = "GET";
+    const researchTransport: WebResearchTransport = { dispatch: async () => ({
+      status: 200, headers: { "content-type": "text/plain" }, body: Buffer.from("IANA example domains are reserved for documentation."),
+      compressedBytes: 52, decompressedBytes: 52, resolvedAddress: "192.0.43.8", tls: true, dispatched: true,
+    }) };
     let advanceAfterResearch = false;
     const capsule: OpenCodeReadOnlyCapsule = {
       execute: async (request, receivedBroker, signal, observe) => {
         capsuleExecutions += 1;
+        expect(request.timeoutMs).toBe(300_000);
+        expect(request.budget.maxSeconds).toBe(300);
+        if (request.role === "researcher") {
+          expect(request.webResearch).toMatchObject({
+            requiredRequest: { method: "GET", url: INSTALLED_MILESTONE_RESEARCH_URL, maxRequests: 1 },
+            timeoutMs: 120_000,
+            budget: { maxRequests: 1, maxBytes: 16 * 1024 * 1024, maxTimeMs: 120_000 },
+          });
+        }
         observe?.({ type: "resources_prepared", payload: {
           capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
           containerName: request.resources.containerName, containerId: "b".repeat(64),
@@ -169,11 +196,29 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
           repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
           outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false,
         } });
+        let researchEvidence: { readonly evidenceId: string } | null = null;
+        if (request.role === "researcher") {
+          const requestId = `research-${capsuleExecutions}`;
+          observe?.({ type: "research_started", requestId });
+          const researched = await new GovernedWebResearch(sqlite, researchTransport).execute({
+            schemaVersion: 1, requestId, taskId: request.taskId, workerId: request.capsuleId,
+            role: request.role, modelId: request.transportModelId, tool: "zentra_web_research",
+            method: researchMethod, url: INSTALLED_MILESTONE_RESEARCH_URL,
+            envelopeDigest: request.webResearchEnvelopeDigest, policyDigest: request.webResearch!.digest,
+            trace: request.trace,
+          }, request.webResearch, signal);
+          observe?.({ type: "research_completed", requestId, result: researched });
+          researchEvidence = researched.evidence;
+        }
+        const summary = receipt.response?.type === "text"
+          ? `${receipt.response.text}${researchEvidence === null ? "" : ` [source:${researchEvidence.evidenceId}]`}`
+          : null;
         return {
           outcome: receipt.outcome === "completed" ? "completed" : "failed",
           openCode: { version: "1.18.3", executableSha256: "d".repeat(64) },
           model: receipt.model,
-          evidence: receipt.response?.type === "text" ? [{ kind: request.role === "reviewer" ? "review" : "plan", summary: receipt.response.text }] : [],
+          evidence: summary === null ? [] : [{ kind: request.role === "reviewer" ? "review" : request.role === "researcher" ? "research" : "plan",
+            summary, ...(researchEvidence === null ? {} : { sourceEvidenceIds: [researchEvidence.evidenceId] }) }],
           cleanup: "completed", brokerTransport: "completed",
         };
       },
@@ -181,13 +226,13 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     let capsuleExecutions = 0;
     const models = { models: [
       model("planner", "planner", ["read_repository"]),
-      model("researcher", "researcher", ["read_repository"]),
+      model("researcher", "researcher", ["read_repository", "web_research"], "declared"),
       model("implementer", "implementer", ["read_repository", "write_worktree"]),
       model("reviewer", "reviewer", ["read_repository", "review_diff"]),
     ] };
     const security = {
       allowedRepositories: [repository], allowedFileScopes: ["src/**"], forbiddenPaths: [".env", ".git/**"],
-      network: { default: "denied" as const, allowedDestinations: [] }, secretHandling: ["No parent secrets."],
+      network: { default: "denied" as const, allowedDestinations: [new URL(INSTALLED_MILESTONE_RESEARCH_URL).origin] }, secretHandling: ["No parent secrets."],
       approvalRequiredOperations: ["external_effect"], releaseBoundary: "local_preparation_only",
       stopAndAskConditions: ["missing_authority"],
     };
@@ -211,6 +256,15 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("installed milestone requires exactly one approved planner capability");
     expect(sqlite.readStream("installed-extra-tool")).toEqual([]);
+    const combinedRoleModels = { models: models.models.map((candidate) => candidate.id === "planner"
+      ? { ...candidate, roles: ["planner", "reviewer"] }
+      : candidate) };
+    await expect(runner.run({
+      milestoneId: "installed-combined-role", goal: "Reject combined role", file: "src/greeting.mjs", tracePath: trace,
+      project, models: combinedRoleModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
+      openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow("installed milestone requires four distinct single-role capability identities");
+    expect(sqlite.readStream("installed-combined-role")).toEqual([]);
     await expect(runner.run({
       milestoneId: "installed-bad-attestation", goal: "Reject host drift", file: "src/greeting.mjs", tracePath: trace,
       project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome,
@@ -218,6 +272,17 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     })).rejects.toThrow(/^host OpenCode operator attestation failed$/);
     expect(sqlite.readStream("installed-bad-attestation")).toEqual([]);
     expect(capsuleExecutions).toBe(0);
+
+    researchMethod = "HEAD";
+    await expect(runner.run({
+      milestoneId: "installed-head-only", goal: "HEAD cannot satisfy required research", file: "src/greeting.mjs", tracePath: trace,
+      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow("required research source evidence is missing or invalid");
+    expect(sqlite.readStream("installed-head-only").map((event) => event.type)).not.toContain("milestone.writer_batch_started");
+    expect(existsSync(writerObservation) ? readFileSync(writerObservation, "utf8") : "")
+      .not.toContain("HEAD cannot satisfy required research");
+    researchMethod = "GET";
 
     process.env.ZENTRA_AMBIENT_SECRET = "must-not-reach-writer";
     let result;
@@ -237,13 +302,13 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     });
     expect(sqlite.readStream("installed").map((event) => event.type)).toContain("milestone.writer_batch_started");
     expect(result.result).toMatchObject({ outcome: "completed", trace: { path: trace, outcome: "emitted" } });
-    const azureEvidence = sqlite.readAll().filter((event) => event.type === "milestone.task_completed")
+    const azureEvidence = sqlite.readStream("installed").filter((event) => event.type === "milestone.task_completed")
       .map((event) => event.payload as any).filter((payload) => payload.model?.provider === "azure");
     expect(azureEvidence).toHaveLength(2);
     expect(azureEvidence.every((payload) => /^[a-f0-9]{64}$/.test(payload.model.configurationDigest) &&
       payload.evidence.every((item: any) => item.provenance.providerConfigurationDigest === payload.model.configurationDigest)))
       .toBe(true);
-    const modelUsage = sqlite.readAll().filter((event) => event.type === "worker.observed")
+    const modelUsage = sqlite.readAll().filter((event) => event.type === "worker.observed" && event.correlationId === "installed")
       .map((event) => (event.payload as any).observation).filter((observation) => observation.kind === "model" && observation.phase === "completed");
     expect(modelUsage).toHaveLength(3);
     expect(modelUsage.every((observation) => observation.usage.costUsdNano === 60_000 && observation.usage.costUsd === 0.00006))
@@ -258,7 +323,13 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
           digest: expect.stringMatching(/^[a-f0-9]{64}$/),
           items: expect.arrayContaining([
             expect.objectContaining({ role: "planner", summary: expect.any(String) }),
-            expect.objectContaining({ role: "researcher", summary: expect.any(String) }),
+            expect.objectContaining({
+              role: "researcher", summary: expect.stringMatching(/\[source:[a-f0-9]{64}\]/),
+              sourceEvidenceIds: [expect.stringMatching(/^[a-f0-9]{64}$/)],
+              sources: [expect.objectContaining({
+                sourceUrl: INSTALLED_MILESTONE_RESEARCH_URL, method: "GET", status: 200,
+              })],
+            }),
           ]),
         }),
         baseRevisionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -274,12 +345,15 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       }),
     });
     expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });
+    const sourceEventsBeforeReplay = sqlite.readStream("web-research:installed-research");
+    expect(sourceEventsBeforeReplay).toHaveLength(1);
     const replayed = await runner.run({
       milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
       project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(replayed.terminalOutcome).toBe("completed");
+    expect(sqlite.readStream("web-research:installed-research")).toEqual(sourceEventsBeforeReplay);
     const executionsAfterFirst = capsuleExecutions;
     const second = await runner.run({
       milestoneId: "installed-second", goal: "Update the second module after prior integration", file: "src/second.mjs", tracePath: trace,
@@ -296,8 +370,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     const recoveredTrace = path.join(root, "recovered-trace.jsonl");
     const recoveredJournal = new SqliteEventJournal(recoveredDatabase);
     for (const event of sqlite.readAll().filter((event) =>
-      (event.streamId === "installed" || event.streamId === "installed-implement") &&
-      event.type !== "milestone.writer_integration_completed" && !event.type.startsWith("milestone.completed"))) {
+      ((event.streamId === "installed" || event.streamId === "installed-implement") &&
+      event.type !== "milestone.writer_integration_completed" && !event.type.startsWith("milestone.completed")) ||
+      event.streamId.includes("installed-research") ||
+      (event.type.startsWith("capability_envelope.") && JSON.stringify(event.payload).includes('"taskId":"installed-research"')))) {
       const version = recoveredJournal.readStream(event.streamId).at(-1)?.streamVersion ?? 0;
       const causationId = event.type === "milestone.integration_branch_preparation_observed"
         ? recoveredJournal.readStream(event.streamId).find((candidate) =>
@@ -411,10 +487,15 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
   }, 60_000);
 });
 
-function model(id: string, role: "planner" | "researcher" | "implementer" | "reviewer", tools: string[]) {
+function model(
+  id: string,
+  role: "planner" | "researcher" | "implementer" | "reviewer",
+  tools: string[],
+  network: "denied" | "declared" = "denied",
+) {
   return {
     id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
-    contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network: "denied",
+    contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network,
     fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 },
   };
 }

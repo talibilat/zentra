@@ -172,6 +172,8 @@ async function initializeProject(baseDirectory: string): Promise<{
 
 ## Network
 Default: denied
+Allowed Destinations:
+- https://www.iana.org
 
 ## Secret Handling
 - Do not inherit parent secrets.
@@ -259,6 +261,7 @@ describe("publishable CLI package", () => {
     const milestoneOpenCodeHome = path.join(milestoneRoot, "opencode-home");
     const milestonePreload = path.join(milestoneRoot, "intercept-azure.mjs");
     const milestoneWriterObservation = path.join(milestoneRoot, "writer-observation.json");
+    const milestoneNetworkObservation = path.join(milestoneRoot, "network-observation.json");
     mkdirSync(milestoneOpenCodeHome);
     writeFileSync(milestoneModels, `# Models
 
@@ -266,7 +269,7 @@ describe("publishable CLI package", () => {
 | id | harness | model | roles | specialties | cost | context | concurrency | tools | network | fallback | quality |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | planner | opencode | zentra-deployment | planner | planning | low | 128000 | 1 | read_repository | denied | none | 1/1 |
-| researcher | opencode | zentra-deployment | researcher | research | low | 128000 | 1 | read_repository | denied | none | 1/1 |
+| researcher | opencode | zentra-deployment | researcher | research | low | 128000 | 1 | read_repository,web_research | declared | none | 1/1 |
 | implementer | opencode | fixture/implementer | implementer | coding | low | 128000 | 1 | read_repository,write_worktree | denied | none | 1/1 |
 | reviewer | opencode | zentra-deployment | reviewer | review | low | 128000 | 1 | read_repository,review_diff | denied | none | 1/1 |
 `, "utf8");
@@ -290,11 +293,22 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
 `, { mode: 0o755 });
     writeFileSync(milestonePreload, [
       'import { createHash } from "node:crypto";',
-      'import { registerHooks } from "node:module";',
+      'import dns from "node:dns";',
+      'import https from "node:https";',
+      'import { registerHooks, syncBuiltinESMExports } from "node:module";',
+      'import { readFileSync, writeFileSync } from "node:fs";',
+      'import { fileURLToPath } from "node:url";',
+      `const networkObservation=${JSON.stringify(milestoneNetworkObservation)};`,
+      'let researchCalls=0;',
+      'globalThis.__ZENTRA_PACKED_RESEARCH_TRANSPORT__={dispatch:async input=>{if(input.method!=="GET"||input.url.href!=="https://www.iana.org/help/example-domains")throw new Error("unexpected governed research request");researchCalls+=1;writeFileSync(networkObservation,JSON.stringify({researchCalls,method:input.method,url:input.url.href,realNetwork:false}));const body=Buffer.from("Controlled IANA documentation fixture.");return{status:200,headers:{"content-type":"text/plain"},body,compressedBytes:body.length,decompressedBytes:body.length,resolvedAddress:"192.0.43.8",tls:true,dispatched:true}}};',
+      'dns.promises.lookup=async()=>{throw new Error("unexpected public DNS")};',
+      'https.request=()=>{throw new Error("unexpected HTTPS socket")};',
+      'syncBuiltinESMExports();',
       'registerHooks({ load(url, context, nextLoad) {',
+      '  if(url.endsWith("/dist/src/agents/opencode-read-only-agent.js")){const source=readFileSync(fileURLToPath(url),"utf8");const transportTransformed=source.replace("new NodeHttpsResearchTransport()","globalThis.__ZENTRA_PACKED_RESEARCH_TRANSPORT__");const transformed=transportTransformed.replace("}, researchCapability));","}, researchCapability===undefined?undefined:{execute:(raw,policy,researchSignal)=>researchCapability.execute({...raw,trace:packet.trace},policy,researchSignal)}));");if(transportTransformed===source||transformed===transportTransformed)throw new Error("private research transport or trace interception did not apply");return{format:"module",shortCircuit:true,source:transformed}}',
       '  if (url.endsWith("/dist/src/providers/azure-openai-model-broker.js")) return { format: "module", shortCircuit: true, source: `import { createHash } from "node:crypto"; export const AzureOpenAIProviderConfigSchema={parse(value){if(value?.provider!=="azure")throw new Error("invalid provider");return value}}; export class AzureOpenAIModelBroker { static create(config,environment){if(!environment[config.credentialEnv])throw new Error("credential unavailable");return new AzureOpenAIModelBroker(config)} constructor(config){this.config=config} async execute(request,signal){if(signal.aborted)return{outcome:"cancelled",response:null,model:null,usage:null};if(process.env.ZENTRA_TEST_PROVIDER_FAILURE==="1")return{outcome:"failed",response:null,model:null,usage:null};let content="Use only the explicitly owned file.";if(request.prompt.includes("requiredResponse")){const challenge=JSON.parse(request.prompt);content=JSON.stringify({schemaVersion:1,reviewerId:challenge.request.reviewerId,decision:"approve",requestSha256:createHash("sha256").update(JSON.stringify(challenge.request),"utf8").digest("hex"),diffSha256:challenge.request.diffSha256,validationSha256:challenge.request.validationSha256,decidedAt:"2026-07-17T12:00:00.000Z",reason:"The installed package exact diff is approved."})}const configurationDigest=createHash("sha256").update(JSON.stringify(this.config),"utf8").digest("hex");return{outcome:"completed",response:{type:"text",text:content},model:{id:this.config.deployment,provider:"azure",name:"provider-model",configurationDigest},usage:{inputTokens:20,outputTokens:20,costUsd:0.00006,costUsdNano:60000}}} }` };',
       '  if (!url.endsWith("/dist/src/capsule/opencode-read-only-capsule.js")) return nextLoad(url, context);',
-      '  return { format: "module", shortCircuit: true, source: `export class DockerOpenCodeReadOnlyCapsule { async execute(request, broker, signal, observe) { observe?.({ type: "resources_prepared", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision } }); const receipt = await broker.execute({ modelId: request.transportModelId, prompt: request.rolePrompt, maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens, maxCostUsd: request.budget.maxCostUsd }, signal); observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } }); return { outcome: receipt.outcome === "completed" ? "completed" : "failed", openCode: { version: "1.18.3", executableSha256: "d".repeat(64) }, model: receipt.model, evidence: receipt.response?.type === "text" ? [{ kind: request.role === "reviewer" ? "review" : "plan", summary: receipt.response.text }] : [], cleanup: "completed", brokerTransport: receipt.outcome === "uncertain" ? "uncertain" : "completed" }; } } export function parseOpenCodeFinalAssistantText() { throw new Error("not used by external test capsule"); }` };',
+      '  return { format: "module", shortCircuit: true, source: `export class DockerOpenCodeReadOnlyCapsule { async execute(request, broker, signal, observe, research) { observe?.({ type: "resources_prepared", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision } }); const receipt = await broker.execute({ modelId: request.transportModelId, prompt: request.rolePrompt, maxInputTokens: request.budget.maxInputTokens, maxOutputTokens: request.budget.maxOutputTokens, maxCostUsd: request.budget.maxCostUsd }, signal); let source=null;if(request.role==="researcher"){const requestId="package-research";observe?.({type:"research_started",requestId});const result=await research.execute({schemaVersion:1,requestId,taskId:request.taskId,workerId:request.capsuleId,role:request.role,modelId:request.transportModelId,tool:"zentra_web_research",method:"GET",url:"https://www.iana.org/help/example-domains",envelopeDigest:request.webResearchEnvelopeDigest,policyDigest:request.webResearch.digest},request.webResearch,signal);observe?.({type:"research_completed",requestId,result});source=result.evidence} observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel, containerName: request.resources.containerName, containerId: "b".repeat(64), imageName: request.resources.imageName, imageId: "sha256:" + "c".repeat(64), repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision, outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } }); const summary=receipt.response?.type === "text"?receipt.response.text+(source===null?"":" [source:"+source.evidenceId+"]"):null;return { outcome: receipt.outcome === "completed"&&summary!==null ? "completed" : "failed", openCode: { version: "1.18.3", executableSha256: "d".repeat(64) }, model: receipt.model, evidence: summary===null?[]:[{ kind: request.role === "reviewer" ? "review" : request.role === "researcher" ? "research" : "plan", summary, ...(source===null?{}:{sourceEvidenceIds:[source.evidenceId]}) }], cleanup: "completed", brokerTransport: receipt.outcome === "uncertain" ? "uncertain" : "completed" }; } } export function parseOpenCodeFinalAssistantText() { throw new Error("not used by external test capsule"); }` };',
       '} });',
     ].join("\n"), "utf8");
     const installedMilestone = await run(binary, [
@@ -317,7 +331,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       ZENTRA_AMBIENT_SECRET: "must-not-reach-writer",
     });
     expect(installedMilestone.stdout).toContain('"kind":"milestone.created"');
-    expect(JSON.parse(installedMilestone.stderr)).toMatchObject({
+    const installedTerminal = JSON.parse(installedMilestone.stderr) as any;
+    expect(installedTerminal).toMatchObject({
       command: "milestone.run",
       projectId: "package-project",
       lifecycle: "terminal",
@@ -327,6 +342,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     });
     expect(`${installedMilestone.stdout}${installedMilestone.stderr}`).not.toContain("package-provider-secret");
     expect(`${installedMilestone.stdout}${installedMilestone.stderr}`).not.toContain(repositoryRoot);
+    expect(installedMilestone.stdout).toBe(readFileSync(milestoneTrace, "utf8"));
     expect(Buffer.concat([
       readFileSync(milestoneProject.database),
       readFileSync(milestoneTrace),
@@ -336,8 +352,61 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       ambient: null,
       brief: expect.stringContaining("Update the package greeting"),
     });
+    const installedTrace = readFileSync(milestoneTrace, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as any);
+    const installedRootWorkers = installedTrace.filter((event) => event.kind === "worker.bound")
+      .map((event) => event.payload).filter((payload) => payload.parentWorkerId === null);
+    expect(installedRootWorkers).toHaveLength(4);
+    expect(new Set(installedRootWorkers.map((payload) => payload.role)))
+      .toEqual(new Set(["planner", "researcher", "implementer", "reviewer"]));
+    expect(installedTrace.filter((event) => event.kind === "worker.bound")
+      .every((event) => event.payload.parentWorkerId === null)).toBe(true);
+    const installedSourceEvent = installedTrace.find((event) => event.kind === "web_research.observed");
+    expect(installedSourceEvent).toMatchObject({
+      operation: { status: "completed" }, payload: {
+        identity: { role: "researcher", tool: "zentra_web_research" }, usage: { requests: 1 },
+        evidence: { sourceHost: "www.iana.org", method: "GET", status: 200,
+          contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          compressedBytes: Buffer.byteLength("Controlled IANA documentation fixture."),
+          decompressedBytes: Buffer.byteLength("Controlled IANA documentation fixture.") },
+      },
+    });
+    expect(installedSourceEvent.trace_id).toBe(installedTrace[0].trace_id);
+    expect(installedSourceEvent.payload.identity.trace).toEqual({
+      traceId: installedSourceEvent.trace_id,
+      correlationId: installedSourceEvent.trace_id,
+    });
+    expect(JSON.parse(readFileSync(milestoneNetworkObservation, "utf8"))).toEqual({
+      researchCalls: 1, method: "GET", url: "https://www.iana.org/help/example-domains", realNetwork: false,
+    });
+    expect(JSON.stringify(installedSourceEvent)).not.toContain("example-domains");
+    const installedResearch = installedTrace.find((event) =>
+      (event.kind === "milestone.task_completed" || event.kind === "milestone.agent_execution_completed") &&
+      event.payload.role === "researcher");
+    expect(installedResearch.payload.evidence[0]).toMatchObject({
+      sourceEvidenceIds: [installedSourceEvent.payload.evidence.evidenceId],
+      summary: expect.stringContaining(`[source:${installedSourceEvent.payload.evidence.evidenceId}]`),
+    });
+    expect(installedTrace.map((event) => event.kind)).toEqual(expect.arrayContaining([
+      "task.writer_completed", "task.validation_completed", "task.review_requested", "task.review_approved",
+      "task.integration_started", "task.integration_prepared", "task.integration_observed", "task.cleanup_completed",
+    ]));
     expect((await run(gitExecutable, ["show", "zentra/integration:greeting.txt"], milestoneProject.repository)).stdout)
       .toBe("hello from package\n");
+    expect((await run(gitExecutable, ["show", "main:greeting.txt"], milestoneProject.repository)).stdout)
+      .toBe("hello\n");
+    expect((await run(gitExecutable, ["diff", "--name-only", "main..zentra/integration"], milestoneProject.repository)).stdout)
+      .toBe("greeting.txt\n");
+    expect((await run(gitExecutable, ["branch", "--list", "ticket/*"], milestoneProject.repository)).stdout.trim()).toBe("");
+    expect(existsSync(path.join(milestoneRoot, "worktrees")) ? readdirSync(path.join(milestoneRoot, "worktrees")) : [])
+      .toEqual([]);
+    const installedStatus = await run(binary, [
+      "milestone", "status", "--database", milestoneProject.database, "--milestone-id", installedTerminal.milestoneId,
+    ], consumer);
+    expect(JSON.parse(installedStatus.stdout)).toMatchObject({
+      command: "milestone.status",
+      milestone: { milestoneId: installedTerminal.milestoneId, lifecycle: "terminal", terminalOutcome: "completed" },
+    });
 
     const legacyProvider = path.join(milestoneRoot, "unsupported-provider.json");
     const legacyDatabase = path.join(milestoneRoot, "legacy-provider.sqlite");
