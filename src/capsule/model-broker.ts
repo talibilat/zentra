@@ -17,7 +17,7 @@ const AssistantResponseSchema = z.discriminatedUnion("type", [
     type: z.literal("tool_calls"),
     calls: z.array(z.strictObject({
       id: ModelToolCallIdSchema,
-      name: z.enum(["read", "glob", "grep"]),
+      name: z.enum(["read", "glob", "grep", "zentra_research_web_research"]),
       arguments: z.string().min(2).max(64 * 1024),
     })).min(1).max(16),
   }),

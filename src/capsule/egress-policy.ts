@@ -177,29 +177,55 @@ export function decideProxyFlow(policy: CapsulePolicy, request: ProxyFlowRequest
 export function isPublicAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 4) {
-    const octets = address.split(".").map(Number);
-    const [a = -1, b = -1] = octets;
-    return !(
-      a === 0 || a === 10 || a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && (b === 0 || b === 168)) ||
-      (a === 198 && (b === 18 || b === 19)) ||
-      (a === 198 && b === 51) || (a === 203 && b === 0) ||
-      a >= 224
-    );
+    const value = ipv4Value(address);
+    return !IPV4_SPECIAL.some(([network, prefix]) => inSubnet(value, network, prefix, 32));
   }
   if (family === 6) {
-    const normalized = address.toLowerCase();
-    return !(
-      normalized === "::" || normalized === "::1" || normalized.startsWith("::ffff:") ||
-      normalized.startsWith("fc") || normalized.startsWith("fd") ||
-      /^fe[89ab]/.test(normalized) || normalized.startsWith("ff") ||
-      normalized.startsWith("2001:db8:")
-    );
+    const value = ipv6Value(address);
+    if (inSubnet(value, 0xffffn << 32n, 96, 128)) return isPublicAddress(ipv4FromValue(value & 0xffffffffn));
+    if (!inSubnet(value, 0x2000n << 112n, 3, 128)) return false;
+    return !IPV6_SPECIAL.some(([network, prefix]) => inSubnet(value, network, prefix, 128));
   }
   return false;
+}
+
+const IPV4_SPECIAL: readonly (readonly [bigint, number])[] = [
+  [ipv4Value("0.0.0.0"), 8], [ipv4Value("10.0.0.0"), 8], [ipv4Value("100.64.0.0"), 10],
+  [ipv4Value("127.0.0.0"), 8], [ipv4Value("169.254.0.0"), 16], [ipv4Value("172.16.0.0"), 12],
+  [ipv4Value("192.0.0.0"), 24], [ipv4Value("192.0.2.0"), 24], [ipv4Value("192.31.196.0"), 24],
+  [ipv4Value("192.52.193.0"), 24], [ipv4Value("192.88.99.0"), 24], [ipv4Value("192.168.0.0"), 16],
+  [ipv4Value("192.175.48.0"), 24], [ipv4Value("198.18.0.0"), 15], [ipv4Value("198.51.100.0"), 24],
+  [ipv4Value("203.0.113.0"), 24], [ipv4Value("224.0.0.0"), 4], [ipv4Value("240.0.0.0"), 4],
+];
+const IPV6_SPECIAL: readonly (readonly [bigint, number])[] = [
+  [ipv6Value("64:ff9b::"), 96], [ipv6Value("64:ff9b:1::"), 48], [ipv6Value("100::"), 64],
+  [ipv6Value("2001::"), 23], [ipv6Value("2001:2::"), 48], [ipv6Value("2001:db8::"), 32],
+  [ipv6Value("2002::"), 16], [ipv6Value("3fff::"), 20], [ipv6Value("5f00::"), 16],
+  [ipv6Value("fc00::"), 7], [ipv6Value("fec0::"), 10], [ipv6Value("fe80::"), 10], [ipv6Value("ff00::"), 8],
+];
+
+function ipv4Value(address: string): bigint {
+  return address.split(".").reduce((value, octet) => (value << 8n) | BigInt(Number(octet)), 0n);
+}
+function ipv4FromValue(value: bigint): string {
+  return [24n, 16n, 8n, 0n].map((shift) => Number((value >> shift) & 0xffn)).join(".");
+}
+function ipv6Value(address: string): bigint {
+  const [left = "", right = ""] = address.toLowerCase().split("::", 2);
+  const parse = (side: string): number[] => side === "" ? [] : side.split(":").flatMap((part) => {
+    if (!part.includes(".")) return [Number.parseInt(part, 16)];
+    const value = Number(ipv4Value(part));
+    return [value >>> 16, value & 0xffff];
+  });
+  const before = parse(left);
+  const after = parse(right);
+  const groups = address.includes("::") ? [...before, ...Array(8 - before.length - after.length).fill(0), ...after] : before;
+  if (groups.length !== 8) throw new Error("invalid IPv6 address");
+  return groups.reduce((value, group) => (value << 16n) | BigInt(group), 0n);
+}
+function inSubnet(value: bigint, network: bigint, prefix: number, bits: number): boolean {
+  const shift = BigInt(bits - prefix);
+  return (value >> shift) === (network >> shift);
 }
 
 export function findExactGitHubGrant(

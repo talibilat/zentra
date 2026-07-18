@@ -11,6 +11,10 @@ import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { MultiAgentMilestoneCoordinator } from "../../src/orchestration/multi-agent-milestone.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+import { buildRoleCapabilityBinding, RoleCapabilityEnvelopeService, roleToolPermissions } from "../../src/workers/role-capability-envelope.js";
+import { WorkerLifecycleService, projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
+import { digestCanonical } from "../../src/contracts/authority-attention.js";
+import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
 
 const security: SecuritySheet = {
   allowedRepositories: ["/tmp/repository"],
@@ -219,7 +223,7 @@ describe("OpenCodeReadOnlyProgram", () => {
       } });
       return {
         outcome: "completed", cleanup: "completed", brokerTransport: "completed",
-        openCode: { version: "1.18.1", executableSha256: "a".repeat(64) },
+        openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
         model: receipt.model,
         evidence: [{ kind: "plan", summary: "Plan evidence." }],
       };
@@ -395,5 +399,67 @@ describe("OpenCodeReadOnlyProgram", () => {
     sink.close();
     restartedJournal.close();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reopens after evaluation-before-pause and converges without redispatch", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-research-attention-restart-")));
+    mkdirSync(path.join(root, "src")); writeFileSync(path.join(root, "src/context.ts"), "context\n");
+    const database = path.join(root, "events.sqlite");
+    const first = new SqliteEventJournal(database);
+    const registry = new MilestoneRegistry(first);
+    registry.register({ milestoneId: "milestone-attention-restart", projectId: "zentra", title: "Research", correlationId: "trace-attention-restart",
+      plan: { milestoneId: "milestone-attention-restart", projectId: "zentra", goal: "Research", tasks: [{ taskId: "task-attention-restart", title: "Research", description: "Research.", dependencies: [],
+        ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Evidence."], roleAssignment: { role: "researcher", agentId: "approved-researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 10, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 } }] } });
+    const webSecurity: SecuritySheet = { ...security, allowedRepositories: [root], network: { default: "denied", allowedDestinations: ["https://docs.example.com"] } };
+    const models = { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000,
+      maxConcurrency: 1, toolPermissions: ["read_repository", "web_research"], network: "declared", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+    const admitted = registry.admitTask("milestone-attention-restart", "task-attention-restart", webSecurity, {
+      kind: "opencode", repositoryPath: root, actorId: "approved-researcher", harness: "opencode", role: "researcher", capabilityId: "approved-researcher", transportModelId: "fixture/model",
+      authority: "read_only", roles: ["researcher"], toolPermissions: ["read_repository", "web_research"], network: "declared", contextTokens: 1_000,
+      requestedBudget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 10_000 },
+    }, models);
+    if (admitted.status !== "admitted") throw new Error("expected admitted research task");
+    const model = models.models[0]!;
+    const binding = buildRoleCapabilityBinding({ milestoneId: "milestone-attention-restart", taskId: "task-attention-restart", projectId: "zentra", correlationId: "trace-attention-restart",
+      role: "researcher", actorId: "approved-researcher", repository: root, planDigest: admitted.admission.packet.planDigest, securityDigest: digestCanonical(webSecurity),
+      model: { capabilityId: model.id, transportModelId: model.model, digest: digestCanonical(model), harness: model.harness, roles: model.roles,
+        toolPermissions: roleToolPermissions("researcher", true), network: model.network },
+      budget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 10_000 }, admissionDigest: admitted.admission.digest,
+      configuredReadPaths: ["src/**"], ownedPaths: ["src/**"], forbiddenPaths: [".env"],
+      webResearch: { allowedDestinations: ["https://docs.example.com"], timeoutMs: 10_000 } });
+    const policy = new RoleCapabilityEnvelopeService(first); policy.accept(binding);
+    const decision = policy.evaluate(binding, { kind: "network", destination: "https://outside.example/path", method: "GET", capability: "web_research" });
+    expect(decision.status).toBe("attention");
+    const identity = openCodeResourceIdentity("milestone-attention-restart", "task-attention-restart", 1);
+    first.append("milestone-attention-restart", first.readStream("milestone-attention-restart").length, [{ streamId: "milestone-attention-restart", type: "milestone.agent_resource_intent",
+      payload: { taskId: "task-attention-restart", ...identity }, causationId: null, correlationId: "trace-attention-restart" }]);
+    const workers = new WorkerLifecycleService(first);
+    workers.bind({ schemaVersion: 1, workerId: identity.capsuleId, taskId: "task-attention-restart", rootTaskId: "task-attention-restart", parentWorkerId: null, harness: "opencode", role: "researcher",
+      model: { capabilityId: model.id, modelId: model.model }, envelope: binding.envelope,
+      budget: { budgetId: "milestone-attention-restart/task-attention-restart", maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100,
+        maxToolCalls: 10, maxModelTurns: 10, maxActiveWorkers: 1, maxConcurrentTools: 1, maxConcurrentModelTurns: 1 },
+      taskContext: { kind: "milestone", milestoneId: "milestone-attention-restart" }, trace: { traceId: "trace-attention-restart", correlationId: "trace-attention-restart" } });
+    workers.start("task-attention-restart", identity.capsuleId);
+    workers.observe("task-attention-restart", identity.capsuleId, { kind: "tool", name: "zentra_web_research", phase: "started", outcome: null,
+      usage: { seconds: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, toolCalls: 0, modelTurns: 0 } });
+    first.close();
+
+    const reopened = new SqliteEventJournal(database);
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const execute = vi.fn(); const reconcile = vi.fn(async () => ({ outcome: "completed" as const, containerId: null, imageId: null, containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true }));
+    const program = new OpenCodeReadOnlyProgram(reopened, sink, { execute: vi.fn() }, models, webSecurity, { execute, reconcile } as never);
+    await expect(program.reconcile({ milestoneId: "milestone-attention-restart", taskId: "task-attention-restart" })).resolves.toEqual({ outcome: "completed", trace: "emitted" });
+    expect(new MilestoneRegistry(reopened).inspect("milestone-attention-restart")).toMatchObject({ lifecycle: "paused", capabilityBoundary: { decisionId: decision.decisionId } });
+    expect(projectWorkerLifecycle(reopened.readStream("worker-task:task-attention-restart")).workers[identity.capsuleId]).toMatchObject({ status: "terminal", terminalOutcome: "denied", activeTools: 0, cleanup: "completed" });
+    const milestonePause = reopened.readAll().find((event) => event.type === "milestone.capability_boundary_paused")!;
+    const taskPause = reopened.readAll().find((event) => event.type === "task.capability_boundary_paused")!;
+    expect(milestonePause.globalPosition).toBeLessThan(taskPause.globalPosition);
+    expect(reconcile).toHaveBeenCalledTimes(1); expect(execute).not.toHaveBeenCalled();
+    await expect(program.run({ milestoneId: "milestone-attention-restart", taskId: "task-attention-restart", repositoryPath: root, role: "researcher", rolePrompt: "Research.",
+      budget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 10_000, signal: new AbortController().signal })).rejects.toThrow(/retained durable worker|paused/i);
+    expect(execute).not.toHaveBeenCalled();
+    sink.close(); reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 });

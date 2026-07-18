@@ -4,6 +4,7 @@ import {
   DockerBrokerTransportUncertainError,
   DockerCommandCancelledError,
   DockerCommandTimeoutError,
+  DockerOutputLimitError,
   runBoundedProcess,
   runBrokeredDockerProcess,
 } from "../../src/capsule/docker-client.js";
@@ -141,7 +142,54 @@ describe("brokered Docker subprocess lifecycle", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         return { type: "model_receipt" };
       },
-    )).rejects.toThrow("model broker protocol failed");
+    )).rejects.toThrow("broker protocol failed");
     expect(aborted).toBe(true);
+  });
+
+  it("serializes strict model and research broker frames and writes bounded responses", async () => {
+    const source = `let data="";process.stdin.on("data",chunk=>{data+=chunk;if(data.split("\\n").filter(Boolean).length===2)process.exit(0)});process.stdout.write(JSON.stringify({type:"model_turn",requestId:"model-1",prompt:"plan"})+"\\n"+JSON.stringify({type:"research_request",requestId:"research-1",capability:"web_research",method:"GET",url:"https://docs.example.com/"})+"\\n");`;
+    const observed: string[] = [];
+    const result = await runBrokeredDockerProcess(
+      process.execPath, ["--input-type=module", "--eval", source], environment,
+      new AbortController().signal, 5_000,
+      async (frame) => {
+        observed.push(frame.type);
+        return frame.type === "model_turn"
+          ? { type: "model_receipt", requestId: frame.requestId, receipt: { outcome: "failed" } }
+          : { type: "research_receipt", requestId: frame.requestId, result: { outcome: "denied" } };
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(observed).toEqual(["model_turn", "research_request"]);
+  });
+
+  it.each([
+    `{"type":"model_turn","requestId":"bad","prompt":"ok","extra":true}\n`,
+    `{"type":"research_request","requestId":"bad","capability":"web_research","method":"get","url":"https://docs.example.com/"}\n`,
+    `{"type":"research_request","requestId":"bad","capability":"web_research","method":"GET","url":1}\n`,
+    `{"type":"broker_unknown","requestId":"bad"}\n`,
+    `not-json\n`,
+  ])("fails closed for malformed or unknown broker output", async (line) => {
+    const source = `process.stdout.write(${JSON.stringify(line)});setInterval(()=>{},1000);`;
+    await expect(runBrokeredDockerProcess(
+      process.execPath, ["--input-type=module", "--eval", source], environment,
+      new AbortController().signal, 5_000, async () => ({}),
+    )).rejects.toThrow("broker protocol failed");
+  });
+
+  it("bounds an unterminated broker frame", async () => {
+    const source = `process.stdout.write('{"type":"model_turn","requestId":"one","prompt":"'+"x".repeat(300000));setInterval(()=>{},1000);`;
+    await expect(runBrokeredDockerProcess(
+      process.execPath, ["--input-type=module", "--eval", source], environment,
+      new AbortController().signal, 5_000, async () => ({}),
+    )).rejects.toBeInstanceOf(DockerOutputLimitError);
+  });
+
+  it("rejects an oversized broker response", async () => {
+    const source = `process.stdout.write(JSON.stringify({type:"model_turn",requestId:"one",prompt:"plan"})+"\\n");setInterval(()=>{},1000);`;
+    await expect(runBrokeredDockerProcess(
+      process.execPath, ["--input-type=module", "--eval", source], environment,
+      new AbortController().signal, 5_000, async () => ({ value: "x".repeat(5 * 1024 * 1024) }),
+    )).rejects.toThrow("broker protocol failed");
   });
 });

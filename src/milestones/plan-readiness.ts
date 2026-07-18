@@ -135,10 +135,10 @@ function assessAuthority(
   ) {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }
-  if (
-    context.network === "declared" ||
-    context.toolPermissions.includes("web_research")
-  ) {
+  const declaredResearch = (packet.role === "planner" || packet.role === "researcher") &&
+    context.network === "declared" && context.toolPermissions.includes("web_research") &&
+    security.network.allowedDestinations.length > 0;
+  if ((context.network === "declared" || context.toolPermissions.includes("web_research")) && !declaredResearch) {
     return stopped(packet, "undeclared_network", "hard_stop", security);
   }
   if (packet.role === "validator" || packet.role === "integrator" || packet.role === "verifier") {

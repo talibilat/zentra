@@ -249,7 +249,7 @@ class ApprovingProgram implements OpenCodeReviewerProgram {
     return Promise.resolve({
       status: "executed",
       outcome: "completed",
-      openCode: { version: "1.18.1", executableSha256: "c".repeat(64) },
+      openCode: { version: "1.18.3", executableSha256: "c".repeat(64) },
       model: { id: `fixture/${this.reviewerId}`, provider: "fixture", name: this.reviewerId },
       evidence: [{ kind: "review", summary: JSON.stringify(response) }],
       cleanup: "completed",
@@ -312,7 +312,7 @@ function readOnlyCapsule(root: string, suffix: "a" | "b"): OpenCodeReadOnlyCapsu
       });
       return {
         outcome: "completed",
-        openCode: { version: "1.18.1", executableSha256: "f".repeat(64) },
+        openCode: { version: "1.18.3", executableSha256: "f".repeat(64) },
         model: { id: request.transportModelId, provider: "fixture", name: request.actorId },
         evidence: [{ kind: request.role === "planner" ? "plan" : "research", summary: `${request.role} evidence.` }],
         cleanup: "completed",

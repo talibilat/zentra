@@ -18,6 +18,8 @@ import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
+import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
+import { GovernedWebResearch } from "../../src/research/web-research.js";
 
 const roots: string[] = [];
 
@@ -118,7 +120,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         } });
         return {
           outcome: receipt.outcome === "completed" ? "completed" : "failed",
-          openCode: { version: "1.18.1", executableSha256: "b83305b14e233483aba7027a9dd6a18716b8786b3fe13261e0afce96f4418b17" },
+          openCode: { version: "1.18.3", executableSha256: "915ca1cd9eb5a7b3e15bd89dc71c38cf0caa9a02d13c5371422675b4b370bffb" },
           model: receipt.model,
           evidence: [{ kind: "plan", summary: receipt.response?.type === "text" ? receipt.response.text : "" }],
           cleanup: "completed",
@@ -232,7 +234,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         } });
         return {
           outcome: "completed" as const,
-          openCode: { version: "1.18.1" as const, executableSha256: "a".repeat(64) },
+          openCode: { version: "1.18.3" as const, executableSha256: "a".repeat(64) },
           model: { id: "fixture/model", provider: "fixture", name: "model" },
           evidence: [{ kind: "plan" as const, summary: "Retained journal evidence." }], cleanup: "completed" as const, brokerTransport: "completed" as const,
         };
@@ -280,7 +282,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       } });
       return {
         outcome: "completed",
-        openCode: { version: "1.18.1", executableSha256: "a".repeat(64) },
+        openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
         model: { id: "fixture/model", provider: "fixture", name: "reviewer-v1" },
         evidence: [{ kind: "review", summary: "{\"decision\":\"approve\"}" }],
         cleanup: "completed",
@@ -505,7 +507,132 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       journal.close();
     }
   });
+
+  it("settles and authoritatively pauses before an out-of-policy research effect", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-research-attention-")));
+    roots.push(root); mkdirSync(path.join(root, "src")); writeFileSync(path.join(root, "src/context.ts"), "context\n");
+    const journal = new SqliteEventJournal(":memory:");
+    rmSync(openCodeResourceIdentity("milestone-attention", "research-task", 1).repositoryViewPath, { recursive: true, force: true });
+    const registry = new MilestoneRegistry(journal);
+    registry.register({ milestoneId: "milestone-attention", projectId: "zentra", title: "Research", correlationId: "trace-attention",
+      plan: { milestoneId: "milestone-attention", projectId: "zentra", goal: "Research", tasks: [{
+        taskId: "research-task", title: "Research", description: "Research approved sources.", dependencies: [], ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Cited evidence."],
+        roleAssignment: { role: "researcher", agentId: "opencode-researcher", harness: "opencode" },
+        risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+        budget: { maxSeconds: 10, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
+      }] } });
+    const security = { ...admissionSecurity(root, ["src/**"]), network: { default: "denied" as const, allowedDestinations: ["https://docs.example.com"] } };
+    const context = { ...admissionContext(root, "opencode-researcher", "researcher", { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 10_000 }),
+      toolPermissions: ["read_repository", "web_research"], network: "declared" as const };
+    const admission = registry.admitTask("milestone-attention", "research-task", security, context);
+    if (admission.status !== "admitted") throw new Error("expected research admission");
+    let executions = 0;
+    const capsule: OpenCodeReadOnlyCapsule = { execute: vi.fn(async (request, _broker, signal, observe, research) => {
+      executions += 1;
+      const attention = await research!.execute({ schemaVersion: 1, requestId: "outside-1", taskId: request.taskId, workerId: request.capsuleId,
+        role: "researcher", modelId: request.transportModelId, tool: "zentra_web_research", method: "GET",
+        url: "https://outside.example/path?secret=hidden", envelopeDigest: request.webResearchEnvelopeDigest,
+        policyDigest: request.webResearch!.digest }, request.webResearch, signal);
+      expect(attention).toMatchObject({ outcome: "denied", reason: "capability_attention" });
+      observe?.({ type: "research_started", requestId: "outside-1" });
+      observe?.({ type: "research_completed", requestId: "outside-1", result: attention });
+      observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: null, imageName: request.resources.imageName, imageId: null,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } });
+      return { outcome: "failed" as const, openCode: { version: "1.18.3" as const, executableSha256: "a".repeat(64) }, model: null,
+        evidence: [], cleanup: "completed" as const, brokerTransport: "completed" as const };
+    }) };
+    const models: ModelSheet = { models: [{ id: "opencode-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: ["research"],
+      costTier: "low", contextTokens: 10_000, maxConcurrency: 1, toolPermissions: ["read_repository", "web_research"], network: "declared",
+      fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+    const agent = new OpenCodeReadOnlyAgent(journal, capsule, { execute: vi.fn() }, models, security);
+    const run = () => agent.run({ milestoneId: "milestone-attention", taskId: "research-task", repositoryPath: root, role: "researcher", rolePrompt: "Research.",
+      budget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 10_000,
+      signal: new AbortController().signal, admission: admission.admission });
+    await expect(run()).resolves.toMatchObject({ outcome: "failed", cleanup: "completed" });
+    expect(registry.inspect("milestone-attention")).toMatchObject({ lifecycle: "paused", capabilityBoundary: { phase: "pre_effect", reason: "network_destination_not_allowed" } });
+    expect(journal.readStream("research-task").map((event) => event.type)).toEqual(["task.created", "task.capability_boundary_paused"]);
+    expect(JSON.stringify(journal.readAll())).not.toContain("secret=hidden");
+    await expect(run()).rejects.toThrow(/paused|retained durable worker/i);
+    expect(executions).toBe(1);
+    journal.close();
+  });
+
+  it("invalidates completion when retained source evidence is removed or substituted", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-research-replay-")));
+    roots.push(root); mkdirSync(path.join(root, "src")); writeFileSync(path.join(root, "src/context.ts"), "context\n");
+    const journal = new SqliteEventJournal(":memory:");
+    const fixture = readyWebMilestone(journal, root, "milestone-replay", "research-replay");
+    const governed = new GovernedWebResearch(journal, { dispatch: async () => ({ status: 200, headers: { "content-type": "text/plain" },
+      body: Buffer.from("retained fact"), compressedBytes: 13, decompressedBytes: 13, resolvedAddress: "93.184.216.34", tls: true, dispatched: true }) });
+    const capsule: OpenCodeReadOnlyCapsule = { execute: vi.fn(async (request, _broker, signal, observe, research) => {
+      const source = await research!.execute({ schemaVersion: 1, requestId: "source-1", taskId: request.taskId, workerId: request.capsuleId,
+        role: "researcher", modelId: request.transportModelId, tool: "zentra_web_research", method: "GET", url: "https://docs.example.com/fact",
+        envelopeDigest: request.webResearchEnvelopeDigest, policyDigest: request.webResearch!.digest }, request.webResearch, signal);
+      observe?.({ type: "cleanup_observed", payload: { capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
+        containerName: request.resources.containerName, containerId: null, imageName: request.resources.imageName, imageId: null,
+        repositoryViewPath: request.repositoryPath, repositoryRevision: request.securityBoundary.repositoryRevision,
+        outcome: "completed", containerAbsent: true, imageAbsent: true, repositoryViewAbsent: false } });
+      return { outcome: "completed" as const, openCode: { version: "1.18.3" as const, executableSha256: "a".repeat(64) },
+        model: { id: request.transportModelId, provider: "fixture", name: "researcher" },
+        evidence: [{ kind: "research" as const, summary: `Finding [source:${source.evidence!.evidenceId}]`, sourceEvidenceIds: [source.evidence!.evidenceId] }],
+        cleanup: "completed" as const, brokerTransport: "completed" as const };
+    }) };
+    await new OpenCodeReadOnlyAgent(journal, capsule, { execute: vi.fn() }, fixture.models, fixture.security, governed).run({
+      milestoneId: "milestone-replay", taskId: "research-replay", repositoryPath: root, role: "researcher", rolePrompt: "Research.",
+      budget: { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 10_000,
+      signal: new AbortController().signal, admission: fixture.admission,
+    });
+    expect(fixture.registry.inspect("milestone-replay")?.tasks["research-replay"]).toMatchObject({ status: "completed" });
+    for (const mode of ["removed", "substituted"] as const) {
+      const hostile = new SqliteEventJournal(":memory:");
+      const versions = new Map<string, number>();
+      for (const event of journal.readAll()) {
+        if (mode === "removed" && event.type === "web_research.observed") continue;
+        const payload = mode === "substituted" && event.type === "web_research.observed"
+          ? { ...(event.payload as any), evidence: { ...(event.payload as any).evidence, contentSha256: "b".repeat(64) } }
+          : event.payload;
+        const version = versions.get(event.streamId) ?? 0;
+        hostile.append(event.streamId, version, [{ streamId: event.streamId, type: event.type, payload, causationId: event.causationId, correlationId: event.correlationId }]);
+        versions.set(event.streamId, version + 1);
+      }
+      expect(() => new MilestoneRegistry(hostile).inspect("milestone-replay")).toThrow(/source|evidence|digest/i);
+      hostile.close();
+    }
+    const partial = new SqliteEventJournal(":memory:");
+    const partialVersions = new Map<string, number>();
+    for (const event of journal.readAll()) {
+      const payload = event.type === "milestone.task_completed" && typeof event.payload === "object" && event.payload !== null && (event.payload as any).harness === "opencode"
+        ? { ...(event.payload as any), outcome: "failed", evidence: [] }
+        : event.payload;
+      const version = partialVersions.get(event.streamId) ?? 0;
+      partial.append(event.streamId, version, [{ streamId: event.streamId, type: event.type, payload, causationId: event.causationId, correlationId: event.correlationId }]);
+      partialVersions.set(event.streamId, version + 1);
+    }
+    expect(new MilestoneRegistry(partial).inspect("milestone-replay")?.tasks["research-replay"]).toMatchObject({ status: "completed", terminalOutcome: "failed" });
+    partial.close();
+    journal.close();
+  });
 });
+
+function readyWebMilestone(journal: SqliteEventJournal, root: string, milestoneId: string, taskId: string) {
+  const registry = new MilestoneRegistry(journal);
+  registry.register({ milestoneId, projectId: "zentra", title: "Research", correlationId: milestoneId,
+    plan: { milestoneId, projectId: "zentra", goal: "Research", tasks: [{ taskId, title: "Research", description: "Research.", dependencies: [],
+      ownedPaths: ["src/**"], forbiddenPaths: [".env"], acceptanceCriteria: ["Cited evidence."],
+      roleAssignment: { role: "researcher", agentId: "opencode-researcher", harness: "opencode" },
+      risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+      budget: { maxSeconds: 10, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 } }] } });
+  const security = { ...admissionSecurity(root, ["src/**"]), network: { default: "denied" as const, allowedDestinations: ["https://docs.example.com"] } };
+  const context = { ...admissionContext(root, "opencode-researcher", "researcher", { maxSeconds: 10, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100, timeoutMs: 10_000 }),
+    toolPermissions: ["read_repository", "web_research"], network: "declared" as const };
+  const admitted = registry.admitTask(milestoneId, taskId, security, context);
+  if (admitted.status !== "admitted") throw new Error("expected web research admission");
+  const models: ModelSheet = { models: [{ id: "opencode-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: ["research"],
+    costTier: "low", contextTokens: 10_000, maxConcurrency: 1, toolPermissions: ["read_repository", "web_research"], network: "declared", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+  return { registry, security, models, admission: admitted.admission };
+}
 
 function readyMilestone(
   journal: SqliteEventJournal | ProjectingEventJournal,

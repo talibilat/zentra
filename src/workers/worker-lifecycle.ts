@@ -64,7 +64,8 @@ export const CapabilityEnvelopeSchema = z.union([
     context.addIssue({ code: "custom", message: "declared web research requires its reserved capability" });
   }
   if (value.capabilities.includes("web_research")) {
-    context.addIssue({ code: "custom", message: "web research is reserved but not enabled" });
+    if (value.network !== "declared_web_research") context.addIssue({ code: "custom", message: "web research requires declared network policy" });
+    if (value.role !== "planner" && value.role !== "researcher") context.addIssue({ code: "custom", message: "web research requires a planner or researcher role" });
   }
   const expectedAuthority = {
     planner: "read_only", researcher: "read_only", implementer: "workspace_write",
@@ -325,7 +326,8 @@ export function authorityCanNarrow(parent: z.infer<typeof AuthorityLevelSchema>,
   return child === parent || child === "read_only";
 }
 export function networkCanNarrow(parent: z.infer<typeof WorkerNetworkSchema>, child: z.infer<typeof WorkerNetworkSchema>): boolean {
-  return child === parent || (parent === "model_provider_only" && child === "denied");
+  return child === parent || (parent === "declared_web_research" && (child === "model_provider_only" || child === "denied")) ||
+    (parent === "model_provider_only" && child === "denied");
 }
 export function repositoryCanNarrow(parent: CapabilityEnvelope["resources"]["repository"], child: CapabilityEnvelope["resources"]["repository"]): boolean {
   return child === parent || (parent === "assigned_worktree" && (child === "read_only" || child === "none")) || (parent === "read_only" && child === "none");

@@ -18,6 +18,10 @@ import type { ModelSheet } from "../policy/model-sheet.js";
 import type { EventJournal } from "../journal/journal.js";
 import { projectMilestone, type MilestoneView } from "./milestone-projection.js";
 import { assessMilestonePlanReadiness } from "./plan-readiness.js";
+import { OpenCodeMilestoneCompletedPayloadSchema } from "../agents/opencode-agent-events.js";
+import { parseWebResearchEventPayload } from "../research/web-research.js";
+import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
+import { parseRoleCapabilityEventPayload } from "../workers/role-capability-envelope.js";
 import {
   capabilitySupportsAdmission,
   capabilitySnapshot,
@@ -1014,6 +1018,7 @@ export class MilestoneRegistry {
     verifyStoredWriterIntegrations(this.journal, events, view);
     verifyStoredWriterReleases(this.journal, events, view);
     verifyCapabilityBoundaryEvents(this.journal, events);
+    verifyStoredResearchSources(this.journal, events);
     const record = withTrace(view, events);
     if (this.reconcileCapabilityTaskProjection(record)) return this.inspect(milestoneId);
     if (record.result !== null) verifyMilestoneTerminalResult(this.journal, record, record.result);
@@ -1644,5 +1649,50 @@ function verifyStoredWriterReleases(
       retained.terminalEvidence.correlationId !== milestoneEvents[0]!.correlationId ||
       digestCanonical(terminal.payload) !== retained.terminalEvidence.payloadDigest
     ) throw new Error("writer terminal release contradicts the retained task stream");
+  }
+}
+
+function verifyStoredResearchSources(journal: EventJournal, milestoneEvents: readonly StoredEvent[]): void {
+  for (const completionEvent of milestoneEvents.filter((event) => event.type === "milestone.task_completed")) {
+    const parsed = OpenCodeMilestoneCompletedPayloadSchema.safeParse(completionEvent.payload);
+    if (!parsed.success) continue;
+    const completion = parsed.data;
+    const references = completion.evidence.flatMap((item) => item.sourceEvidenceIds ?? []);
+    const sourceEvents = journal.readStream(`web-research:${completion.taskId}`).filter((event) => event.type === "web_research.observed");
+    const sources = sourceEvents.map((event) => parseWebResearchEventPayload(event.type, event.payload) as {
+      readonly outcome: string;
+      readonly identity: { readonly taskId: string; readonly workerId: string; readonly role: string; readonly modelId: string; readonly envelopeDigest: string; readonly policyDigest: string };
+      readonly evidence: null | { readonly evidenceId: string; readonly envelopeDigest: string; readonly policyDigest: string; readonly parent: { readonly workerId: string; readonly modelId: string } };
+    }).filter((source) => source.outcome === "completed" && source.evidence !== null);
+    const retainedIds = sources.map((source) => source.evidence!.evidenceId).sort();
+    const cited = completion.evidence.flatMap((item) => [...item.summary.matchAll(/\[source:([a-f0-9]{64})\]/g)].map((match) => match[1]!)).sort();
+    const referencesCanonical = [...references].sort();
+    const referenceSet = new Set(references);
+    const retainedSet = new Set(retainedIds);
+    const citationsValid = cited.length === new Set(cited).size && cited.every((id) => retainedSet.has(id));
+    const referencesValid = references.length === referenceSet.size && references.every((id) => retainedSet.has(id));
+    if (!referencesValid || !citationsValid || (completion.outcome === "completed" &&
+      (JSON.stringify(referencesCanonical) !== JSON.stringify(retainedIds) || JSON.stringify(cited) !== JSON.stringify(retainedIds)))) {
+      throw new Error("OpenCode research completion source references are incomplete, unknown, or duplicated");
+    }
+    if (sources.length === 0) continue;
+    const worker = projectWorkerLifecycle(journal.readStream(workerStreamId(completion.taskId))).workers[completion.capsuleId];
+    if (worker === undefined || worker.rootTaskId !== completion.taskId || worker.taskId !== completion.taskId || worker.parentWorkerId !== null) {
+      throw new Error("OpenCode research completion lacks its parent root worker");
+    }
+    const accepted = journal.readAll().filter((event) => event.type === "capability_envelope.accepted").map((event) => {
+      const payload = parseRoleCapabilityEventPayload(event.type, event.payload) as { readonly binding: { readonly taskId: string; readonly envelope: { readonly digest: string }; readonly webResearch: null | { readonly digest: string } } };
+      return payload.binding;
+    }).find((binding) => binding.taskId === completion.taskId && binding.envelope.digest === worker.envelope.digest);
+    if (accepted?.webResearch === null || accepted === undefined) throw new Error("OpenCode research completion lacks its accepted research policy");
+    for (const source of sources) {
+      if (source.identity.taskId !== completion.taskId || source.identity.workerId !== completion.capsuleId ||
+        source.identity.role !== completion.role || source.identity.modelId !== completion.transportModelId ||
+        source.identity.envelopeDigest !== worker.envelope.digest || source.identity.policyDigest !== accepted.webResearch.digest ||
+        source.evidence!.parent.workerId !== completion.capsuleId || source.evidence!.parent.modelId !== completion.transportModelId ||
+        source.evidence!.envelopeDigest !== source.identity.envelopeDigest || source.evidence!.policyDigest !== source.identity.policyDigest) {
+        throw new Error("OpenCode research source provenance contradicts its completion");
+      }
+    }
   }
 }
