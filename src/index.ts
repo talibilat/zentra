@@ -23,6 +23,20 @@ export {
   isDurablePagedEventJournal,
 } from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
+export {
+  ArchivedEventJournal,
+  JournalRetentionService,
+  openAuthoritativeJournal,
+} from "./journal/retention.js";
+export type {
+  ArchiveManifest,
+  ArchiveResult,
+  PruneRequest,
+  RetentionRecovery,
+  RetentionReconcileResult,
+  VacuumEvidence,
+  RetentionPolicy,
+} from "./journal/retention.js";
 export { ProjectingEventJournal } from "./journal/projecting-journal.js";
 export type { StoredEventSink } from "./journal/projecting-journal.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";

@@ -66,7 +66,7 @@ const DEFAULT_PAGE_LIMITS: JournalPageLimits = {
 const SQLITE_BUSY_TIMEOUT_MS = 1_000;
 const SQLITE_OPERATION_TIMEOUT_MS = 1_000;
 const SQLITE_OPERATION_TIMEOUT_NS = BigInt(SQLITE_OPERATION_TIMEOUT_MS) * 1_000_000n;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 5;
 const PROJECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const GLOBAL_HEAD_TRIGGER_SQL = `
   CREATE TRIGGER events_update_global_head
@@ -520,6 +520,10 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
     limits: JournalPageLimits,
   ): GlobalEventPage {
     const head = this.globalHead();
+    const retainedThrough = this.retainedThroughPosition();
+    if (afterPosition < retainedThrough) {
+      throw new Error(`event journal archived history is required through global position ${retainedThrough}`);
+    }
     if (afterPosition > head) {
       throw new Error(`event journal cursor is ahead of global position ${head}`);
     }
@@ -635,6 +639,10 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
   }
 
   private ensureProjection(name: string, initialPosition: number): void {
+    const retainedThrough = this.retainedThroughPosition();
+    if (initialPosition < retainedThrough) {
+      throw new Error(`projection initial position is below retained journal position ${retainedThrough}`);
+    }
     this.db.prepare(`
       INSERT INTO projection_cursors (name, position)
       VALUES (?, ?)
@@ -724,7 +732,13 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS journal_metadata (
           singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-          global_position INTEGER NOT NULL CHECK (global_position >= 0)
+          global_position INTEGER NOT NULL CHECK (global_position >= 0),
+          retained_through_position INTEGER NOT NULL DEFAULT 0
+            CHECK (retained_through_position >= 0 AND retained_through_position <= global_position),
+          journal_id TEXT,
+          archive_head_position INTEGER NOT NULL DEFAULT 0 CHECK (archive_head_position >= 0),
+          archive_head_manifest_sha256 TEXT,
+          archive_segment_count INTEGER NOT NULL DEFAULT 0 CHECK (archive_segment_count >= 0)
         );
         INSERT OR IGNORE INTO journal_metadata (singleton, global_position)
         SELECT 1, COALESCE(MAX(global_position), 0) FROM events
@@ -748,7 +762,58 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
              claimant_id IS NOT NULL)
           )
         );
+        CREATE TABLE IF NOT EXISTS retention_operations (
+          operation_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN ('archive', 'prune_request', 'prune', 'maintenance')),
+          state TEXT NOT NULL CHECK (state IN (
+            'publishing', 'authorized', 'effect_applied', 'consumed', 'completed', 'failed'
+          )),
+          from_position INTEGER,
+          through_position INTEGER NOT NULL CHECK (through_position >= 0),
+          segment_id TEXT,
+          segment_sha256 TEXT,
+          manifest_sha256 TEXT,
+          request_id TEXT,
+          operator_id TEXT,
+          maintenance_evidence TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS retention_one_active_operation
+        ON retention_operations ((1))
+        WHERE state IN ('publishing', 'authorized', 'effect_applied');
+        CREATE INDEX IF NOT EXISTS retention_operations_request
+        ON retention_operations (request_id, kind, state);
+        CREATE INDEX IF NOT EXISTS retention_operations_state
+        ON retention_operations (state, created_at);
       `);
+      if (version > 0 && !tableHasColumn(this.db, "journal_metadata", "retained_through_position")) {
+        this.db.exec(`
+          ALTER TABLE journal_metadata ADD COLUMN retained_through_position INTEGER NOT NULL DEFAULT 0
+            CHECK (retained_through_position >= 0)
+        `);
+      }
+      if (!tableHasColumn(this.db, "journal_metadata", "journal_id")) {
+        this.db.exec("ALTER TABLE journal_metadata ADD COLUMN journal_id TEXT");
+      }
+      if (!tableHasColumn(this.db, "journal_metadata", "archive_head_position")) {
+        this.db.exec("ALTER TABLE journal_metadata ADD COLUMN archive_head_position INTEGER NOT NULL DEFAULT 0 CHECK (archive_head_position >= 0)");
+      }
+      if (!tableHasColumn(this.db, "journal_metadata", "archive_head_manifest_sha256")) {
+        this.db.exec("ALTER TABLE journal_metadata ADD COLUMN archive_head_manifest_sha256 TEXT");
+      }
+      if (!tableHasColumn(this.db, "journal_metadata", "archive_segment_count")) {
+        this.db.exec("ALTER TABLE journal_metadata ADD COLUMN archive_segment_count INTEGER NOT NULL DEFAULT 0 CHECK (archive_segment_count >= 0)");
+      }
+      if (!tableHasColumn(this.db, "retention_operations", "maintenance_evidence")) {
+        this.db.exec("ALTER TABLE retention_operations ADD COLUMN maintenance_evidence TEXT");
+      }
+      const identity = this.db.prepare(
+        "SELECT journal_id FROM journal_metadata WHERE singleton = 1",
+      ).get() as { readonly journal_id: string | null };
+      if (identity.journal_id === null) {
+        this.db.prepare("UPDATE journal_metadata SET journal_id = ? WHERE singleton = 1")
+          .run(randomUUID());
+      }
       if (version === 1) {
         this.db.exec("ALTER TABLE projection_cursors ADD COLUMN claim_digest TEXT");
       }
@@ -803,12 +868,46 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
     if (version !== SCHEMA_VERSION) {
       throw new Error("event journal schema migration required; open read-write first");
     }
-    this.db.prepare("SELECT global_position FROM journal_metadata WHERE singleton = 1").get();
+    const metadata = this.db.prepare(`
+      SELECT global_position, retained_through_position, journal_id,
+             archive_head_position, archive_head_manifest_sha256, archive_segment_count
+      FROM journal_metadata WHERE singleton = 1
+    `).get() as {
+      readonly global_position: number;
+      readonly journal_id: string | null;
+      readonly archive_head_position: number;
+      readonly archive_head_manifest_sha256: string | null;
+      readonly archive_segment_count: number;
+    } | undefined;
+    if (metadata === undefined || metadata.journal_id === null ||
+      !/^[0-9a-f-]{36}$/.test(metadata.journal_id) ||
+      !Number.isSafeInteger(metadata.global_position) || metadata.global_position < 0 ||
+      !Number.isSafeInteger(metadata.archive_head_position) || metadata.archive_head_position < 0 ||
+      metadata.archive_head_position > metadata.global_position ||
+      !Number.isSafeInteger(metadata.archive_segment_count) || metadata.archive_segment_count < 0 ||
+      ((metadata.archive_head_position === 0 || metadata.archive_segment_count === 0) !==
+        (metadata.archive_head_position === 0 && metadata.archive_segment_count === 0)) ||
+      (metadata.archive_segment_count === 0 ? metadata.archive_head_manifest_sha256 !== null :
+        metadata.archive_head_manifest_sha256 === null || !/^[a-f0-9]{64}$/.test(metadata.archive_head_manifest_sha256))) {
+      throw new Error("event journal archive metadata is corrupt");
+    }
     this.db.prepare(
       "SELECT position, claim_digest, claimant_id FROM projection_cursors LIMIT 1",
     ).get();
     this.assertGlobalHeadTrigger();
     this.globalHead();
+    this.retainedThroughPosition();
+  }
+
+  private retainedThroughPosition(): number {
+    const row = this.db.prepare(
+      "SELECT retained_through_position FROM journal_metadata WHERE singleton = 1",
+    ).get() as { readonly retained_through_position: number } | undefined;
+    if (row === undefined || !Number.isSafeInteger(row.retained_through_position) ||
+      row.retained_through_position < 0 || row.retained_through_position > this.globalHead()) {
+      throw new Error("event journal retained position metadata is corrupt");
+    }
+    return row.retained_through_position;
   }
 
   private assertBoundedReadPlans(): void {
