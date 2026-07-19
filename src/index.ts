@@ -202,6 +202,41 @@ export {
   discoverProject,
   initializeProjectRuntime,
 } from "./runtime/repository-runtime.js";
+export {
+  RUN_SCHEMA_VERSION,
+  PreflightFailedPayloadSchema,
+  PreflightPayloadSchema,
+  ProjectRevisionSchema,
+  RunAcceptedPayloadSchema,
+  RunActorSchema,
+  RunAuthoritySchema,
+  RunBudgetSchema,
+  RunCancelledPayloadSchema,
+  RunLifecycleSchema,
+  RunProcessSchema,
+  RunReadyPayloadSchema,
+  RunSourceSchema,
+  ServiceReadyPayloadSchema,
+  ServiceStartingPayloadSchema,
+  runStreamId,
+  serviceStreamId,
+} from "./runs/run-contracts.js";
+export type {
+  ProjectRevision,
+  RunActor,
+  RunAuthority,
+  RunBudget,
+  RunLifecycle,
+  RunProcess,
+  RunSource,
+} from "./runs/run-contracts.js";
+export { projectRun } from "./runs/run-projection.js";
+export type { RunView } from "./runs/run-projection.js";
+export { RunService } from "./runs/run-service.js";
+export type { AcceptRunInput, RunCommandContext } from "./runs/run-service.js";
+export { RunPreflightCoordinator } from "./runs/run-preflight.js";
+export { ServiceLifecycleService } from "./runs/service-lifecycle.js";
+export { projectRevisionMatches, resolveProjectRevision } from "./runs/project-revision.js";
 export type {
   ProjectDiscoveredEvidence,
   ProjectDiscovery,
