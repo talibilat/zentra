@@ -533,7 +533,8 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
     );
     const selection = selectPage(sizeRows, afterPosition, head, limits, "position");
     if (selection.count === 0) {
-      return { events: [], nextPosition: afterPosition, hasMore: false, bytes: 0 };
+      return { events: [], nextPosition: afterPosition, hasMore: false, bytes: 0,
+        highWaterPosition: head };
     }
     const rows = this.eventRows(
       GLOBAL_PAGE_ROWS_SQL,
@@ -546,6 +547,7 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
       nextPosition: selection.through,
       hasMore: selection.through < head,
       bytes: selection.bytes,
+      highWaterPosition: head,
     };
   }
 

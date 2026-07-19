@@ -24,6 +24,9 @@ import {
   JournalRetentionService,
   ArchivedEventJournal,
   openAuthoritativeJournal,
+  AgentTailSegmentStore,
+  AgentTailTraceService,
+  createSegmentedAgentTailProjection,
 } from "../../src/index.js";
 import type {
   ArchiveManifest,
@@ -41,6 +44,9 @@ import type {
   RetentionRecovery,
   RetentionReconcileResult,
   VacuumEvidence,
+  AgentTailSegmentDescriptor,
+  AgentTailSegmentLimits,
+  AgentTailTraceReport,
 } from "../../src/index.js";
 import * as packageApi from "../../src/index.js";
 
@@ -63,6 +69,9 @@ describe("package-root programmatic API", () => {
     expect(JournalRetentionService.prototype.archive).toBeTypeOf("function");
     expect(ArchivedEventJournal.prototype.readAllPage).toBeTypeOf("function");
     expect(openAuthoritativeJournal).toBeTypeOf("function");
+    expect(AgentTailSegmentStore).toBeTypeOf("function");
+    expect(AgentTailTraceService).toBeTypeOf("function");
+    expect(createSegmentedAgentTailProjection).toBeTypeOf("function");
     expect(LocalReleaseCoordinator).toBeTypeOf("function");
     expect("InstalledMilestoneRunner" in packageApi).toBe(false);
     expect("AzureOpenAIModelBroker" in packageApi).toBe(false);
@@ -94,6 +103,9 @@ describe("package-root programmatic API", () => {
       RetentionRecovery?,
       RetentionReconcileResult?,
       VacuumEvidence?,
+      AgentTailSegmentDescriptor?,
+      AgentTailSegmentLimits?,
+      AgentTailTraceReport?,
     ] = [];
     expect(contracts).toEqual([]);
   });

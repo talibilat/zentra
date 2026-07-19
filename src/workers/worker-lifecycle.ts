@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
@@ -10,6 +10,7 @@ import { CostUsdNanoSchema, costFieldsAgree, nanoToUsdDisplay, usdNumberToNano }
 import { ModelBrokerFailureReasonSchema, ModelToolNameSchema, isModelBrokerToolFailureReason } from "../capsule/model-broker.js";
 
 const IdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
+const WORKER_PROCESS_INCARNATION = `process-${process.pid}-${randomUUID()}`;
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const PathSchema = z.string().min(1).max(4_096).refine((value) =>
   !value.startsWith("/") && !value.includes("\\") && !value.split("/").includes(".."),
@@ -162,6 +163,11 @@ export const WorkerObservationSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 const StartedSchema = IdentitySchema;
+export const WorkerHeartbeatPayloadSchema = IdentitySchema.extend({
+  processIncarnation: IdSchema,
+  observedAt: z.string().datetime({ offset: true }),
+  state: z.literal("active"),
+});
 const ObservedSchema = IdentitySchema.extend({ observation: WorkerObservationSchema });
 const CleanupSchema = IdentitySchema.extend({ outcome: z.enum(["completed", "uncertain"]) });
 const UncertainSchema = IdentitySchema.extend({ reason: z.string().min(1).max(4_096) });
@@ -233,6 +239,8 @@ export function projectWorkerLifecycle(events: readonly StoredEvent[]): WorkerLi
       if (budget!.activeWorkers >= budget!.limits.maxActiveWorkers) throw new Error("active worker budget exceeded");
       budget!.activeWorkers += 1;
       worker.status = "running";
+    } else if (event.type === "worker.heartbeat") {
+      if (worker.status !== "running") throw new Error("worker heartbeat requires an active worker");
     } else if (event.type === "worker.observed") {
       const observation = (payload as z.infer<typeof ObservedSchema>).observation;
       if (worker.status !== "running" && !(worker.status === "bound" && (observation.kind === "process" || observation.kind === "resource"))) throw new Error("worker observation is out of order");
@@ -277,6 +285,55 @@ export class WorkerLifecycleService {
     return this.append(binding.rootTaskId, binding.workerId, "worker.bound", binding);
   }
   start(rootTaskId: string, workerId: string): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.started", {}); }
+  heartbeat(rootTaskId: string, workerId: string, processIncarnation: string,
+    observedAt = new Date().toISOString()): boolean {
+    const events = readStreamEvents(this.journal, workerStreamId(rootTaskId));
+    const worker = projectWorkerLifecycle(events).workers[workerId];
+    if (worker?.status !== "running") throw new Error("worker heartbeat requires an active worker");
+    const parsedAt = Date.parse(observedAt);
+    if (!Number.isFinite(parsedAt)) throw new Error("worker heartbeat timestamp is invalid");
+    const prior = events.findLast((event) => event.type === "worker.heartbeat" &&
+      (event.payload as { readonly workerId?: unknown }).workerId === workerId);
+    if (prior !== undefined) {
+      const priorAt = Date.parse((prior.payload as { readonly observedAt: string }).observedAt);
+      if (parsedAt < priorAt || parsedAt - priorAt < 60_000) return false;
+    }
+    this.appendIdentity(rootTaskId, workerId, "worker.heartbeat", {
+      processIncarnation,
+      observedAt,
+      state: "active",
+    });
+    return true;
+  }
+  superviseHeartbeats(
+    rootTaskId: string,
+    workerId: string,
+    signal: AbortSignal,
+    onFailure: (error: unknown) => void,
+    processIncarnation = WORKER_PROCESS_INCARNATION,
+  ): { close(): void } {
+    let closed = false;
+    this.heartbeat(rootTaskId, workerId, processIncarnation);
+    const emit = (): void => {
+      if (closed || signal.aborted) return;
+      try {
+        this.heartbeat(rootTaskId, workerId, processIncarnation);
+      } catch (error) {
+        close();
+        onFailure(error);
+      }
+    };
+    const timer = setInterval(emit, 60_000);
+    timer.unref();
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      signal.removeEventListener("abort", close);
+    };
+    signal.addEventListener("abort", close, { once: true });
+    return { close };
+  }
   observe(rootTaskId: string, workerId: string, observation: WorkerObservationInput): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.observed", { observation: WorkerObservationSchema.parse(observation) }); }
   uncertain(rootTaskId: string, workerId: string, reason: string): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.uncertain", { reason }); }
   cleanup(rootTaskId: string, workerId: string, outcome: "completed" | "uncertain"): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.cleanup_observed", { outcome }); }
@@ -354,7 +411,7 @@ function applyObservation(worker: MutableWorker, budget: MutableBudget, observat
 }
 
 function parsePayload(type: string, payload: unknown) {
-  const schema = type === "worker.started" ? StartedSchema : type === "worker.observed" ? ObservedSchema : type === "worker.cleanup_observed" ? CleanupSchema : type === "worker.uncertain" ? UncertainSchema : type === "worker.terminal" ? TerminalSchema : null;
+  const schema = type === "worker.started" ? StartedSchema : type === "worker.heartbeat" ? WorkerHeartbeatPayloadSchema : type === "worker.observed" ? ObservedSchema : type === "worker.cleanup_observed" ? CleanupSchema : type === "worker.uncertain" ? UncertainSchema : type === "worker.terminal" ? TerminalSchema : null;
   if (schema === null) throw new Error(`unknown worker event type: ${type}`);
   return schema.parse(payload);
 }
