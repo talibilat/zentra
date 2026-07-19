@@ -38,6 +38,8 @@ import {
   RunApprovalRequestedPayloadSchema,
   RunCancelledPayloadSchema,
   RunIntakeCompletedPayloadSchema,
+  RunPhasePayloadSchema,
+  RunPlanRevisedPayloadSchema,
   RunReadyPayloadSchema,
   RunReopenedPayloadSchema,
   RunResumedPayloadSchema,
@@ -51,6 +53,25 @@ import {
   SourceDiscoveredPayloadSchema,
   SourceRejectedPayloadSchema,
 } from "../intake/intake-contracts.js";
+import {
+  ApprovalAcceptedPayloadSchema,
+  ApprovalPacketSchema,
+  ApprovalReservationConsumedPayloadSchema,
+  ApprovalReservationPayloadSchema,
+  ApprovalStalePayloadSchema,
+  AttemptPayloadSchema,
+  AttentionIdentityReservationPayloadSchema,
+  AttentionIndexRaisedPayloadSchema,
+  AttentionIndexResolvedPayloadSchema,
+  AttentionRaisedPayloadSchema,
+  AttentionResolvedPayloadSchema,
+  DecisionAcceptedPayloadSchema,
+  DecisionExpiredPayloadSchema,
+  DecisionRejectedPayloadSchema,
+  DecisionRequestedPayloadSchema,
+  QuestionPacketSchema,
+  ScopeAdmissionPayloadSchema,
+} from "../attention/attention-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -99,8 +120,16 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "run.accepted", "preflight.started", "preflight.completed", "preflight.failed",
   "run.waiting", "run.blocked", "run.resumed", "run.reopened", "run.intake_completed",
   "run.analysis_completed", "run.approval_requested", "run.ready_for_execution",
+  "run.plan_revised",
   "run.completed", "run.cancelled", "run.denied", "run.timed_out", "run.failed",
   "source.discovered", "source.rejected", "intake.snapshot_closed",
+  "questionnaire.proposed", "decision.requested", "decision.accepted", "decision.rejected",
+  "decision.expired", "decision.stale_attempted", "decision.duplicate_attempted",
+  "approval.requested", "approval.accepted", "approval.rejected", "approval.expired",
+  "approval.stale", "approval.stale_attempted", "approval.duplicate_attempted",
+  "approval.reserved", "approval.reservation_consumed",
+  "attention.raised", "attention.resolved", "attention.index_raised",
+  "attention.index_resolved", "attention.scope_admitted", "attention.identity_reserved",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -278,11 +307,34 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "run.analysis_completed": RunAnalysisCompletedPayloadSchema,
   "run.approval_requested": RunApprovalRequestedPayloadSchema,
   "run.ready_for_execution": RunReadyPayloadSchema,
+  "run.plan_revised": RunPlanRevisedPayloadSchema,
   "run.completed": RunTerminalPayloadSchema,
   "run.cancelled": RunCancelledPayloadSchema,
   "run.denied": RunTerminalPayloadSchema,
   "run.timed_out": RunTerminalPayloadSchema,
   "run.failed": RunTerminalPayloadSchema,
+  "questionnaire.proposed": QuestionPacketSchema,
+  "decision.requested": DecisionRequestedPayloadSchema,
+  "decision.accepted": DecisionAcceptedPayloadSchema,
+  "decision.rejected": DecisionRejectedPayloadSchema,
+  "decision.expired": DecisionExpiredPayloadSchema,
+  "decision.stale_attempted": AttemptPayloadSchema,
+  "decision.duplicate_attempted": AttemptPayloadSchema,
+  "approval.requested": ApprovalPacketSchema,
+  "approval.accepted": ApprovalAcceptedPayloadSchema,
+  "approval.rejected": DecisionRejectedPayloadSchema,
+  "approval.expired": DecisionExpiredPayloadSchema,
+  "approval.stale": ApprovalStalePayloadSchema,
+  "approval.stale_attempted": AttemptPayloadSchema,
+  "approval.duplicate_attempted": AttemptPayloadSchema,
+  "approval.reserved": ApprovalReservationPayloadSchema,
+  "approval.reservation_consumed": ApprovalReservationConsumedPayloadSchema,
+  "attention.raised": AttentionRaisedPayloadSchema,
+  "attention.resolved": AttentionResolvedPayloadSchema,
+  "attention.index_raised": AttentionIndexRaisedPayloadSchema,
+  "attention.index_resolved": AttentionIndexResolvedPayloadSchema,
+  "attention.scope_admitted": ScopeAdmissionPayloadSchema,
+  "attention.identity_reserved": AttentionIdentityReservationPayloadSchema,
 };
 
 export interface AgentTailActor {
@@ -340,6 +392,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
   assertAgentTailCompatibleEvent(event);
   const payload = isArtifactRecordedEventType(event.type)
     ? redactedArtifactPayload(event.type, event.payload)
+    : isAttentionEventType(event.type)
+      ? redactedAttentionPayload(event.type, event.payload)
     : event.type === "task.validation_completed"
       ? redactedTaskValidationPayload(event.payload)
     : event.type === "task.writer_completed"
@@ -406,6 +460,55 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     }),
     payload: cloneJson(payload),
   });
+}
+
+const ATTENTION_EVENT_TYPES = new Set<string>([
+  "questionnaire.proposed", "decision.requested", "decision.accepted", "decision.rejected",
+  "decision.expired", "decision.stale_attempted", "decision.duplicate_attempted",
+  "approval.requested", "approval.accepted", "approval.rejected", "approval.expired",
+  "approval.stale", "approval.stale_attempted", "approval.duplicate_attempted",
+  "approval.reserved", "approval.reservation_consumed", "attention.raised",
+  "attention.resolved", "attention.index_raised", "attention.index_resolved",
+  "attention.scope_admitted", "attention.identity_reserved",
+]);
+
+function isAttentionEventType(type: string): boolean {
+  return ATTENTION_EVENT_TYPES.has(type);
+}
+
+function redactedAttentionPayload(type: string, payload: unknown): unknown {
+  const parsed = AGENT_TAIL_PAYLOAD_SCHEMAS[type as AgentTailEventType].parse(payload) as
+    Readonly<Record<string, unknown>>;
+  const safe: Record<string, unknown> = {};
+  for (const key of [
+    "schemaVersion", "decisionId", "attentionId", "runId", "runStreamVersion",
+    "approvalRequestEventId", "planDigest", "envelopeDigest", "inputsSha256",
+    "evidenceSha256", "commandId", "authority", "material", "source", "classification",
+    "optionId", "expiredAt", "requestedPlanDigest", "requestedEnvelopeDigest",
+    "currentPlanDigest", "currentEnvelopeDigest", "resolution", "admissionId", "scopeId",
+    "attentionRevision", "packetSha256", "creationEventId", "kind", "outcome", "warningCode",
+    "approvalPacketSha256", "approvalDecisionId", "approvalDecisionEventId",
+  ] as const) {
+    if (parsed[key] !== undefined) safe[key] = parsed[key];
+  }
+  const expiry = parsed["expiryPolicy"];
+  if (typeof expiry === "object" && expiry !== null && !Array.isArray(expiry)) {
+    const record = expiry as Readonly<Record<string, unknown>>;
+    safe["expiryPolicy"] = record["kind"] === "wait_forever"
+      ? { kind: "wait_forever" }
+      : { kind: record["kind"], expiresAt: record["expiresAt"] };
+  }
+  const actor = parsed["actor"];
+  if (typeof actor === "object" && actor !== null && !Array.isArray(actor)) {
+    const record = actor as Readonly<Record<string, unknown>>;
+    safe["actor"] = { actorId: record["actorId"], kind: record["kind"], channel: record["channel"] };
+  }
+  const revision = parsed["projectRevision"];
+  if (typeof revision === "object" && revision !== null && !Array.isArray(revision)) {
+    const record = revision as Readonly<Record<string, unknown>>;
+    safe["projectRevision"] = { objectFormat: record["objectFormat"], commit: record["commit"] };
+  }
+  return safe;
 }
 
 function redactedTaskValidationPayload(payload: unknown): unknown {
@@ -575,6 +678,7 @@ function redactedWriterCompletedPayload(payload: unknown): unknown {
 
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return `intake:${event.streamId}`;
+  if (isAttentionEventType(event.type)) return `attention:${event.streamId}`;
   if (event.type.startsWith("service.")) return `service:${event.streamId}`;
   if (event.type.startsWith("preflight.")) return `run:${event.streamId}:preflight`;
   if (event.type.startsWith("run.")) return `run:${event.streamId}`;
@@ -614,6 +718,12 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 function actorFor(event: StoredEvent): AgentTailActor {
   if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") {
     return { id: "zentra-intake-service", role: "orchestrator" };
+  }
+  if (isAttentionEventType(event.type)) {
+    const actor = payloadRecord(event.payload, "actor");
+    return actor === null
+      ? { id: "zentra-attention-service", role: "attention" }
+      : { id: payloadString(actor, "actorId")!, role: payloadString(actor, "kind")! };
   }
   if (event.type.startsWith("service.")) return { id: "zentra-runtime", role: "service" };
   if (event.type === "run.accepted") {
@@ -725,6 +835,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 
 function operationName(event: StoredEvent): string {
   if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return "source_intake";
+  if (isAttentionEventType(event.type)) return "attention_decision";
   if (event.type.startsWith("service.")) return "service_startup";
   if (event.type.startsWith("preflight.")) return "run_preflight";
   if (event.type.startsWith("run.")) return "run";
@@ -773,6 +884,15 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (isAttentionEventType(type)) {
+    if (type.endsWith(".requested") || type === "questionnaire.proposed" ||
+      type === "attention.raised" || type.endsWith(".reserved") || type === "attention.index_raised") return "waiting";
+    if (type.endsWith(".rejected")) return "denied";
+    if (type.endsWith(".expired")) return "timed_out";
+    if (type.includes("stale")) return "stale";
+    if (type.includes("duplicate_attempted")) return "failed";
+    return "completed";
+  }
   if (type === "service.starting" || type === "preflight.started") return "running";
   if (type === "run.waiting" || type === "run.blocked" || type === "run.approval_requested") return "waiting";
   if (type === "preflight.failed" || type === "run.failed") return "failed";

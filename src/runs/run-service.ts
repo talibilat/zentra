@@ -200,9 +200,19 @@ export class RunService {
     });
   }
 
-  markApprovedAndReadyForExecution(runId: string, expectedVersion: number, commandId: string, input: { readonly planDigest: string; readonly envelopeDigest: string; readonly approvalDecisionId: string }): RunView {
-    return this.append(runId, { expectedVersion, commandId, causationId: null, process: this.require(runId).acceptedBy }, "run.ready_for_execution", {
-      schemaVersion: RUN_SCHEMA_VERSION, commandId, ...input, executionAuthority: "none",
+  revisePlan(runId: string, expectedVersion: number, commandId: string): RunView {
+    const events = this.readStream(runId);
+    const priorApproval = events.at(-1);
+    if (priorApproval?.type !== "run.approval_requested") {
+      throw new Error("run plan revision requires the current approval request event");
+    }
+    return this.append(runId, {
+      expectedVersion, commandId, causationId: priorApproval.eventId, process: this.require(runId).acceptedBy,
+    }, "run.plan_revised", {
+      schemaVersion: RUN_SCHEMA_VERSION,
+      commandId,
+      priorApprovalRequestEventId: priorApproval.eventId,
+      executionAuthority: "none",
     });
   }
 

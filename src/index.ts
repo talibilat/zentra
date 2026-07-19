@@ -8,6 +8,8 @@ export type { ModelBroker, ModelBrokerRequest, ModelBrokerReceipt } from "./caps
 export type { AzureOpenAIProviderConfig } from "./providers/azure-openai-model-broker.js";
 export type { InstalledProviderConfig } from "./providers/provider-config.js";
 export type {
+  AtomicAppend,
+  AtomicEventJournal,
   DurablePagedEventJournal,
   EventJournal,
   GlobalEventPage,
@@ -18,8 +20,10 @@ export type {
   StreamEventPage,
 } from "./journal/journal.js";
 export {
+  ATOMIC_EVENT_JOURNAL,
   DURABLE_PAGED_EVENT_JOURNAL,
   createProjectionClaimantId,
+  isAtomicEventJournal,
   isDurablePagedEventJournal,
 } from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
@@ -39,6 +43,85 @@ export type {
 } from "./journal/retention.js";
 export { ProjectingEventJournal } from "./journal/projecting-journal.js";
 export type { StoredEventSink } from "./journal/projecting-journal.js";
+export {
+  ATTENTION_SCHEMA_VERSION,
+  ApprovalAcceptedPayloadSchema,
+  ApprovalPacketSchema,
+  ApprovalReservationConsumedPayloadSchema,
+  ApprovalReservationPayloadSchema,
+  ApprovalStalePayloadSchema,
+  AttemptPayloadSchema,
+  AttentionRaisedPayloadSchema,
+  AttentionResolvedPayloadSchema,
+  AttentionIndexRaisedPayloadSchema,
+  AttentionIndexResolvedPayloadSchema,
+  AttentionIdentityReservationPayloadSchema,
+  DecisionAcceptedPayloadSchema,
+  DecisionActorSchema,
+  DecisionExpiredPayloadSchema,
+  DecisionOptionSchema,
+  DecisionRejectedPayloadSchema,
+  DecisionRequestedPayloadSchema,
+  ExpiryPolicySchema,
+  QuestionPacketSchema,
+  ScopeAdmissionPayloadSchema,
+  advisoryAttentionStreamId,
+  attentionIndexStreamId,
+  attentionIdentityReservationStreamId,
+  approvalReservationStreamId,
+  decisionAttemptStreamId,
+  decisionStreamId,
+  parseDecisionAttemptStreamId,
+} from "./attention/attention-contracts.js";
+export type {
+  ApprovalAcceptedPayload,
+  ApprovalPacket,
+  ApprovalReservationConsumedPayload,
+  ApprovalReservationPayload,
+  ApprovalStalePayload,
+  AttemptPayload,
+  AttentionRaisedPayload,
+  AttentionResolvedPayload,
+  AttentionIndexRaisedPayload,
+  AttentionIndexResolvedPayload,
+  AttentionIdentityReservationPayload,
+  DecisionAcceptedPayload,
+  DecisionActor,
+  DecisionExpiredPayload,
+  ExpiryPolicy,
+  DecisionOption,
+  DecisionRejectedPayload,
+  DecisionRequestedPayload,
+  QuestionPacket,
+  ScopeAdmissionPayload,
+} from "./attention/attention-contracts.js";
+export { projectAttentionIdentityReservation } from "./attention/attention-identity-reservation.js";
+export type { AttentionIdentityReservationView } from "./attention/attention-identity-reservation.js";
+export { projectApprovalReservation } from "./attention/approval-reservation.js";
+export type { ApprovalReservationView } from "./attention/approval-reservation.js";
+export { projectAttentionIndex } from "./attention/attention-index.js";
+export type {
+  AttentionIndexView,
+  IndexedMaterialAttention,
+} from "./attention/attention-index.js";
+export { projectAttention } from "./attention/attention-projection.js";
+export type {
+  AttentionResolution,
+  AttentionStatus,
+  AttentionView,
+} from "./attention/attention-projection.js";
+export { AttentionService } from "./attention/attention-service.js";
+export type {
+  DecisionSubmission,
+  RequestApprovalInput,
+  RequestQuestionInput,
+  TrustedClock,
+} from "./attention/attention-service.js";
+export { AttentionControlledDispatcher } from "./attention/attention-dispatcher.js";
+export type {
+  AttentionDispatchResult,
+  ScopeDependencies,
+} from "./attention/attention-dispatcher.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";
 export { loadModelSheet, parseModelSheetMarkdown } from "./policy/model-sheet.js";
 export type { ModelCapability, ModelSheet } from "./policy/model-sheet.js";
@@ -216,6 +299,7 @@ export {
   RunCancelledPayloadSchema,
   RunLifecycleSchema,
   RunIntakeCompletedPayloadSchema,
+  RunPlanRevisedPayloadSchema,
   RunProcessSchema,
   RunReadyPayloadSchema,
   RunSourceSchema,

@@ -98,6 +98,34 @@ describe("package-root programmatic API", () => {
     expect(contracts).toEqual([]);
   });
 
+  it("exports the complete durable attention event contract", () => {
+    for (const name of [
+      "ApprovalAcceptedPayloadSchema",
+      "ApprovalPacketSchema",
+      "ApprovalReservationConsumedPayloadSchema",
+      "ApprovalReservationPayloadSchema",
+      "ApprovalStalePayloadSchema",
+      "AttemptPayloadSchema",
+      "AttentionRaisedPayloadSchema",
+      "AttentionResolvedPayloadSchema",
+      "AttentionIndexRaisedPayloadSchema",
+      "AttentionIndexResolvedPayloadSchema",
+      "AttentionIdentityReservationPayloadSchema",
+      "DecisionAcceptedPayloadSchema",
+      "DecisionExpiredPayloadSchema",
+      "DecisionRejectedPayloadSchema",
+      "DecisionRequestedPayloadSchema",
+      "QuestionPacketSchema",
+      "ScopeAdmissionPayloadSchema",
+    ] as const) {
+      expect(packageApi[name].parse).toBeTypeOf("function");
+    }
+    expect(packageApi.AttentionControlledDispatcher).toBeTypeOf("function");
+    expect(packageApi.isAtomicEventJournal).toBeTypeOf("function");
+    expect(packageApi.RunPlanRevisedPayloadSchema.parse).toBeTypeOf("function");
+    expect("markApprovedAndReadyForExecution" in packageApi.RunService.prototype).toBe(false);
+  });
+
   it("keeps the stable EventJournal contract compatible with legacy adapters", () => {
     const legacy: EventJournal = {
       append: () => [],

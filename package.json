@@ -46,6 +46,7 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
+    "vite-node": "^6.0.0",
     "vitest": "^3.2.0"
   },
   "packageManager": "pnpm@10.0.0",
