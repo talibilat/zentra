@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { OpenCodeMilestoneCompletedPayloadSchema, OpenCodeMilestoneRunningPayloadSchema } from "../../src/agents/opencode-agent-events.js";
@@ -15,8 +17,9 @@ import {
 } from "../../src/observability/agent-tail.js";
 
 function storedEvent(input: Partial<StoredEvent> & Pick<StoredEvent, "type">): StoredEvent {
+  generatedEventIdentity += 1;
   return {
-    eventId: input.eventId ?? `event-${input.globalPosition ?? 1}`,
+    eventId: input.eventId ?? `event-${generatedEventIdentity}`,
     streamId: input.streamId ?? "task-1",
     streamVersion: input.streamVersion ?? 1,
     globalPosition: input.globalPosition ?? 1,
@@ -27,6 +30,8 @@ function storedEvent(input: Partial<StoredEvent> & Pick<StoredEvent, "type">): S
     correlationId: input.correlationId ?? "milestone-1",
   };
 }
+
+let generatedEventIdentity = 0;
 
 describe("Agent Tail event envelope export", () => {
   it("keeps mandatory payload schemas in exact parity with the event allowlist", () => {
@@ -156,6 +161,18 @@ describe("Agent Tail event envelope export", () => {
       payload: { credentialId: "SECRET_CREDENTIAL", tokenId: "SECRET_TOKEN", workerId: "worker-1" },
     })));
     expect(line).not.toMatch(/credentialId|tokenId|SECRET_CREDENTIAL|SECRET_TOKEN/);
+  });
+
+  it.each([
+    "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+    "sk-1234567890abcdefghijklmnop",
+    "AKIA1234567890ABCDEF",
+    "xoxb-12345678901234567890",
+    "Bearer reusable-credential",
+  ])("rejects credential-shaped values from every envelope field", (credential) => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "task.started", eventId: credential, payload: { workerId: credential },
+    }))).toThrow();
   });
 
   it("strictly parses and redacts local release command output", () => {
@@ -291,6 +308,60 @@ describe("Agent Tail event envelope export", () => {
     ]);
 
     expect(exported.map((event) => event.sequence)).toEqual([100, 250]);
+  });
+
+  it("rejects values that the canonical AgentTrail 1.x parser rejects", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "task.started",
+      payload: { workerId: "worker-1" },
+      recordedAt: "2026-02-30T11:02:44Z",
+    }))).toThrow(/timestamp/i);
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "task.started",
+      payload: { workerId: "worker-1" },
+      globalPosition: Number.MAX_SAFE_INTEGER + 1,
+    }))).toThrow(/sequence/i);
+  });
+
+  it("rejects duplicate event identities in a projected batch", () => {
+    expect(() => storedEventsToAgentTailEvents([
+      storedEvent({ type: "task.started", payload: { workerId: "worker-1" }, eventId: "same" }),
+      storedEvent({ type: "task.started", payload: { workerId: "worker-2" }, eventId: "same",
+        streamVersion: 2, globalPosition: 2 }),
+    ])).toThrow(/duplicate.*event/i);
+  });
+
+  it("projects causation and bounded authoritative identities", () => {
+    const projected = storedEventToAgentTailEvent(storedEvent({
+      type: "milestone.task_running",
+      streamId: "milestone-1",
+      causationId: "event-parent",
+      payload: { taskId: "task-1", actorId: "worker-1", role: "writer" },
+    }));
+    expect(projected.relationships).toEqual([{ type: "caused_by", event_id: "event-parent" }]);
+    expect(projected.identities).toMatchObject({
+      milestone_id: "milestone-1",
+      task_id: "task-1",
+      worker_id: "worker-1",
+      emitter_id: projected.emitter_id,
+    });
+  });
+
+  it("passes the imported canonical AgentTrail Event.from_dict parser", () => {
+    const projected = storedEventToAgentTailEvent(storedEvent({
+      type: "task.started", payload: { workerId: "worker-1" }, causationId: "event-parent",
+    }));
+    const script = [
+      "import json,sys",
+      "from agent_tail.core import Event",
+      "Event.from_dict(json.loads(sys.argv[1]))",
+    ].join(";");
+    const parsed = spawnSync("python3", ["-B", "-c", script, JSON.stringify(projected)], {
+      shell: false,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", PYTHONPATH: path.resolve("agenttrail/upstream/src") },
+    });
+    expect(parsed.status, parsed.stderr).toBe(0);
   });
 
   it("maps worker, validator, reviewer, integration, recovery, and terminal display actors", () => {

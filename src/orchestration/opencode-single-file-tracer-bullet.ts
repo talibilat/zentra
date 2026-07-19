@@ -170,6 +170,9 @@ export class OpenCodeSingleFileTracerBullet {
 
     let observedWorkspace: string | null = null;
     let capsule: WriterCapsuleResult;
+    const heartbeats: Array<{ close(): void }> = [];
+    const heartbeatFailure = new AbortController();
+    const capsuleSignal = AbortSignal.any([request.signal, heartbeatFailure.signal]);
     const workers = new WorkerLifecycleService(this.tasks.eventJournal());
     const roleCapabilities = new RoleCapabilityEnvelopeService(this.tasks.eventJournal());
     const workerEvents = new OpenCodeWorkerEventAdapter();
@@ -270,6 +273,7 @@ export class OpenCodeSingleFileTracerBullet {
       }
       capsule = await this.capsule.run({
         ...request,
+        signal: capsuleSignal,
         ...(request.guidance === undefined ? {} : { guidance: request.guidance }),
         capabilityBinding: roleBinding,
       executable: request.probe!.executable!,
@@ -289,12 +293,15 @@ export class OpenCodeSingleFileTracerBullet {
           },
           onWriterStarted: ({ lease: writerLease }) => {
             workers.start(request.task.taskId, workerId);
+            heartbeats.push(workers.superviseHeartbeats(request.task.taskId, workerId, capsuleSignal,
+              (error) => heartbeatFailure.abort(error)));
             this.tasks.append(request.task.taskId, "task.started", {
               workerId: request.model.id,
             }, null);
             void writerLease;
           },
           onWriterCompleted: (report) => {
+            for (const heartbeat of heartbeats.splice(0)) heartbeat.close();
             workers.observe(request.task.taskId, workerId, workerEvents.processObservation(
               "opencode", report.outcome,
             ));
@@ -305,6 +312,7 @@ export class OpenCodeSingleFileTracerBullet {
         },
       });
     } catch (error) {
+      for (const heartbeat of heartbeats.splice(0)) heartbeat.close();
       const worker = workers.inspect(request.task.taskId).workers[workerId];
       if (worker !== undefined && worker.status !== "terminal" && worker.status !== "uncertain") {
         if (error instanceof WorkspaceCreationUncertainError || error instanceof IntegrationBranchCreationUncertainError || this.current(request.task.taskId).lifecycle === "running") {
