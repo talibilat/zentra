@@ -133,6 +133,23 @@ export const RunPhasePayloadSchema = z.strictObject({
   executionAuthority: z.literal("none"),
 });
 
+export const IntakeClosureReferenceSchema = z.strictObject({
+  sourceStreamId: IdSchema,
+  closureEventId: IdSchema,
+  snapshotSha256: DigestSchema,
+  sourceCount: z.number().int().nonnegative().max(10_000),
+  rejectedCount: z.number().int().nonnegative().max(100_000),
+  totalBytes: z.number().int().nonnegative().max(1024 * 1024 * 1024),
+});
+
+export const RunIntakeCompletedPayloadSchema = RunPhasePayloadSchema.extend({
+  intake: IntakeClosureReferenceSchema,
+});
+
+export const RunAnalysisCompletedPayloadSchema = RunPhasePayloadSchema.extend({
+  intake: IntakeClosureReferenceSchema,
+});
+
 export const RunApprovalRequestedPayloadSchema = RunPhasePayloadSchema.extend({
   planDigest: DigestSchema,
   envelopeDigest: DigestSchema,
@@ -182,6 +199,7 @@ export type RunActor = z.infer<typeof RunActorSchema>;
 export type RunProcess = z.infer<typeof RunProcessSchema>;
 export type RunBudget = z.infer<typeof RunBudgetSchema>;
 export type RunAuthority = z.infer<typeof RunAuthoritySchema>;
+export type IntakeClosureReference = z.infer<typeof IntakeClosureReferenceSchema>;
 
 export function runStreamId(runId: string): string {
   return `run:${IdSchema.parse(runId)}`;
