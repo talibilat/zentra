@@ -21,8 +21,13 @@ import {
   ProjectingEventJournal,
   DURABLE_PAGED_EVENT_JOURNAL,
   isDurablePagedEventJournal,
+  JournalRetentionService,
+  ArchivedEventJournal,
+  openAuthoritativeJournal,
 } from "../../src/index.js";
 import type {
+  ArchiveManifest,
+  ArchiveResult,
   DurablePagedEventJournal,
   GlobalEventPage,
   JournalPageLimits,
@@ -31,6 +36,11 @@ import type {
   StreamEventPage,
   EventJournal,
   PagedEventJournal,
+  PruneRequest,
+  RetentionPolicy,
+  RetentionRecovery,
+  RetentionReconcileResult,
+  VacuumEvidence,
 } from "../../src/index.js";
 import * as packageApi from "../../src/index.js";
 
@@ -50,6 +60,9 @@ describe("package-root programmatic API", () => {
     expect(SqliteEventJournal).toBeTypeOf("function");
     expect(SqliteEventJournal.prototype.readAllPage).toBeTypeOf("function");
     expect(SqliteEventJournal.prototype.inspectProjectionCursor).toBeTypeOf("function");
+    expect(JournalRetentionService.prototype.archive).toBeTypeOf("function");
+    expect(ArchivedEventJournal.prototype.readAllPage).toBeTypeOf("function");
+    expect(openAuthoritativeJournal).toBeTypeOf("function");
     expect(LocalReleaseCoordinator).toBeTypeOf("function");
     expect("InstalledMilestoneRunner" in packageApi).toBe(false);
     expect("AzureOpenAIModelBroker" in packageApi).toBe(false);
@@ -74,6 +87,13 @@ describe("package-root programmatic API", () => {
       ProjectionCursor?,
       StreamEventPage?,
       PagedEventJournal?,
+      ArchiveManifest?,
+      ArchiveResult?,
+      PruneRequest?,
+      RetentionPolicy?,
+      RetentionRecovery?,
+      RetentionReconcileResult?,
+      VacuumEvidence?,
     ] = [];
     expect(contracts).toEqual([]);
   });

@@ -393,6 +393,58 @@ Live Agent Tail streaming is the exception because it reserves standard output f
 
 Commander help remains human-readable text rather than an operational JSON result.
 
+## Journal Retention
+
+The default policy retains journal history forever and never deletes events because of age, size, archive creation, backup, checkpoint, or maintenance.
+Archives are owner-restricted, tamper-evident JSONL segments with checksummed manifests, exact inclusive global-position ranges, a journal identity, and a checksummed manifest chain under the fixed `<database>.archives` directory.
+SQLite durably anchors that identity, the exact archive head position, head-manifest digest, segment count, and retained-through position, so deletion or replacement of the complete filesystem chain fails verification.
+Archive, verification, replay, export, and restore preserve event IDs, stream versions, and global positions.
+Export and restore capture one fixed source high-water position, and restore records started and completed evidence with the resulting digest.
+Normal CLI reads and writes use the authoritative active-plus-archive adapter after prune, including task status, milestone replay, outcome history, recovery, and appends to existing streams.
+
+Archive one explicit bounded range and verify the complete archive chain.
+
+```bash
+pnpm start -- journal archive --database /absolute/path/to/zentra.sqlite --through-position 10000 --max-events 10000
+pnpm start -- journal verify --database /absolute/path/to/zentra.sqlite
+```
+
+Pruning is a separate irreversible operator action.
+First create an audited request, then pass its exact request identity and generated confirmation phrase to `journal prune`.
+Prune fails if the archive is missing or unverified, any projection cursor is below the boundary or has an active claim, or the confirmation differs by any byte.
+The request and authorization records are appended above the selected boundary and cannot be removed by the operation they authorize.
+Archive publication and prune use serialized durable intent states; `journal recover` only reports reconciled filesystem/database state and never retries or completes an interrupted effect automatically.
+Use `journal inspect-recovery` for the explicit read-only classification.
+Use `journal reconcile` only with the exact operation identity and generated classification-bound confirmation phrase.
+Reconciliation anchors a fully published valid archive, records completion for a prune whose deleted rows and retained boundary prove the effect, verifies a published restore without repeating it, records failure for authorization proven not executed, or explicitly removes an orphan publication while retaining repair evidence.
+Incomplete maintenance is reconciled without rerunning checkpoint, backup, or vacuum: a digest-bound published backup may be completed, while exact operation-named private temp residue is explicitly cleaned and terminalized as failed.
+Repeating a settled reconciliation is idempotent.
+
+```bash
+pnpm start -- journal prune-request --database /absolute/path/to/zentra.sqlite --through-position 10000 --operator operator-1
+pnpm start -- journal prune --database /absolute/path/to/zentra.sqlite --through-position 10000 --operator operator-1 --request-id REQUEST_ID --confirm "IRREVERSIBLY PRUNE THROUGH 10000 REQUEST REQUEST_ID"
+```
+
+Maintenance parses the passive WAL checkpoint frame report, reports incomplete checkpoints rather than claiming success, and creates an integrity-checked bounded-progress SQLite backup.
+Optional `--vacuum-pages` requests at most 1,000 incremental-vacuum pages under a fixed deadline and abort signal.
+Journals not configured for SQLite incremental vacuum report `not_supported` without blocking, and Zentra never runs an unbounded full `VACUUM`.
+It never runs an executable and accepts no backup destination path.
+
+```bash
+pnpm start -- journal maintain --database /absolute/path/to/zentra.sqlite
+pnpm start -- journal maintain --database /absolute/path/to/zentra.sqlite --vacuum-pages 128
+```
+
+Export and restore accept one safe filename only and create it directly beside the journal.
+They reject absolute paths, traversal, symlinks, existing destinations, archive tampering, and archive gaps.
+
+```bash
+pnpm start -- journal export --database /absolute/path/to/zentra.sqlite --name complete-journal.jsonl
+pnpm start -- journal restore --database /absolute/path/to/zentra.sqlite --name restored-journal.sqlite
+pnpm start -- journal inspect-recovery --database /absolute/path/to/zentra.sqlite
+pnpm start -- journal reconcile --database /absolute/path/to/zentra.sqlite --operation-id OPERATION_ID --confirm "RECONCILE OPERATION OPERATION_ID STATE CLASSIFICATION"
+```
+
 ## Deterministic File Scope
 
 The deterministic Task 8 worker may change exactly one root-level file selected by `--file`.

@@ -11,7 +11,7 @@ const sourceRoots = ["src", "scripts", "fixtures", "tests"];
 const featureDefinitions = [
   ["entrypoints", "Entrypoints & CLI", "Typed command and package entrypoints", "CLI argv, project JSON, policy sheets, provider configuration, and programmatic requests.", "Bounded JSON results, stable exit codes, or typed library values.", "Commander validates input, composes internal services, and maps domain outcomes without exposing a shell."],
   ["contracts", "Contracts & schemas", "The vocabulary every boundary shares", "Untrusted JSON-like values, identifiers, evidence, budgets, and lifecycle payloads.", "Parsed immutable domain values or a fail-closed validation error.", "Zod schemas and TypeScript contracts define canonical states, digests, authority packets, and terminal outcomes."],
-  ["journal", "Event journal", "Authoritative durable state", "Expected stream version plus ordered new events.", "Versioned stored events with global positions and timestamps.", "SQLite appends transactionally; every task, worker, milestone, effect, and release view is rebuilt by replay."],
+  ["journal", "Event journal", "Authoritative durable state and explicit retention", "Expected stream version, ordered events, or an exact audited maintenance request.", "Stable stored events, SQLite-anchored tamper-evident archive manifests, verified replay, or explicit maintenance evidence.", "SQLite anchors journal identity and archive head, durable operation states serialize effects, bounded segment scans compose archived and active history, and prune requires verified overlap, cursor safety, and exact irreversible confirmation."],
   ["tasks", "Tasks & artifacts", "One schedulable unit and its evidence chain", "Task identity and lifecycle or artifact events.", "A validated TaskView and digest-bound ArtifactView.", "Pure projections reject impossible transitions, post-terminal writes, stale evidence, and incomplete cleanup."],
   ["milestones", "Milestones & planning", "Dependency plans, admission, replanning, and completion", "A milestone plan, role assignments, authority envelope, budgets, and retained evidence.", "A replayed MilestoneRecord, readiness decision, pause, revision, or terminal result.", "The registry appends decisions before effects and verifies completion from retained task and integration evidence."],
   ["policy", "Policy & authority", "Cross-cutting authority plane", "Model/security Markdown, role request, risk, network, repository, and effect scope.", "An approved capability binding, denial, or explicit attention boundary.", "Policy narrows authority; reasoning, installation, and role labels never grant execution authority."],
@@ -105,6 +105,17 @@ const flows = [
       ["Classify", "retainClassification", "Known lifecycle and external observations", "resume_preparation / await_reconciliation / record_*", "src/orchestration/recovery.ts"],
       ["Authorize bounded action", "authorizeBoundedCleanup/recordCompletion", "Exact retained decision", "One cleanup or completion append", "src/orchestration/recovery.ts"],
       ["Project", "projectTask", "Updated event stream", "Rebuildable canonical view", "src/tasks/task-projection.ts"],
+    ],
+  },
+  {
+    id: "retention", name: "Journal archive and explicit prune", summary: "History remains authoritative across tamper-evident archives and active SQLite while deletion requires a separate audited operator decision.",
+    steps: [
+      ["Propose archive", "JournalRetentionService.archive", "Exact position boundary and bounded event count", "archive proposed and started evidence", "src/journal/retention.ts"],
+      ["Publish segment", "writeSegment/writeImmutable", "Durable SQLite intent plus canonical stored-event JSONL", "Fsynced restrictive segment and checksummed manifest", "src/journal/retention.ts"],
+      ["Verify chain", "JournalRetentionService.verify", "SQLite identity/head anchor, segments, manifests, checksums, overlap, and exact ranges", "Verified contiguous archive boundary", "src/journal/retention.ts"],
+      ["Authorize prune", "requestPrune/prune", "Single-use request, operator, verified boundary, cursor safety, exact confirmation", "Audited authorization above the prune boundary", "src/journal/retention.ts"],
+      ["Reconcile interruption", "inspectRecovery/reconcile", "Read-only classification followed by exact operation ID and confirmation", "Recovered archive, prune, or maintenance completion, or explicit repair/failure evidence without effect retry", "src/journal/retention.ts"],
+      ["Replay or restore", "ArchivedEventJournal/restore", "Bounded early-stop archive pages plus active journal", "Stable event IDs, versions, positions, appends, and combined durable projection claims", "src/journal/retention.ts"],
     ],
   },
 ].map((flow) => ({ ...flow, steps: flow.steps.map(([name, fn, input, output, module]) => ({ name, fn, input, output, module })) }));

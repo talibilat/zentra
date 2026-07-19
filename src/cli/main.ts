@@ -31,8 +31,13 @@ import {
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { IntegrationLeaseStore } from "../integration/integration-lease.js";
-import type { EventJournal } from "../journal/journal.js";
+import type { DurablePagedEventJournal, EventJournal } from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
+import {
+  ArchivedEventJournal,
+  JournalRetentionService,
+  openAuthoritativeJournal,
+} from "../journal/retention.js";
 import { SqliteEventJournal } from "../journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../milestones/milestone-registry.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
@@ -187,6 +192,25 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
+
+interface JournalBoundaryOptions {
+  readonly database: string;
+  readonly throughPosition: number;
+}
+
+interface JournalArchiveOptions extends JournalBoundaryOptions { readonly maxEvents: number }
+interface JournalPruneRequestOptions extends JournalBoundaryOptions { readonly operator: string }
+interface JournalPruneOptions extends JournalPruneRequestOptions {
+  readonly requestId: string;
+  readonly confirm: string;
+}
+interface JournalNameOptions { readonly database: string; readonly name: string }
+interface JournalMaintainOptions { readonly database: string; readonly vacuumPages?: number }
+interface JournalReconcileOptions {
+  readonly database: string;
+  readonly operationId: string;
+  readonly confirm: string;
+}
 
 interface PolicyPreviewOptions {
   readonly modelSheet: string;
@@ -401,7 +425,7 @@ function createProgram(
         .update(`${project.projectId}\0${options.goal}\0${options.file}`, "utf8")
         .digest("hex").slice(0, 16)}`;
       const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, liveStdout, milestoneId);
-      const sqlite = new SqliteEventJournal(options.database);
+      const sqlite = openJournal(options.database, "read-write");
       let sink: AgentTailJsonlFileSink | undefined;
       let runner: InstalledMilestoneRunner | undefined;
       let projectionFailed = false;
@@ -438,7 +462,7 @@ function createProgram(
           sqlite.close();
         }
       }
-      const replay = SqliteEventJournal.openReadOnly(options.database);
+      const replay = openJournal(options.database, "read-only");
       let terminal;
       try {
         terminal = new MilestoneRegistry(replay).inspect(milestoneId);
@@ -500,7 +524,7 @@ function createProgram(
       try {
         let history: OutcomeHistoryRecord[] = [];
         if (existsSync(options.database)) {
-          const historyJournal = SqliteEventJournal.openReadOnly(options.database);
+          const historyJournal = openJournal(options.database, "read-only");
           try {
             history = [...new JournalOutcomeHistoryStore(historyJournal).list({
               taskType: "milestone_planning",
@@ -606,7 +630,7 @@ function createProgram(
         options.agentTailStream === true ? liveStdout : undefined,
         milestoneId,
       );
-      const sqliteJournal = new SqliteEventJournal(options.database);
+      const sqliteJournal = openJournal(options.database, "read-write");
       let sink: AgentTailJsonlFileSink | undefined;
       let journal: ProjectingEventJournal | undefined;
       let stored;
@@ -698,7 +722,7 @@ function createProgram(
     .action(async (options: CapsuleConformanceOptions) => {
       assertSafeTaskId(options.capsuleId);
       const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, undefined, options.capsuleId);
-      const sqliteJournal = new SqliteEventJournal(options.database);
+      const sqliteJournal = openJournal(options.database, "read-write");
       let sink: AgentTailJsonlFileSink | undefined;
       let journal: ProjectingEventJournal | undefined;
       try {
@@ -756,6 +780,107 @@ function createProgram(
     .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePush({ grantId: options.grantId, signal })));
   addGitHubBase(github.command("reconcile-pr").description("Read exact pull-request state for an uncertain creation."))
     .action(async (options: GitHubBaseOptions) => runGitHubBrokerCli(options, setResult, (broker) => broker.reconcilePullRequest({ grantId: options.grantId, signal })));
+
+  const journalMaintenance = program.command("journal")
+    .description("Archive, verify, prune, export, restore, and maintain the event journal.");
+  journalMaintenance.command("archive")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--through-position <position>", "exact inclusive global position", positiveInteger)
+    .requiredOption("--max-events <count>", "bounded maximum archived event count", positiveInteger)
+    .action((options: JournalArchiveOptions) => {
+      const result = retentionForCli(options.database).archive(options);
+      setResult({ exitCode: 0, value: {
+        command: "journal.archive",
+        segmentId: result.segmentId,
+        fromPosition: result.fromPosition,
+        throughPosition: result.throughPosition,
+        eventCount: result.eventCount,
+        segmentSha256: result.segmentSha256,
+        manifestSha256: result.manifestSha256,
+      } });
+    });
+  journalMaintenance.command("verify")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .action((options: Pick<JournalBoundaryOptions, "database">) => {
+      const result = retentionForCli(options.database).verify(true);
+      setResult({ exitCode: 0, value: { command: "journal.verify", ...result } });
+    });
+  journalMaintenance.command("prune-request")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--through-position <position>", "exact inclusive global position", positiveInteger)
+    .requiredOption("--operator <id>", "audited operator identity")
+    .action((options: JournalPruneRequestOptions) => {
+      const result = retentionForCli(options.database).requestPrune({
+        throughPosition: options.throughPosition,
+        operatorId: options.operator,
+      });
+      setResult({ exitCode: 0, value: { command: "journal.prune-request", ...result } });
+    });
+  journalMaintenance.command("prune")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--through-position <position>", "exact inclusive global position", positiveInteger)
+    .requiredOption("--operator <id>", "audited operator identity")
+    .requiredOption("--request-id <id>", "exact audited request identity")
+    .requiredOption("--confirm <phrase>", "exact irreversible confirmation phrase")
+    .action((options: JournalPruneOptions) => {
+      const result = retentionForCli(options.database).prune({
+        requestId: options.requestId,
+        throughPosition: options.throughPosition,
+        operatorId: options.operator,
+        confirmation: options.confirm,
+      });
+      setResult({ exitCode: 0, value: { command: "journal.prune", ...result } });
+    });
+  journalMaintenance.command("maintain")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .option("--vacuum-pages <count>", "bounded incremental vacuum page count (maximum 1000)", boundedVacuumPages)
+    .action(async (options: JournalMaintainOptions) => {
+      const result = await retentionForCli(options.database).maintain({
+        checkpoint: true,
+        ...(options.vacuumPages === undefined ? {} : { vacuumPages: options.vacuumPages }),
+        signal,
+      });
+      setResult({ exitCode: result.checkpointed ? 0 : 1, value: { command: "journal.maintain", ...result } });
+    });
+  journalMaintenance.command("export")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--name <filename>", "new safe filename in the journal directory")
+    .action((options: JournalNameOptions) => {
+      const result = retentionForCli(options.database).export(options);
+      setResult({ exitCode: 0, value: { command: "journal.export", ...result } });
+    });
+  journalMaintenance.command("restore")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--name <filename>", "new safe filename in the journal directory")
+    .action((options: JournalNameOptions) => {
+      const result = retentionForCli(options.database).restore(options);
+      setResult({ exitCode: 0, value: { command: "journal.restore", ...result } });
+    });
+  journalMaintenance.command("recover")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .action((options: Pick<JournalBoundaryOptions, "database">) => {
+      const result = retentionForCli(options.database, "read-only").inspectRecovery();
+      setResult({ exitCode: result.outcome === "clean" ? 0 : 1,
+        value: { command: "journal.recover", ...result } });
+    });
+  journalMaintenance.command("inspect-recovery")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .action((options: Pick<JournalBoundaryOptions, "database">) => {
+      const result = retentionForCli(options.database, "read-only").inspectRecovery();
+      setResult({ exitCode: result.outcome === "clean" ? 0 : 1,
+        value: { command: "journal.inspect-recovery", ...result } });
+    });
+  journalMaintenance.command("reconcile")
+    .requiredOption("--database <path>", "canonical SQLite event journal path")
+    .requiredOption("--operation-id <id>", "exact incomplete retention operation identity")
+    .requiredOption("--confirm <phrase>", "exact classification-bound reconcile confirmation")
+    .action((options: JournalReconcileOptions) => {
+      const result = retentionForCli(options.database).reconcile({
+        operationId: options.operationId,
+        confirmation: options.confirm,
+      });
+      setResult({ exitCode: 0, value: { command: "journal.reconcile", ...result } });
+    });
 
   const task = program.command("task").description("Run and inspect deterministic tasks.");
   task
@@ -898,7 +1023,7 @@ async function runGitHubBrokerCli(
   assertSafeTaskId(options.grantId);
   const policy = loadCapsulePolicy(options.policy);
   const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, undefined, options.grantId);
-  const sqlite = new SqliteEventJournal(options.database);
+  const sqlite = openJournal(options.database, "read-write");
   let sink: AgentTailJsonlFileSink | undefined;
   let journal: ProjectingEventJournal | undefined;
   let repositoryLeases: IntegrationLeaseStore | undefined;
@@ -970,14 +1095,32 @@ async function withSystem<T>(
 function openJournal(
   databasePath: string,
   mode: "read-only" | "read-write",
-): SqliteEventJournal {
-  if (mode === "read-write") return new SqliteEventJournal(databasePath);
-  if (!existsSync(databasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
+): ArchivedEventJournal {
+  const canonicalDatabasePath = canonicalDatabasePathForCreation(databasePath);
+  if (mode === "read-write" && !existsSync(canonicalDatabasePath)) {
+    const created = new SqliteEventJournal(canonicalDatabasePath);
+    created.close();
+  }
+  if (!existsSync(canonicalDatabasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
   try {
-    return SqliteEventJournal.openReadOnly(databasePath);
+    return openAuthoritativeJournal(canonicalDatabasePath, mode);
   } catch (error) {
-    if (!existsSync(databasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
+    if (!existsSync(canonicalDatabasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
     throw error;
+  }
+}
+
+function canonicalDatabasePathForCreation(databasePath: string): string {
+  if (!path.isAbsolute(databasePath) || path.normalize(databasePath) !== databasePath) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+  try {
+    const parent = realpathSync.native(path.dirname(databasePath));
+    if (!statSync(parent).isDirectory()) throw new CliFailure("INVALID_COMMAND");
+    return path.join(parent, path.basename(databasePath));
+  } catch (error) {
+    if (error instanceof CliFailure) throw error;
+    throw new CliFailure("INVALID_COMMAND");
   }
 }
 
@@ -1115,7 +1258,7 @@ function prepareAgentTailTrace(
 }
 
 function openAgentTailSink(
-  journal: SqliteEventJournal,
+  journal: DurablePagedEventJournal,
   trace: AgentTailTraceDestination,
 ): AgentTailJsonlFileSink {
   const cursorName = AgentTailJsonlFileSink.projectionCursorName(trace.canonicalPath);
@@ -1302,6 +1445,32 @@ function assertCanonicalOutputPath(candidate: string): void {
   } catch {
     throw new CliFailure("INVALID_COMMAND");
   }
+}
+
+function retentionForCli(
+  databasePath: string,
+  mode: "read-only" | "read-write" = "read-write",
+): JournalRetentionService {
+  try {
+    return mode === "read-only"
+      ? JournalRetentionService.openReadOnly(databasePath)
+      : new JournalRetentionService(databasePath);
+  } catch {
+    throw new CliFailure(existsSync(databasePath) ? "INVALID_COMMAND" : "DATABASE_NOT_FOUND");
+  }
+}
+
+function positiveInteger(value: string): number {
+  if (!/^[1-9]\d{0,15}$/.test(value)) throw new CliFailure("INVALID_COMMAND");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new CliFailure("INVALID_COMMAND");
+  return parsed;
+}
+
+function boundedVacuumPages(value: string): number {
+  const parsed = positiveInteger(value);
+  if (parsed > 1_000) throw new CliFailure("INVALID_COMMAND");
+  return parsed;
 }
 
 function assertSafeTitle(title: string): void {
