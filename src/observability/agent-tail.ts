@@ -30,6 +30,21 @@ import { PlanReplacementPayloadSchema, TaskReadyPayloadSchema } from "../contrac
 import { IntegrationBranchPreparationIntentSchema, IntegrationBranchPreparationObservedSchema } from "../contracts/integration-branch-preparation.js";
 import { EffectReconciliationPayloadSchema, UncertainEffectPayloadSchema } from "../contracts/uncertain-effect.js";
 import { ReleaseOperationBoundPayloadSchema } from "../release/release-events.js";
+import {
+  PreflightFailedPayloadSchema,
+  PreflightPayloadSchema,
+  RunAcceptedPayloadSchema,
+  RunApprovalRequestedPayloadSchema,
+  RunCancelledPayloadSchema,
+  RunPhasePayloadSchema,
+  RunReadyPayloadSchema,
+  RunReopenedPayloadSchema,
+  RunResumedPayloadSchema,
+  RunSuspendedPayloadSchema,
+  RunTerminalPayloadSchema,
+  ServiceReadyPayloadSchema,
+  ServiceStartingPayloadSchema,
+} from "../runs/run-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -74,6 +89,11 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "routing.model_selected", "routing.outcome_recorded",
   "capability_envelope.accepted", "capability_envelope.evaluated",
   "web_research.observed",
+  "service.starting", "service.ready",
+  "run.accepted", "preflight.started", "preflight.completed", "preflight.failed",
+  "run.waiting", "run.blocked", "run.resumed", "run.reopened", "run.intake_completed",
+  "run.analysis_completed", "run.approval_requested", "run.ready_for_execution",
+  "run.completed", "run.cancelled", "run.denied", "run.timed_out", "run.failed",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -234,6 +254,25 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "capability_envelope.accepted": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.accepted", payload)),
   "capability_envelope.evaluated": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.evaluated", payload)),
   "web_research.observed": parseWith((payload) => parseWebResearchEventPayload("web_research.observed", payload)),
+  "service.starting": ServiceStartingPayloadSchema,
+  "service.ready": ServiceReadyPayloadSchema,
+  "run.accepted": RunAcceptedPayloadSchema,
+  "preflight.started": PreflightPayloadSchema,
+  "preflight.completed": PreflightPayloadSchema,
+  "preflight.failed": PreflightFailedPayloadSchema,
+  "run.waiting": RunSuspendedPayloadSchema,
+  "run.blocked": RunSuspendedPayloadSchema,
+  "run.resumed": RunResumedPayloadSchema,
+  "run.reopened": RunReopenedPayloadSchema,
+  "run.intake_completed": RunPhasePayloadSchema,
+  "run.analysis_completed": RunPhasePayloadSchema,
+  "run.approval_requested": RunApprovalRequestedPayloadSchema,
+  "run.ready_for_execution": RunReadyPayloadSchema,
+  "run.completed": RunTerminalPayloadSchema,
+  "run.cancelled": RunCancelledPayloadSchema,
+  "run.denied": RunTerminalPayloadSchema,
+  "run.timed_out": RunTerminalPayloadSchema,
+  "run.failed": RunTerminalPayloadSchema,
 };
 
 export interface AgentTailActor {
@@ -313,6 +352,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedReleaseTaskCompletionPayload(event.payload)
     : event.type.startsWith("release.")
       ? redactedReleasePayload(event.type, event.payload)
+    : event.type.startsWith("run.") || event.type.startsWith("preflight.") || event.type.startsWith("service.")
+      ? AGENT_TAIL_PAYLOAD_SCHEMAS[event.type as AgentTailEventType].parse(event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -523,6 +564,9 @@ function redactedWriterCompletedPayload(payload: unknown): unknown {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("service.")) return `service:${event.streamId}`;
+  if (event.type.startsWith("preflight.")) return `run:${event.streamId}:preflight`;
+  if (event.type.startsWith("run.")) return `run:${event.streamId}`;
   if (event.type.startsWith("capability_envelope.")) return `capability-envelope:${event.streamId}`;
   if (event.type.startsWith("web_research.")) return `web-research:${payloadString(event.payload, "requestId")!}`;
   if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
@@ -538,6 +582,7 @@ function spanIdFor(event: StoredEvent): string {
 }
 
 function parentSpanIdFor(event: StoredEvent): string | null {
+  if (event.type.startsWith("preflight.")) return `run:${event.streamId}`;
   if (event.type.startsWith("worker.")) {
     const parent = payloadString(event.payload, "parentWorkerId");
     if (parent !== null) return `worker:${parent}`;
@@ -556,6 +601,18 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("service.")) return { id: "zentra-runtime", role: "service" };
+  if (event.type === "run.accepted") {
+    const actor = payloadRecord(event.payload, "actor");
+    return { id: payloadString(actor, "actorId")!, role: payloadString(actor, "kind")! };
+  }
+  if (event.type === "run.cancelled") {
+    const actor = payloadRecord(event.payload, "requestedBy");
+    return { id: payloadString(actor, "actorId")!, role: payloadString(actor, "kind")! };
+  }
+  if (event.type.startsWith("run.") || event.type.startsWith("preflight.")) {
+    return { id: "zentra-run-service", role: "orchestrator" };
+  }
   if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
   if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
   if (event.type.startsWith("web_research.")) {
@@ -653,6 +710,9 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type.startsWith("service.")) return "service_startup";
+  if (event.type.startsWith("preflight.")) return "run_preflight";
+  if (event.type.startsWith("run.")) return "run";
   if (event.type.includes("capability_boundary_")) return "capability_boundary";
   if (event.type.startsWith("capability_envelope.")) return "capability_envelope";
   if (event.type.startsWith("web_research.")) return "web_research";
@@ -698,6 +758,12 @@ function operationName(event: StoredEvent): string {
 
 function operationStatus(event: StoredEvent): string {
   const type = event.type;
+  if (type === "service.starting" || type === "preflight.started") return "running";
+  if (type === "run.waiting" || type === "run.blocked" || type === "run.approval_requested") return "waiting";
+  if (type === "preflight.failed" || type === "run.failed") return "failed";
+  if (type === "run.cancelled") return "cancelled";
+  if (type === "run.denied") return "denied";
+  if (type === "run.timed_out") return "timed_out";
   if (type === "capability_envelope.accepted") return "completed";
   if (type === "web_research.observed") return payloadString(event.payload, "outcome") ?? "failed";
   if (type === "capability_envelope.evaluated") {
