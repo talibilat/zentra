@@ -11,7 +11,10 @@ import { RunService } from "../../src/runs/run-service.js";
 import { ServiceLifecycleService } from "../../src/runs/service-lifecycle.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
 import { intakeStreamId } from "../../src/intake/intake-service.js";
+import { IntakeService } from "../../src/intake/intake-service.js";
+import { IntakeArtifactStore } from "../../src/intake/intake-artifact-store.js";
 import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
+import { BoundedTicketIntake } from "../../src/intake/ticket-intake.js";
 
 const cleanup: string[] = [];
 
@@ -40,14 +43,28 @@ function fixture(seedService = true) {
     });
     input = { ...accepted, causationId: ready.eventId };
   }
-  return { databasePath, journal, service, input };
+  return { directory, databasePath, journal, service, input };
 }
+
+const intakeGoal = "inspect the durable intake";
+const intakeLimits = {
+  maxFileBytes: 1_000,
+  maxFiles: 10,
+  maxTotalBytes: 1_000,
+  maxDepth: 0,
+  maxEntries: 10,
+  maxDirectoryEntries: 10,
+};
 
 const accepted = {
   runId: "run-89",
   projectId: "zentra",
   projectRevision: { objectFormat: "sha1" as const, commit: "a".repeat(40) },
-  source: { kind: "inline_goal" as const, referenceSha256: "b".repeat(64), declaredBytes: 32 },
+  source: {
+    kind: "inline_goal" as const,
+    referenceSha256: createHash("sha256").update(intakeGoal).digest("hex"),
+    declaredBytes: Buffer.byteLength(intakeGoal),
+  },
   actor: { actorId: "operator-1", kind: "operator" as const },
   process: { pid: 123, processIncarnation: `process-v2:${"c".repeat(64)}` },
   budget: {
@@ -96,8 +113,8 @@ describe("RunService", () => {
     journal.close();
   });
 
-  it("reopens the exact authority-neutral intake state and denies direct unverified analysis", () => {
-    const { databasePath, journal, service, input } = fixture();
+  it("reopens the exact approval state after verified intake and denies direct unverified analysis", async () => {
+    const { directory, databasePath, journal, service, input } = fixture();
     let run = service.accept(input);
     run = service.startPreflight("run-89", {
       expectedVersion: run.streamVersion,
@@ -111,16 +128,36 @@ describe("RunService", () => {
       causationId: service.readStream("run-89").at(-1)!.eventId,
       process: accepted.process,
     });
-    run = service.completeIntake("run-89", run.streamVersion, "intake-1", seedIntakeClosure(journal, service));
+    const intake = new IntakeService(
+      journal,
+      service,
+      new BoundedTicketIntake(),
+      await IntakeArtifactStore.openProject(directory),
+    );
+    const result = await intake.intake({
+      runId: input.runId,
+      projectRevision: input.projectRevision,
+      source: { kind: "inline_goal", goal: intakeGoal },
+      limits: intakeLimits,
+      commandId: "intake-1",
+    });
+    run = result.run;
     expect(() => service.completeAnalysis("run-89", run.streamVersion, "analysis-1", undefined as never))
       .toThrow(/capability|verified intake artifact/i);
-
+    run = (await intake.completeAnalysis("run-89", run.streamVersion, "analysis-1")).run;
+    run = service.requestApproval("run-89", run.streamVersion, "approval-request-1", {
+      planDigest: "d".repeat(64),
+      envelopeDigest: "e".repeat(64),
+    });
     expect(run).toMatchObject({
-      lifecycle: "analyzing",
+      lifecycle: "awaiting_approval",
       terminalOutcome: null,
       authority: {
-        approvalState: "not_proposed",
+        approvalState: "approval_pending",
         executionAuthority: "none",
+        planDigest: "d".repeat(64),
+        envelopeDigest: "e".repeat(64),
+        approvalDecisionId: null,
       },
     });
     journal.close();
@@ -281,6 +318,47 @@ describe("RunService", () => {
     expect(run).toMatchObject({ lifecycle: "blocked", terminalOutcome: null, suspendedFrom: "preflighting" });
     run = service.resume("run-89", run.streamVersion, "resume-preflight-1");
     expect(run.lifecycle).toBe("preflighting");
+    journal.close();
+  });
+
+  it("revises only the current approval request back to planning", async () => {
+    const { directory, journal, service, input } = fixture();
+    let run = service.accept(input);
+    run = service.startPreflight(input.runId, {
+      expectedVersion: run.streamVersion, commandId: "revise-preflight-start",
+      causationId: service.readStream(input.runId).at(-1)!.eventId, process: input.process,
+    });
+    run = service.completePreflight(input.runId, {
+      expectedVersion: run.streamVersion, commandId: "revise-preflight-complete",
+      causationId: service.readStream(input.runId).at(-1)!.eventId, process: input.process,
+    });
+    const intake = new IntakeService(
+      journal,
+      service,
+      new BoundedTicketIntake(),
+      await IntakeArtifactStore.openProject(directory),
+    );
+    run = (await intake.intake({
+      runId: input.runId,
+      projectRevision: input.projectRevision,
+      source: { kind: "inline_goal", goal: intakeGoal },
+      limits: intakeLimits,
+      commandId: "revise-intake",
+    })).run;
+    run = (await intake.completeAnalysis(input.runId, run.streamVersion, "revise-analysis")).run;
+    run = service.requestApproval(input.runId, run.streamVersion, "revise-approval-1", {
+      planDigest: "d".repeat(64), envelopeDigest: "e".repeat(64),
+    });
+    run = service.revisePlan(input.runId, run.streamVersion, "revise-plan");
+    expect(run).toMatchObject({
+      lifecycle: "planning",
+      authority: { approvalState: "not_proposed", planDigest: null, envelopeDigest: null },
+    });
+    expect(() => service.revisePlan(input.runId, run.streamVersion, "revise-again"))
+      .toThrow("requires the current approval request event");
+    expect(service.requestApproval(input.runId, run.streamVersion, "revise-approval-2", {
+      planDigest: "d".repeat(64), envelopeDigest: "e".repeat(64),
+    })).toMatchObject({ lifecycle: "awaiting_approval" });
     journal.close();
   });
 });

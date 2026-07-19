@@ -1,6 +1,7 @@
 import type { StreamId } from "./ids.js";
 
 export interface NewEvent<TType extends string, TPayload> {
+  readonly eventId?: string;
   readonly streamId: StreamId;
   readonly type: TType;
   readonly payload: TPayload;

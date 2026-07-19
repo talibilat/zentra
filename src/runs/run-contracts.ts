@@ -157,6 +157,13 @@ export const RunApprovalRequestedPayloadSchema = RunPhasePayloadSchema.extend({
 
 export const RunReadyPayloadSchema = RunApprovalRequestedPayloadSchema.extend({
   approvalDecisionId: IdSchema,
+  approvalDecisionEventId: IdSchema,
+  approvalRequestEventId: IdSchema,
+  approvalPacketSha256: DigestSchema,
+});
+
+export const RunPlanRevisedPayloadSchema = RunPhasePayloadSchema.extend({
+  priorApprovalRequestEventId: IdSchema,
 });
 
 export const RunSuspendedPayloadSchema = RunPhasePayloadSchema.extend({

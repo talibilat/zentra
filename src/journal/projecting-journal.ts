@@ -1,6 +1,8 @@
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { StreamId } from "../contracts/ids.js";
 import {
+  ATOMIC_EVENT_JOURNAL,
+  isAtomicEventJournal,
   isDurablePagedEventJournal,
   createProjectionClaimantId,
   readAllPageCompatible,
@@ -9,6 +11,7 @@ import {
 
 const DURABLE_JOURNAL_CAPABILITY = Symbol.for("zentra.durable-paged-event-journal.v1");
 import type {
+  AtomicAppend,
   DurablePagedEventJournal,
   EventJournal,
   GlobalEventPage,
@@ -35,6 +38,10 @@ export class ProjectingEventJournal implements DurablePagedEventJournal {
 
   get [DURABLE_JOURNAL_CAPABILITY](): boolean {
     return this.durable !== null;
+  }
+
+  get [ATOMIC_EVENT_JOURNAL](): boolean {
+    return isAtomicEventJournal(this.inner);
   }
 
   constructor(
@@ -102,6 +109,15 @@ export class ProjectingEventJournal implements DurablePagedEventJournal {
         this.drain();
       }
     }
+    return stored;
+  }
+
+  appendAtomically(writes: readonly AtomicAppend[]): readonly StoredEvent[] {
+    if (!isAtomicEventJournal(this.inner)) throw new Error("journal does not support atomic append");
+    const stored = [...this.inner.appendAtomically(writes)].sort(
+      (left, right) => left.globalPosition - right.globalPosition,
+    );
+    this.projectStored(stored);
     return stored;
   }
 
@@ -198,6 +214,20 @@ export class ProjectingEventJournal implements DurablePagedEventJournal {
         if (selected.length > 0) this.sink.append(selected);
         journal.commitProjection(this.cursorName, claim.claimId, this.claimantId);
       }
+    } catch {
+      this.failed = true;
+    }
+  }
+
+  private projectStored(stored: readonly StoredEvent[]): void {
+    if (this.failed) return;
+    if (this.durable !== null) {
+      this.drain();
+      return;
+    }
+    try {
+      const selected = this.sink.select?.(stored) ?? stored;
+      if (selected.length > 0) this.sink.append(selected);
     } catch {
       this.failed = true;
     }

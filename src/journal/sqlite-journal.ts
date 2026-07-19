@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { StreamId } from "../contracts/ids.js";
 import type {
+  AtomicAppend,
   DurablePagedEventJournal,
   GlobalEventPage,
   JournalPageLimits,
@@ -13,6 +14,7 @@ import type {
   StreamEventPage,
 } from "./journal.js";
 const DURABLE_JOURNAL_CAPABILITY = Symbol.for("zentra.durable-paged-event-journal.v1");
+const ATOMIC_JOURNAL_CAPABILITY = Symbol.for("zentra.atomic-event-journal.v1");
 
 interface EventRow {
   readonly event_id: string;
@@ -132,6 +134,7 @@ const GLOBAL_RANGE_SIZE_SQL = `
 
 export class SqliteEventJournal implements DurablePagedEventJournal {
   readonly [DURABLE_JOURNAL_CAPABILITY] = true;
+  readonly [ATOMIC_JOURNAL_CAPABILITY] = true;
   private readonly db: Database.Database;
   private readonly readOnly: boolean;
   private operationDeadline = 0n;
@@ -188,50 +191,59 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
     expectedVersion: number,
     events: readonly NewEvent<string, unknown>[],
   ): readonly StoredEvent[] {
+    return this.appendAtomically([{ streamId, expectedVersion, events }]);
+  }
+
+  appendAtomically(writes: readonly AtomicAppend[]): readonly StoredEvent[] {
     this.assertWritable();
-    assertPosition(expectedVersion, "expected version");
-    const serialized = events.map((event) => {
-      if (event.streamId !== streamId) {
-        throw new Error("event streamId does not match append stream");
-      }
-      const payload = JSON.stringify(event.payload);
-      if (payload === undefined) throw new Error("event payload must be JSON-serializable");
-      const bytes = eventBytes({
-        eventId: "00000000-0000-4000-8000-000000000000",
-        streamId,
-        type: event.type,
-        payload,
-        causationId: event.causationId,
-        correlationId: event.correlationId,
-        recordedAt: "0000-00-00T00:00:00.000Z",
+    if (writes.length === 0) throw new Error("atomic append requires at least one stream");
+    if (writes.length > MAX_JOURNAL_READ_EVENTS) throw new Error("event journal append limit exceeded");
+    if (new Set(writes.map((write) => write.streamId)).size !== writes.length) {
+      throw new Error("atomic append stream identities must be unique");
+    }
+    const prepared = writes.map((write) => {
+      assertPosition(write.expectedVersion, "expected version");
+      const serialized = write.events.map((event) => {
+        if (event.streamId !== write.streamId) {
+          throw new Error("event streamId does not match append stream");
+        }
+        const payload = JSON.stringify(event.payload);
+        if (payload === undefined) throw new Error("event payload must be JSON-serializable");
+        const bytes = eventBytes({
+          eventId: event.eventId ?? "00000000-0000-4000-8000-000000000000",
+          streamId: write.streamId,
+          type: event.type,
+          payload,
+          causationId: event.causationId,
+          correlationId: event.correlationId,
+          recordedAt: "0000-00-00T00:00:00.000Z",
+        });
+        if (bytes > MAX_JOURNAL_EVENT_BYTES) throw new Error("event journal append limit exceeded");
+        return { event, payload, bytes };
       });
-      if (bytes > MAX_JOURNAL_EVENT_BYTES) {
-        throw new Error("event journal append limit exceeded");
-      }
-      return { event, payload, bytes };
+      return { ...write, serialized };
     });
-    const batchBytes = serialized.reduce((total, item) => total + item.bytes, 0);
-    if (
-      serialized.length > MAX_JOURNAL_READ_EVENTS ||
-      batchBytes > MAX_JOURNAL_READ_TOTAL_BYTES
-    ) {
+    const eventCount = prepared.reduce((total, write) => total + write.serialized.length, 0);
+    const batchBytes = prepared.reduce(
+      (total, write) => total + write.serialized.reduce((sum, item) => sum + item.bytes, 0),
+      0,
+    );
+    if (eventCount > MAX_JOURNAL_READ_EVENTS || batchBytes > MAX_JOURNAL_READ_TOTAL_BYTES) {
       throw new Error("event journal append limit exceeded");
     }
 
     const append = this.db.transaction(() => {
-      const streamRow = this.db.prepare(
-        "SELECT current_version FROM streams WHERE stream_id = ?",
-      ).get(streamId) as { current_version: number } | undefined;
-      const actualVersion = streamRow?.current_version ?? 0;
-      if (actualVersion !== expectedVersion) {
-        throw new Error(`expected version ${expectedVersion}, actual ${actualVersion}`);
+      const versions = new Map<string, number>();
+      for (const write of prepared) {
+        const streamRow = this.db.prepare(
+          "SELECT current_version FROM streams WHERE stream_id = ?",
+        ).get(write.streamId) as { current_version: number } | undefined;
+        const actualVersion = streamRow?.current_version ?? 0;
+        if (actualVersion !== write.expectedVersion) {
+          throw new Error(`expected version ${write.expectedVersion}, actual ${actualVersion}`);
+        }
+        versions.set(write.streamId, actualVersion);
       }
-      if (streamRow === undefined) {
-        this.db.prepare(
-          "INSERT INTO streams (stream_id, current_version) VALUES (?, 0)",
-        ).run(streamId);
-      }
-
       const insert = this.db.prepare(`
         INSERT INTO events (
           event_id, stream_id, stream_version, type, payload,
@@ -239,32 +251,34 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const stored: StoredEvent[] = [];
-      let version = actualVersion;
-      for (const item of serialized) {
-        version += 1;
-        const eventId = randomUUID();
-        const recordedAt = new Date().toISOString();
-        const result = insert.run(
-          eventId,
-          streamId,
-          version,
-          item.event.type,
-          item.payload,
-          item.event.causationId,
-          item.event.correlationId,
-          recordedAt,
-        );
-        stored.push({
-          ...item.event,
-          eventId,
-          streamVersion: version,
-          globalPosition: Number(result.lastInsertRowid),
-          recordedAt,
-        });
+      for (const write of prepared) {
+        const exists = this.db.prepare("SELECT 1 FROM streams WHERE stream_id = ?").get(write.streamId);
+        if (exists === undefined) {
+          this.db.prepare("INSERT INTO streams (stream_id, current_version) VALUES (?, 0)").run(write.streamId);
+        }
+        let version = versions.get(write.streamId)!;
+        for (const item of write.serialized) {
+          version += 1;
+          const eventId = item.event.eventId ?? randomUUID();
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(eventId)) {
+            throw new Error("event ID must be a canonical UUIDv4");
+          }
+          const recordedAt = new Date().toISOString();
+          const result = insert.run(
+            eventId, write.streamId, version, item.event.type, item.payload,
+            item.event.causationId, item.event.correlationId, recordedAt,
+          );
+          stored.push({
+            ...item.event,
+            eventId,
+            streamVersion: version,
+            globalPosition: Number(result.lastInsertRowid),
+            recordedAt,
+          });
+        }
+        this.db.prepare("UPDATE streams SET current_version = ? WHERE stream_id = ?")
+          .run(version, write.streamId);
       }
-      this.db.prepare(
-        "UPDATE streams SET current_version = ? WHERE stream_id = ?",
-      ).run(version, streamId);
       return stored;
     });
 

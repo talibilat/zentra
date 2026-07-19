@@ -130,7 +130,7 @@ describe("JournalRetentionService", () => {
 
     const result = retention.prune({ ...request, operatorId: "operator-1", confirmation: request.confirmation });
     expect(result).toMatchObject({ throughPosition: 12, deletedEvents: 12 });
-    const combined = retention.openCombinedJournal();
+    const combined = retention.openCombinedJournal("read-write");
     const replay = combined.readAllPage(0, { maxEvents: 100, maxBytes: 1024 * 1024 }).events;
     expect(replay.map((event) => event.globalPosition)).toEqual(
       Array.from({ length: replay.length }, (_, index) => index + 1),
@@ -139,6 +139,18 @@ describe("JournalRetentionService", () => {
     expect(replay.some((event) => event.type === "journal.prune.completed")).toBe(true);
     expect(combined.readStream("stream-1").map((event) => (event.payload as { position: number }).position))
       .toEqual([1, 4, 7, 10, 13, 16, 19, 22]);
+    const atomic = combined.appendAtomically([
+      {
+        streamId: "stream-1", expectedVersion: 8,
+        events: [{ streamId: "stream-1", type: "after.archive", payload: { position: 25 }, causationId: null, correlationId: "retention-test" }],
+      },
+      {
+        streamId: "stream-2", expectedVersion: 8,
+        events: [{ streamId: "stream-2", type: "after.archive", payload: { position: 26 }, causationId: null, correlationId: "retention-test" }],
+      },
+    ]);
+    expect(atomic).toHaveLength(2);
+    expect(combined.readStream("stream-1").at(-1)).toMatchObject({ streamVersion: 9, type: "after.archive" });
     combined.close();
   });
 

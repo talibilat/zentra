@@ -27,7 +27,10 @@ import Database from "better-sqlite3";
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { StreamId } from "../contracts/ids.js";
 import {
+  ATOMIC_EVENT_JOURNAL,
   DURABLE_PAGED_EVENT_JOURNAL,
+  type AtomicAppend,
+  type AtomicEventJournal,
   type DurablePagedEventJournal,
   type GlobalEventPage,
   type JournalPageLimits,
@@ -1706,8 +1709,9 @@ export class JournalRetentionService {
   }
 }
 
-export class ArchivedEventJournal implements DurablePagedEventJournal {
+export class ArchivedEventJournal implements DurablePagedEventJournal, AtomicEventJournal {
   readonly [DURABLE_PAGED_EVENT_JOURNAL] = true;
+  readonly [ATOMIC_EVENT_JOURNAL] = true;
   private readonly active: SqliteEventJournal;
   private readonly readOnly: boolean;
 
@@ -1723,6 +1727,17 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
 
   append(streamId: StreamId, expectedVersion: number, events: readonly NewEvent<string, unknown>[]): readonly StoredEvent[] {
     return this.active.append(streamId, expectedVersion, events);
+  }
+
+  appendAtomically(writes: readonly AtomicAppend[]): readonly StoredEvent[] {
+    this.assertWritable();
+    for (const write of writes) {
+      const combinedVersion = this.retention.streamHead(write.streamId);
+      if (combinedVersion !== write.expectedVersion) {
+        throw new Error(`expected version ${write.expectedVersion}, actual ${combinedVersion}`);
+      }
+    }
+    return this.active.appendAtomically(writes);
   }
 
   readAll(afterPosition = 0): readonly StoredEvent[] {

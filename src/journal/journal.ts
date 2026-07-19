@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { StreamId } from "../contracts/ids.js";
 
+export const ATOMIC_EVENT_JOURNAL = Symbol.for("zentra.atomic-event-journal.v1");
+
 export interface EventJournal {
   append(
     streamId: StreamId,
@@ -10,6 +12,17 @@ export interface EventJournal {
   ): readonly StoredEvent[];
   readStream(streamId: StreamId, afterVersion?: number): readonly StoredEvent[];
   readAll(afterPosition?: number): readonly StoredEvent[];
+}
+
+export interface AtomicAppend {
+  readonly streamId: StreamId;
+  readonly expectedVersion: number;
+  readonly events: readonly NewEvent<string, unknown>[];
+}
+
+export interface AtomicEventJournal extends EventJournal {
+  readonly [ATOMIC_EVENT_JOURNAL]: true;
+  appendAtomically(writes: readonly AtomicAppend[]): readonly StoredEvent[];
 }
 
 export interface PagedEventJournal extends EventJournal {
@@ -102,6 +115,12 @@ export function assertBoundedProjectionEntries(size: number, label: string): voi
 export function isPagedEventJournal(journal: EventJournal): journal is PagedEventJournal {
   const candidate = journal as Partial<PagedEventJournal>;
   return typeof candidate.readStreamPage === "function" && typeof candidate.readAllPage === "function";
+}
+
+export function isAtomicEventJournal(journal: EventJournal): journal is AtomicEventJournal {
+  return (journal as EventJournal & { readonly [ATOMIC_EVENT_JOURNAL]?: boolean })
+    [ATOMIC_EVENT_JOURNAL] === true &&
+    typeof (journal as Partial<AtomicEventJournal>).appendAtomically === "function";
 }
 
 export function isDurablePagedEventJournal(
