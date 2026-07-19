@@ -122,6 +122,24 @@ async function inspectPackage(label) {
     entries.map(({ path: file, mode }) => ({ path: file, mode })),
   );
   assertExpectedModes(entries, sourceRoot);
+  const smoke = await run(
+    path.join(extractedPackage, "agenttrail", "package", "darwin-arm64", "agenttrail"),
+    ["--help"],
+    extractedPackage,
+    {
+      environment: {
+        PATH: "/usr/bin:/bin",
+        HOME: temporaryRoot,
+        TMPDIR: temporaryRoot,
+        LANG: "C",
+        LC_ALL: "C",
+      },
+      timeoutMs: 60_000,
+    },
+  );
+  if (!smoke.stdout.includes("agent-tail")) {
+    throw new Error("extracted AgentTrail did not complete its Python-free smoke test");
+  }
 
   const packageJson = JSON.parse(readFileSync(path.join(extractedPackage, "package.json"), "utf8"));
   const sourcePackageJson = JSON.parse(readFileSync(path.join(sourceRoot, "package.json"), "utf8"));
@@ -139,7 +157,7 @@ function copyPackageSource(destination) {
     "tsconfig.build.json",
   ].map((name) => [name, validatePackageFile(name).absolutePath]);
   const license = validatePackageFile("LICENSE", { optional: true });
-  const sourceDirectories = ["fixtures", "scripts", "src"]
+  const sourceDirectories = ["agenttrail", "fixtures", "scripts", "src"]
     .map((name) => [name, validatePackageDirectory(name).absolutePath]);
 
   // Validate every recursive entry before any copy can follow a changed source path.
@@ -174,6 +192,7 @@ function assertPackageManifest(sourceRoot, listedFiles) {
     "LICENSE",
     "README.md",
     "SECURITY.md",
+    ...walkFiles(path.join(sourceRoot, "agenttrail", "package")).map((file) => relativePath(sourceRoot, file)),
     ...walkFiles(path.join(sourceRoot, "dist")).map((file) => relativePath(sourceRoot, file)),
     "fixtures/deterministic-worker.mjs",
     "package.json",
@@ -191,6 +210,7 @@ function assertExpectedModes(entries, sourceRoot) {
     ? [packageJson.bin]
     : Object.values(packageJson.bin ?? {});
   const binaries = new Set(binaryTargets.map((file) => path.posix.normalize(file.replace(/^\.\//, ""))));
+  binaries.add("agenttrail/package/darwin-arm64/agenttrail");
   for (const entry of entries) {
     const expected = binaries.has(entry.path) ? 0o755 : 0o644;
     if (entry.mode !== expected) {

@@ -105,7 +105,7 @@ function packageSandbox(): string {
     const source = path.join(repositoryRoot, name);
     if (existsSync(source)) copyFileSync(source, path.join(sandbox, name));
   }
-  for (const name of ["src", "fixtures", "scripts"]) {
+  for (const name of ["agenttrail", "src", "fixtures", "scripts"]) {
     const source = path.join(repositoryRoot, name);
     if (existsSync(source)) cpSync(source, path.join(sandbox, name), { recursive: true });
   }
@@ -204,6 +204,7 @@ describe("publishable CLI package", () => {
     expect(packedCli!.mode & 0o111).not.toBe(0);
     expect(result.files.some((file) => file.path === "fixtures/deterministic-worker.mjs")).toBe(true);
     expect(result.files.some((file) => file.path === "dist/package-manifest.json")).toBe(true);
+    expect(result.files.some((file) => file.path === "agenttrail/README.md")).toBe(false);
     expect(lstatSync(securityPolicy).mode & 0o777).toBe(0o644);
 
     const consumer = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-package-consumer-")));

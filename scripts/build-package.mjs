@@ -17,6 +17,23 @@ import { runCommand } from "./run-command.mjs";
 const commandTimeoutMs = 120_000;
 const commandMaxBuffer = 10 * 1_024 * 1_024;
 
+for (const file of [
+  "agenttrail/package/darwin-arm64/attestation.json",
+  "agenttrail/package/darwin-arm64/manifest.json",
+  "agenttrail/package/darwin-arm64/web/index.html",
+]) chmodSync(validatePackageFile(file).absolutePath, 0o644);
+chmodSync(validatePackageFile("agenttrail/package/darwin-arm64/agenttrail").absolutePath, 0o755);
+try {
+  runCommand(process.execPath, [path.join(packageRoot, "scripts", "verify-agenttrail-package.mjs")], {
+    cwd: packageRoot,
+    environment: minimalEnvironment(),
+    maxBuffer: commandMaxBuffer,
+    timeoutMs: commandTimeoutMs,
+  });
+} catch (error) {
+  failBuild(error instanceof Error ? error.message : String(error));
+}
+
 validatePackagedFile(requiredFixture);
 validatePackagedFile("README.md");
 validatePackagedFile("SECURITY.md");
@@ -46,6 +63,7 @@ const packagedFiles = [...new Set([
   "SECURITY.md",
   "LICENSE",
 ])];
+for (const file of collectAgentTrailPackageFiles()) packagedFiles.push(file);
 const presentPackagedFiles = packagedFiles
   .map((file) => validatePackagedFile(file))
   .filter((validated) => validated !== null);
@@ -56,6 +74,7 @@ for (const { absolutePath } of presentPackagedFiles) {
 for (const binary of requiredBinaries) {
   chmodSync(validatePackageFile(binary).absolutePath, 0o755);
 }
+chmodSync(validatePackageFile("agenttrail/package/darwin-arm64/agenttrail").absolutePath, 0o755);
 const manifest = {
   schemaVersion: 1,
   inputs: digestFiles(buildInputs),
@@ -90,4 +109,8 @@ function minimalEnvironment() {
     LANG: "C",
     LC_ALL: "C",
   };
+}
+
+function collectAgentTrailPackageFiles() {
+  return buildInputs.filter((file) => file.startsWith("agenttrail/package/"));
 }

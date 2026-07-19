@@ -11,6 +11,8 @@
     ".": "./dist/src/index.js"
   },
   "files": [
+    "agenttrail/package/darwin-arm64/",
+    "!agenttrail/README.md",
     "dist/",
     "fixtures/deterministic-worker.mjs",
     "README.md",
@@ -18,11 +20,14 @@
     "LICENSE"
   ],
   "scripts": {
+    "agenttrail:build": "node scripts/build-agenttrail.mjs",
+    "agenttrail:reproducibility": "node scripts/verify-agenttrail-reproducibility.mjs",
+    "agenttrail:verify": "node scripts/verify-agenttrail-package.mjs",
     "build": "node scripts/build-package.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "docs:codebase-map": "node scripts/generate-codebase-map.mjs",
     "package:contents": "node scripts/verify-package-contents.mjs",
-    "package:verify": "node scripts/verify-package.mjs",
+    "package:verify": "node scripts/verify-agenttrail-package.mjs && node scripts/verify-package.mjs",
     "prepack": "node scripts/build-package.mjs && node scripts/verify-package.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

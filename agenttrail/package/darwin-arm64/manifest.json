@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "product": "AgentTrail",
+  "compatibilityExecutable": "agent-tail",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "source": {
+    "repository": "https://github.com/talibilat/agent-trail.git",
+    "commit": "f7d3e20ac1c7a8be3b572161058480df10ab4ffb",
+    "treeSha256": "5008e9046d5767fe9e1017d81fdf3da8c4dbfc86e68ce3778fec338efb580c49",
+    "license": "MIT"
+  },
+  "build": {
+    "sourceDateEpoch": 1767225600,
+    "python": {
+      "implementation": "CPython",
+      "version": "3.12.0",
+      "platform": "darwin-arm64",
+      "executableSha256": "f4cd716d4b54f205398bec6932cc59361b087494ca2ddb157a5e8631d4d6f863"
+    },
+    "packages": {
+      "altgraph": "0.17.4",
+      "macholib": "1.16.3",
+      "packaging": "25.0",
+      "pyinstaller": "6.14.2",
+      "pyinstaller-hooks-contrib": "2025.5",
+      "setuptools": "80.9.0"
+    },
+    "inputsSha256": "04248f5801b8b18b7533be6ae186e7d2a00d29302b01d211599a92fce7e68fb9"
+  },
+  "files": {
+    "agenttrail": {
+      "bytes": 8135344,
+      "mode": "100755",
+      "sha256": "c1469d5feb7d6a6a4e79db6d1446014205255ea88dcdcb5fb59d40ca4f773e49"
+    },
+    "web/index.html": {
+      "bytes": 159234,
+      "mode": "100644",
+      "sha256": "0016d4baa63c11617c3ee69b78410c847591e6cbf021d91259d71f1e756a8020"
+    }
+  }
+}
