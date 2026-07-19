@@ -15,7 +15,16 @@ import {
 } from "../contracts/authority-attention.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ModelSheet } from "../policy/model-sheet.js";
-import type { EventJournal } from "../journal/journal.js";
+import {
+  findAllEvent,
+  assertBoundedProjectionEntries,
+  iterateAllEvents,
+  readStreamEvents,
+  type EventJournal,
+  type GlobalEventPage,
+  type JournalPageLimits,
+  type StreamEventPage,
+} from "../journal/journal.js";
 import { projectMilestone, type MilestoneView } from "./milestone-projection.js";
 import { assessMilestonePlanReadiness } from "./plan-readiness.js";
 import { OpenCodeMilestoneCompletedPayloadSchema } from "../agents/opencode-agent-events.js";
@@ -240,11 +249,14 @@ export class MilestoneRegistry {
 
   list(): readonly MilestoneSummary[] {
     const streamIds = new Set<string>();
-    for (const event of this.journal.readAll()) {
-      if (event.type.startsWith("milestone.")) streamIds.add(event.streamId);
+    for (const event of iterateAllEvents(this.journal)) {
+      if (event.type.startsWith("milestone.")) {
+        streamIds.add(event.streamId);
+        assertBoundedProjectionEntries(streamIds.size, "milestone list");
+      }
     }
     return Object.freeze([...streamIds].sort().map((streamId) => {
-      const events = this.journal.readStream(streamId);
+      const events = readStreamEvents(this.journal, streamId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${streamId} has no view`);
       verifyStoredCompletion(this.journal, events, view);
@@ -278,7 +290,7 @@ export class MilestoneRegistry {
   ): TaskAdmissionResult {
     const context = OpenCodeTaskAdmissionContextSchema.parse(rawContext);
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const canonicalRepository = canonicalDirectory(context.repositoryPath);
@@ -405,14 +417,14 @@ export class MilestoneRegistry {
     context: OpenCodeTaskAdmissionContext,
     modelSheet?: ModelSheet,
   ): TaskAdmissionResult {
-    const events = this.journal.readStream(milestoneId);
+    const events = readStreamEvents(this.journal, milestoneId);
     if (events.length === 0) throw new Error(`milestone ${milestoneId} does not exist`);
     const preview = new PreviewEventJournal(events);
     return new MilestoneRegistry(preview).admitTask(milestoneId, taskId, security, context, modelSheet);
   }
 
   replacePlan(input: ReplaceMilestonePlanInput): MilestoneRecord {
-    const events = this.journal.readStream(input.milestoneId);
+    const events = readStreamEvents(this.journal, input.milestoneId);
     const view = projectMilestone(events);
     if (view === null || view.lifecycle !== "paused" || view.attention === null) {
       throw new Error(`milestone ${input.milestoneId} is not paused`);
@@ -449,7 +461,7 @@ export class MilestoneRegistry {
   revisePlan(input: ReviseMilestonePlanInput): PlanRevisionResult {
     const candidateDigest = safeCandidateDigest(input.candidatePlan);
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(input.milestoneId);
+      const events = readStreamEvents(this.journal, input.milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${input.milestoneId} does not exist`);
       const requestPolicy = createReplanningPolicyBinding({
@@ -564,7 +576,7 @@ export class MilestoneRegistry {
 
   resolveReplanning(input: ResolveReplanningInput): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(input.milestoneId);
+      const events = readStreamEvents(this.journal, input.milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${input.milestoneId} does not exist`);
       const prior = view.replanningResolutions.find((resolution) => resolution.decisionId === input.decisionId);
@@ -602,7 +614,7 @@ export class MilestoneRegistry {
 
   startTask(milestoneId: string, taskId: string, actorId: string, role: MilestoneRole): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
@@ -621,7 +633,7 @@ export class MilestoneRegistry {
   startWriterBatch(milestoneId: string, input: StartWriterBatchInput): MilestoneRecord {
     const payload = WriterBatchStartedPayloadSchema.parse({ schemaVersion: 1, ...input });
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
       assertWriterClaimProvenance(view, payload.writers);
@@ -651,7 +663,7 @@ export class MilestoneRegistry {
     evidence: Readonly<Record<string, unknown>> = {},
   ): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const task = view.plan?.tasks.find((candidate) => candidate.taskId === taskId);
@@ -677,7 +689,7 @@ export class MilestoneRegistry {
   bindReleaseOperation(milestoneId: string, input: ReleaseOperationBoundPayload): MilestoneRecord {
     const payload = ReleaseOperationBoundPayloadSchema.parse(input);
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
       if (view.releaseOperation !== null) {
@@ -698,7 +710,7 @@ export class MilestoneRegistry {
     security: SecuritySheet,
     admissionDigest: string,
   ): MilestoneRecord {
-    const events = this.journal.readStream(milestoneId);
+    const events = readStreamEvents(this.journal, milestoneId);
     const view = projectMilestone(events);
     if (view === null || view.plan === null) throw new Error(`milestone ${milestoneId} requires an accepted plan`);
     const task = view.plan.tasks.find((candidate) => candidate.taskId === taskId);
@@ -783,10 +795,10 @@ export class MilestoneRegistry {
   }
 
   inspectWriterRecovery(milestoneId: string, writerTaskId: string, reviewerTaskId: string): WriterRecoveryState {
-    const milestoneEvents = this.journal.readStream(milestoneId);
+    const milestoneEvents = readStreamEvents(this.journal, milestoneId);
     const milestone = projectMilestone(milestoneEvents);
     if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
-    const taskEvents = this.journal.readStream(writerTaskId);
+    const taskEvents = readStreamEvents(this.journal, writerTaskId);
     const task = projectTask(taskEvents);
     const dispatch = taskEvents.find((event) => event.type === "task.review_dispatch_intent");
     const reviewerEffects = milestoneEvents.filter((event) => {
@@ -795,10 +807,10 @@ export class MilestoneRegistry {
         (event.payload as Readonly<Record<string, unknown>>)["taskId"] === reviewerTaskId;
     });
     const reviewerWorkers = Object.values(projectWorkerLifecycle(
-      this.journal.readStream(workerStreamId(reviewerTaskId)),
+      readStreamEvents(this.journal, workerStreamId(reviewerTaskId)),
     ).workers);
     const writerWorkers = Object.values(projectWorkerLifecycle(
-      this.journal.readStream(workerStreamId(writerTaskId)),
+      readStreamEvents(this.journal, workerStreamId(writerTaskId)),
     ).workers).filter((worker) => worker.status !== "terminal");
     const reviewerState = milestone.tasks[reviewerTaskId];
     const writerRunning = milestone.tasks[writerTaskId]?.status === "running" &&
@@ -864,7 +876,7 @@ export class MilestoneRegistry {
     evidence: Readonly<Record<string, string>> = {},
   ): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const view = projectMilestone(events);
       if (view === null || view.plan === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const attention = createReplanningAttention({
@@ -963,7 +975,7 @@ export class MilestoneRegistry {
   }
 
   completeIntegrated(milestoneId: string, taskStreamId: string): MilestoneRecord {
-    const milestoneEvents = this.journal.readStream(milestoneId);
+    const milestoneEvents = readStreamEvents(this.journal, milestoneId);
     let milestone = projectMilestone(milestoneEvents);
     if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
     const singletonWriter = milestone.plan?.tasks.find((planned) => planned.taskId === taskStreamId);
@@ -994,7 +1006,7 @@ export class MilestoneRegistry {
 
   completeWriterIntegration(milestoneId: string, writerTaskId: string): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const milestone = projectMilestone(events);
       if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const ownership = milestone.writerOwnership[writerTaskId];
@@ -1053,7 +1065,7 @@ export class MilestoneRegistry {
 
   releaseTerminalWriter(milestoneId: string, writerTaskId: string): MilestoneRecord {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const milestone = projectMilestone(events);
       if (milestone === null) throw new Error(`milestone ${milestoneId} does not exist`);
       const ownership = milestone.writerOwnership[writerTaskId];
@@ -1063,7 +1075,7 @@ export class MilestoneRegistry {
         return withTrace(milestone, events);
       }
       if (ownership.status !== "claimed") throw new Error(`writer ${writerTaskId} ownership is not releasable`);
-      const taskEvents = this.journal.readStream(writerTaskId);
+      const taskEvents = readStreamEvents(this.journal, writerTaskId);
       if (taskEvents.length === 0 || taskEvents.some((event) =>
         event.streamId !== writerTaskId || event.correlationId !== events[0]!.correlationId)) {
         throw new Error("terminal writer stream is not bound to the milestone trace");
@@ -1149,9 +1161,9 @@ export class MilestoneRegistry {
   }
 
   inspectWriterTask(milestoneId: string, writerTaskId: string): ReturnType<typeof projectTask> {
-    const milestoneEvents = this.journal.readStream(milestoneId);
+    const milestoneEvents = readStreamEvents(this.journal, milestoneId);
     if (milestoneEvents.length === 0) throw new Error(`milestone ${milestoneId} does not exist`);
-    const taskEvents = this.journal.readStream(writerTaskId);
+    const taskEvents = readStreamEvents(this.journal, writerTaskId);
     if (taskEvents.length === 0) return null;
     if (taskEvents.some((event) => event.correlationId !== milestoneEvents[0]!.correlationId)) {
       throw new Error("writer task stream is not bound to the milestone trace");
@@ -1160,7 +1172,7 @@ export class MilestoneRegistry {
   }
 
   inspect(milestoneId: string): MilestoneRecord | null {
-    const events = this.journal.readStream(milestoneId);
+    const events = readStreamEvents(this.journal, milestoneId);
     const view = projectMilestone(events);
     if (view === null) return null;
     verifyStoredCompletion(this.journal, events, view);
@@ -1186,7 +1198,7 @@ export class MilestoneRegistry {
   }
 
   private reconcileCapabilityTaskProjection(milestone: MilestoneRecord): boolean {
-    const milestoneEvents = this.journal.readStream(milestone.milestoneId);
+    const milestoneEvents = readStreamEvents(this.journal, milestone.milestoneId);
     const pauses = milestoneEvents.filter((event) => event.type === "milestone.capability_boundary_paused");
     const resolutions = milestoneEvents.filter((event) => event.type === "milestone.capability_boundary_resolved");
     const tasks = new TaskService(this.journal);
@@ -1197,7 +1209,7 @@ export class MilestoneRegistry {
       if (authoritativeResolution !== undefined &&
         CapabilityBoundaryResolvedPayloadSchema.parse(authoritativeResolution.payload).resolution.action === "stale_task_state") continue;
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        const existing = this.journal.readStream(payload.occurrence.taskId)
+        const existing = readStreamEvents(this.journal, payload.occurrence.taskId)
           .find((event) => event.type === "task.capability_boundary_paused" &&
             CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence.attentionId === payload.occurrence.attentionId);
         if (existing !== undefined) {
@@ -1207,7 +1219,7 @@ export class MilestoneRegistry {
           }
           break;
         }
-        const taskEvents = this.journal.readStream(payload.occurrence.taskId);
+        const taskEvents = readStreamEvents(this.journal, payload.occurrence.taskId);
         const currentHead = taskEvents.at(-1);
         const currentTask = projectTask(taskEvents);
         if (currentHead === undefined || currentTask === null) throw new Error("capability boundary task stream disappeared during reconciliation");
@@ -1220,7 +1232,7 @@ export class MilestoneRegistry {
             action: "stale_task_state", decidedBy: "zentra-capability-reconciler",
             competingTaskHead: capabilityTaskHead(taskEvents),
           });
-          const existingResolution = this.journal.readStream(milestone.milestoneId).find((event) =>
+          const existingResolution = readStreamEvents(this.journal, milestone.milestoneId).find((event) =>
             event.type === "milestone.capability_boundary_resolved" &&
             CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.attentionId === payload.occurrence.attentionId);
           if (existingResolution === undefined) {
@@ -1228,7 +1240,7 @@ export class MilestoneRegistry {
               this.appendTransition(milestone.milestoneId, "milestone.capability_boundary_resolved", { resolution });
             } catch (error) {
               if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
-              const raced = this.journal.readStream(milestone.milestoneId).find((event) => event.type === "milestone.capability_boundary_resolved" &&
+              const raced = readStreamEvents(this.journal, milestone.milestoneId).find((event) => event.type === "milestone.capability_boundary_resolved" &&
                 CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.resolutionId === resolution.resolutionId);
               if (raced === undefined) throw error;
             }
@@ -1246,7 +1258,7 @@ export class MilestoneRegistry {
       if (resolutionEvent === undefined) continue;
       const resolvedPayload = CapabilityBoundaryResolvedPayloadSchema.parse(resolutionEvent.payload);
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        const existing = this.journal.readStream(payload.occurrence.taskId)
+        const existing = readStreamEvents(this.journal, payload.occurrence.taskId)
           .find((event) => event.type === "task.capability_boundary_resolved" &&
             CapabilityBoundaryResolvedPayloadSchema.parse(event.payload).resolution.attentionId === payload.occurrence.attentionId);
         if (existing !== undefined) {
@@ -1278,7 +1290,7 @@ export class MilestoneRegistry {
         if (current.result !== null) verifyMilestoneTerminalResult(this.journal, current, current.result);
         return current;
       }
-      const events = this.journal.readStream(milestoneId);
+      const events = readStreamEvents(this.journal, milestoneId);
       const result = buildMilestoneTerminalResult({ journal: this.journal, milestone: current, outcome });
       const payload = MilestoneTerminalPayloadSchema.parse({ schemaVersion: 1, outcome, result });
       const nextEvent = this.newMilestoneEvent(events, milestoneId, `milestone.${outcome}`, payload);
@@ -1297,7 +1309,7 @@ export class MilestoneRegistry {
   }
 
   private appendTransition(milestoneId: string, type: string, payload: unknown): MilestoneRecord {
-    const events = this.journal.readStream(milestoneId);
+    const events = readStreamEvents(this.journal, milestoneId);
     const view = projectMilestone(events);
     if (view === null) throw new Error(`milestone ${milestoneId} does not exist`);
     const nextEvent: NewEvent<string, unknown> = {
@@ -1390,6 +1402,56 @@ class PreviewEventJournal implements EventJournal {
   readAll(afterPosition = 0): readonly StoredEvent[] {
     return this.events.filter((event) => event.globalPosition > afterPosition);
   }
+
+  readStreamPage(
+    streamId: string,
+    afterVersion = 0,
+    limits: JournalPageLimits = { maxEvents: 1_000, maxBytes: 16 * 1024 * 1024 },
+  ): StreamEventPage {
+    const candidates = this.readStream(streamId, afterVersion);
+    const events = boundedPreviewPage(candidates, limits);
+    const nextVersion = events.at(-1)?.streamVersion ?? afterVersion;
+    return {
+      events,
+      nextVersion,
+      hasMore: candidates.length > events.length,
+      bytes: previewEventBytes(events),
+    };
+  }
+
+  readAllPage(
+    afterPosition = 0,
+    limits: JournalPageLimits = { maxEvents: 1_000, maxBytes: 16 * 1024 * 1024 },
+  ): GlobalEventPage {
+    const candidates = this.readAll(afterPosition);
+    const events = boundedPreviewPage(candidates, limits);
+    const nextPosition = events.at(-1)?.globalPosition ?? afterPosition;
+    return {
+      events,
+      nextPosition,
+      hasMore: candidates.length > events.length,
+      bytes: previewEventBytes(events),
+    };
+  }
+}
+
+function boundedPreviewPage(
+  events: readonly StoredEvent[],
+  limits: JournalPageLimits,
+): readonly StoredEvent[] {
+  const page: StoredEvent[] = [];
+  let bytes = 0;
+  for (const event of events) {
+    const eventBytes = previewEventBytes([event]);
+    if (page.length >= limits.maxEvents || bytes + eventBytes > limits.maxBytes) break;
+    page.push(event);
+    bytes += eventBytes;
+  }
+  return page;
+}
+
+function previewEventBytes(events: readonly StoredEvent[]): number {
+  return events.reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0);
 }
 
 function candidateStoredEvent(event: NewEvent<string, unknown>, streamVersion: number): StoredEvent {
@@ -1468,11 +1530,17 @@ function assessRevision(
     view.tasks[taskId]?.status !== "completed" && view.tasks[taskId]?.status !== "superseded")) return "active_effect";
 
   if (input.linkedTaskStreamIds.length > 0) return "evidence";
-  const globallyRelatedTaskStreams = new Set(journal.readAll()
-    .filter((event) => event.correlationId === milestoneEvents[0]!.correlationId && event.streamId !== view.milestoneId && event.type.startsWith("task."))
-    .map((event) => event.streamId));
+  const globallyRelatedTaskStreams = new Set<string>();
+  for (const event of iterateAllEvents(journal)) {
+    if (
+      event.correlationId === milestoneEvents[0]!.correlationId &&
+      event.streamId !== view.milestoneId &&
+      event.type.startsWith("task.")
+    ) globallyRelatedTaskStreams.add(event.streamId);
+    assertBoundedProjectionEntries(globallyRelatedTaskStreams.size, "related task streams");
+  }
   for (const streamId of globallyRelatedTaskStreams) {
-    const stream = journal.readStream(streamId);
+    const stream = readStreamEvents(journal, streamId);
     if (stream.some((event) => event.streamId !== streamId || event.correlationId !== milestoneEvents[0]!.correlationId)) {
       return "evidence";
     }
@@ -1512,7 +1580,7 @@ function validEvidence(
     if (!parsed.success || eventIds.has(parsed.data.eventId)) return false;
     eventIds.add(parsed.data.eventId);
     if (parsed.data.streamId !== milestoneId) return false;
-    const event = journal.readStream(parsed.data.streamId).find((candidate) => candidate.eventId === parsed.data.eventId);
+    const event = readStreamEvents(journal, parsed.data.streamId).find((candidate) => candidate.eventId === parsed.data.eventId);
     if (
       event === undefined || event.streamVersion !== parsed.data.streamVersion ||
       event.type !== parsed.data.eventType || digestCanonical(event.payload) !== parsed.data.payloadDigest
@@ -1612,7 +1680,7 @@ function verifiedIntegrationEvidence(
   if ((requireSingleton && implementers.length !== 1) || !implementers.some((task) => task.taskId === taskStreamId)) {
     throw new Error("integration evidence must belong to the planned implementer task");
   }
-  const taskEvents = journal.readStream(taskStreamId);
+  const taskEvents = readStreamEvents(journal, taskStreamId);
   if (
     taskEvents.length === 0 ||
     taskEvents.some((event) => event.streamId !== taskStreamId || event.correlationId !== milestoneEvents[0]!.correlationId)
@@ -1786,7 +1854,7 @@ function verifyStoredWriterReleases(
       eventPayload(candidate)?.["writerTaskId"] === ownership.writerTaskId);
     if (releaseEvent === undefined) throw new Error("released writer lacks retained milestone evidence");
     const retained = WriterTerminalReleasedPayloadSchema.parse(releaseEvent.payload);
-    const taskEvents = journal.readStream(ownership.writerTaskId);
+    const taskEvents = readStreamEvents(journal, ownership.writerTaskId);
     const terminal = taskEvents.at(-1);
     const task = projectTask(taskEvents);
     const expectedMilestoneTaskId = retained.phase === "pre_review_writer"
@@ -1814,7 +1882,7 @@ function verifyStoredResearchSources(journal: EventJournal, milestoneEvents: rea
     if (!parsed.success) continue;
     const completion = parsed.data;
     const references = completion.evidence.flatMap((item) => item.sourceEvidenceIds ?? []);
-    const sourceEvents = journal.readStream(`web-research:${completion.taskId}`).filter((event) => event.type === "web_research.observed");
+    const sourceEvents = readStreamEvents(journal, `web-research:${completion.taskId}`).filter((event) => event.type === "web_research.observed");
     const sources = sourceEvents.map((event) => ({
       ...(parseWebResearchEventPayload(event.type, event.payload) as {
       readonly outcome: string;
@@ -1838,14 +1906,17 @@ function verifyStoredResearchSources(journal: EventJournal, milestoneEvents: rea
       throw new Error("OpenCode research completion source references are incomplete, unknown, or duplicated");
     }
     if (sources.length === 0) continue;
-    const worker = projectWorkerLifecycle(journal.readStream(workerStreamId(completion.taskId))).workers[completion.capsuleId];
+    const worker = projectWorkerLifecycle(readStreamEvents(journal, workerStreamId(completion.taskId))).workers[completion.capsuleId];
     if (worker === undefined || worker.rootTaskId !== completion.taskId || worker.taskId !== completion.taskId || worker.parentWorkerId !== null) {
       throw new Error("OpenCode research completion lacks its parent root worker");
     }
-    const accepted = journal.readAll().filter((event) => event.type === "capability_envelope.accepted").map((event) => {
+    const acceptedEvent = findAllEvent(journal, (event) => {
+      if (event.type !== "capability_envelope.accepted") return false;
       const payload = parseRoleCapabilityEventPayload(event.type, event.payload) as { readonly binding: { readonly taskId: string; readonly envelope: { readonly digest: string }; readonly webResearch: null | { readonly digest: string; readonly destinations: readonly { readonly origin: string; readonly pathPrefix: string }[] } } };
-      return payload.binding;
-    }).find((binding) => binding.taskId === completion.taskId && binding.envelope.digest === worker.envelope.digest);
+      return payload.binding.taskId === completion.taskId && payload.binding.envelope.digest === worker.envelope.digest;
+    });
+    const accepted = acceptedEvent === undefined ? undefined :
+      (parseRoleCapabilityEventPayload(acceptedEvent.type, acceptedEvent.payload) as { readonly binding: { readonly taskId: string; readonly envelope: { readonly digest: string }; readonly webResearch: null | { readonly digest: string; readonly destinations: readonly { readonly origin: string; readonly pathPrefix: string }[] } } }).binding;
     if (accepted?.webResearch === null || accepted === undefined) throw new Error("OpenCode research completion lacks its accepted research policy");
     const requiresIana = accepted.webResearch.destinations.some((destination) =>
       destination.origin === "https://www.iana.org" && destination.pathPrefix === "/help/example-domains");

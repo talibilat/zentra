@@ -54,7 +54,13 @@ describe("MultipleMilestoneScheduler real-Git production path", () => {
     const databasePath = path.join(fixture.root, "scheduler.sqlite");
     const tracePaths = [path.join(fixture.root, "milestone-a.jsonl"), path.join(fixture.root, "milestone-b.jsonl")];
     let sqlite: SqliteEventJournal | null = new SqliteEventJournal(databasePath);
-    const sinks = tracePaths.map((tracePath) => AgentTailJsonlFileSink.open(fixture.root, tracePath));
+      const sinks = tracePaths.map((tracePath, index) => AgentTailJsonlFileSink.open(
+        fixture.root,
+        tracePath,
+        `trace-real-${index === 0 ? "a" : "b"}`,
+        undefined,
+        false,
+      ));
     try {
       const supervisor = new ProcessSupervisor();
       const writerModel = model("writer-model", "implementer", 2);

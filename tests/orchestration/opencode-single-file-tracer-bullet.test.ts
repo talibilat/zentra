@@ -372,7 +372,11 @@ async function runTracer(
   const executable = fakeOpenCode(fixture.root, replacement);
   const databasePath = path.join(fixture.root, "run.sqlite");
   const tracePath = path.join(fixture.root, "agent-tail.jsonl");
-  const sink = AgentTailJsonlFileSink.open(fixture.root, tracePath);
+  const sink = AgentTailJsonlFileSink.open(
+    fixture.root,
+    tracePath,
+    coordinate ? "two-agent-trace" : "writer-tracer",
+  );
   const sqlite = new SqliteEventJournal(databasePath);
   const journal = new ProjectingEventJournal(sqlite, sink);
   const tasks = new TaskService(journal);

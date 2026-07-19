@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { DurablePagedEventJournal, PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import type { NewEvent } from "../../src/contracts/event.js";
 import { derivePlanAuthority } from "../../src/contracts/replanning.js";
 import { GovernedWebResearch, type WebResearchTransport } from "../../src/research/web-research.js";
@@ -112,9 +112,9 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     const openCodeHome = path.join(root, "opencode-home");
     mkdirSync(openCodeHome);
     const database = path.join(root, "journal.sqlite");
-    const trace = path.join(root, "trace.jsonl");
+    let trace = path.join(root, "trace-head-only.jsonl");
     const sqlite = new SqliteEventJournal(database);
-    const sink = AgentTailJsonlFileSink.open(root, trace);
+    let sink = AgentTailJsonlFileSink.open(root, trace, "installed-head-only");
     let providerFailure = false;
     const azureDispatch = async (input: { readonly body: string }) => {
       if (providerFailure) return { status: 500, headers: { "content-type": "application/json" }, body: Buffer.from('{"error":{"code":"InternalServerError","message":"unknown"}}'), dispatched: true as const };
@@ -240,7 +240,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       projectId: "project", repositoryPath: repository, worktreeRoot: path.join(root, "worktrees"),
       validations: { focused: [process.execPath, "--test", "test/greeting.test.mjs"], full: [process.execPath, "--test"] },
     });
-    const runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
+    let runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
     await expect(runner.run({
       milestoneId: "installed-wrong-deployment", goal: "Reject model drift", file: "src/greeting.mjs", tracePath: trace,
       project, models, security, azureDeployment: "another-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
@@ -283,6 +283,10 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
     expect(existsSync(writerObservation) ? readFileSync(writerObservation, "utf8") : "")
       .not.toContain("HEAD cannot satisfy required research");
     researchMethod = "GET";
+    sink.close();
+    trace = path.join(root, "trace-installed.jsonl");
+    sink = AgentTailJsonlFileSink.open(root, trace, "installed");
+    runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
 
     process.env.ZENTRA_AMBIENT_SECRET = "must-not-reach-writer";
     let result;
@@ -384,7 +388,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
         causationId, correlationId: event.correlationId,
       }]);
     }
-    const recoveredSink = AgentTailJsonlFileSink.open(root, recoveredTrace);
+    const recoveredSink = AgentTailJsonlFileSink.open(root, recoveredTrace, "installed-recovered");
     writeFileSync(path.join(repository, "src/greeting.mjs"), "dirty primary bytes that must not trigger stale planning\n");
     try {
       const recoveredResult = await new InstalledMilestoneRunner({
@@ -521,7 +525,10 @@ async function gitOutput(cwd: string, args: readonly string[]): Promise<string> 
   return result.stdout;
 }
 
-function crashAfterWriterHandoff(journal: EventJournal, writerTaskId: string): EventJournal {
+function crashAfterWriterHandoff(
+  journal: DurablePagedEventJournal,
+  writerTaskId: string,
+): DurablePagedEventJournal {
   let crashed = false;
   return {
     append: (streamId, expectedVersion, events: readonly NewEvent<string, unknown>[]) => {
@@ -535,5 +542,15 @@ function crashAfterWriterHandoff(journal: EventJournal, writerTaskId: string): E
     },
     readStream: (streamId, afterVersion) => journal.readStream(streamId, afterVersion),
     readAll: (afterPosition) => journal.readAll(afterPosition),
+    readStreamPage: (streamId, afterVersion, limits) => journal.readStreamPage(streamId, afterVersion, limits),
+    readAllPage: (afterPosition, limits) => journal.readAllPage(afterPosition, limits),
+    inspectProjectionCursor: (name) => journal.inspectProjectionCursor(name),
+    ensureProjectionCursor: (name, initialPosition) => journal.ensureProjectionCursor(name, initialPosition),
+    inspectProjectionClaim: (name) => journal.inspectProjectionClaim(name),
+    claimProjection: (name, claimantId, limits) => journal.claimProjection(name, claimantId, limits),
+    recoverProjectionClaim: (name, claimId, claimantId) =>
+      journal.recoverProjectionClaim(name, claimId, claimantId),
+    commitProjection: (name, claimId, claimantId) =>
+      journal.commitProjection(name, claimId, claimantId),
   };
 }

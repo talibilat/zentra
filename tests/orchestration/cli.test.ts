@@ -420,8 +420,8 @@ describe("Zentra CLI", () => {
       "milestone.plan_created",
     ]);
     expect(traceEvents.every((event) => event.trace_id === milestone.milestoneId)).toBe(true);
-    expect((traceEvents[2]!.payload as { stopAndAskBoundaries: unknown }).stopAndAskBoundaries)
-      .toEqual(["missing_authority", "undeclared_network", "forbidden_file_scope"]);
+    expect((traceEvents[2]!.payload as { stopAndAskBoundaries?: unknown }).stopAndAskBoundaries)
+      .toBeUndefined();
     expect(eventTypes(testFixture.databasePath, milestone.milestoneId)).toEqual([
       "milestone.created",
       "milestone.plan_created",

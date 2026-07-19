@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import { AuthorityLevelSchema, MilestoneRoleSchema } from "../contracts/milestone.js";
 import { TerminalOutcomeSchema, type TerminalOutcome } from "../contracts/task.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { CostUsdNanoSchema, costFieldsAgree, nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
 import { ModelBrokerFailureReasonSchema, ModelToolNameSchema, isModelBrokerToolFailureReason } from "../capsule/model-broker.js";
 
@@ -281,7 +281,7 @@ export class WorkerLifecycleService {
   uncertain(rootTaskId: string, workerId: string, reason: string): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.uncertain", { reason }); }
   cleanup(rootTaskId: string, workerId: string, outcome: "completed" | "uncertain"): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.cleanup_observed", { outcome }); }
   terminate(rootTaskId: string, workerId: string, outcome: TerminalOutcome): WorkerView { return this.appendIdentity(rootTaskId, workerId, "worker.terminal", { outcome }); }
-  inspect(rootTaskId: string): WorkerLifecycleView { return projectWorkerLifecycle(this.journal.readStream(workerStreamId(rootTaskId))); }
+  inspect(rootTaskId: string): WorkerLifecycleView { return projectWorkerLifecycle(readStreamEvents(this.journal, workerStreamId(rootTaskId))); }
 
   private appendIdentity(rootTaskId: string, workerId: string, type: string, extra: object): WorkerView {
     const worker = this.inspect(rootTaskId).workers[workerId];
@@ -290,7 +290,7 @@ export class WorkerLifecycleService {
   }
   private append(rootTaskId: string, workerId: string, type: string, payload: unknown): WorkerView {
     const streamId = workerStreamId(rootTaskId);
-    const events = this.journal.readStream(streamId);
+    const events = readStreamEvents(this.journal, streamId);
     const correlationId = bindingCorrelation(payload) ?? events[0]?.correlationId;
     if (correlationId === undefined) throw new Error("worker event requires a durable binding");
     const next: NewEvent<string, unknown> = { streamId, type, payload, causationId: null, correlationId };

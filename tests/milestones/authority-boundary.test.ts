@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import type { MilestonePlan, PlannedTask } from "../../src/contracts/milestone.js";
 import { createOpenCodeAdmissionPacket } from "../../src/contracts/authority-attention.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -216,6 +216,8 @@ describe("authority-bound task admission", () => {
     const staleJournal: EventJournal = {
       readStream: (...args) => inner.readStream(...args),
       readAll: (...args) => inner.readAll(...args),
+      readStreamPage: (...args) => inner.readStreamPage(...args),
+      readAllPage: (...args) => inner.readAllPage(...args),
       append: (streamId, expectedVersion, events) => {
         if (!injected && events[0]?.type === "milestone.paused") {
           injected = true;
@@ -249,6 +251,8 @@ describe("authority-bound task admission", () => {
     const staleJournal: EventJournal = {
       readStream: (...args) => inner.readStream(...args),
       readAll: (...args) => inner.readAll(...args),
+      readStreamPage: (...args) => inner.readStreamPage(...args),
+      readAllPage: (...args) => inner.readAllPage(...args),
       append: (streamId, expectedVersion, events) => {
         if (!injected && events[0]?.type === "milestone.task_ready") {
           injected = true;

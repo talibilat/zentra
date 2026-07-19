@@ -98,6 +98,35 @@ describe("MilestoneRegistry", () => {
     }
   });
 
+  it("lists milestones through bounded pages after global history exceeds 10,000 events", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const registry = new MilestoneRegistry(journal);
+      registry.register({
+        milestoneId: "milestone-after-history",
+        projectId: "zentra",
+        title: "After history",
+        correlationId: "run-after-history",
+      });
+      const noise = (offset: number, count: number) => Array.from({ length: count }, (_, index) => ({
+        streamId: "noise",
+        type: "task.noise",
+        payload: { sequence: offset + index + 1 },
+        causationId: null,
+        correlationId: "noise",
+      }));
+      journal.append("noise", 0, noise(0, 10_000));
+      journal.append("noise", 10_000, noise(10_000, 1));
+
+      expect(() => journal.readAll()).toThrow(/use readAllPage/i);
+      expect(registry.list()).toEqual([
+        expect.objectContaining({ milestoneId: "milestone-after-history" }),
+      ]);
+    } finally {
+      journal.close();
+    }
+  });
+
   it("does not mutate another milestone when inspecting one", () => {
     const journal = new SqliteEventJournal(":memory:");
     try {

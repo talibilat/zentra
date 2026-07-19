@@ -1,5 +1,5 @@
 import { digestCanonical } from "../contracts/authority-attention.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import type { MilestoneRecord, MilestoneRegistry } from "../milestones/milestone-registry.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectRegistry } from "../projects/project-registry.js";
@@ -149,7 +149,7 @@ export class LocalReleaseCoordinator {
     if (binding === null || binding.releaseId !== input.releaseId) {
       throw new Error("completed verifier lacks the exact bound release operation");
     }
-    const releaseEvents = this.journal.readStream(`release:${input.releaseId}`);
+    const releaseEvents = readStreamEvents(this.journal, `release:${input.releaseId}`);
     const createdEvents = releaseEvents.filter((event) => event.type === "release.created");
     if (createdEvents.length !== 1) throw new Error("completed verifier release stream lacks one exact packet event");
     const created = ReleaseCreatedPayloadSchema.parse(createdEvents[0]!.payload);
@@ -165,7 +165,7 @@ export class LocalReleaseCoordinator {
     if (release === null || release.status === "uncertain") {
       throw new Error("completed verifier lacks a known retained release outcome");
     }
-    const completionEvents = this.journal.readStream(input.milestoneId).filter((event) => {
+    const completionEvents = readStreamEvents(this.journal, input.milestoneId).filter((event) => {
       if (event.type !== "milestone.task_completed") return false;
       const payload = record(event.payload, "milestone task completion");
       return payload["taskId"] === binding.taskId;
@@ -199,7 +199,7 @@ function releaseCompletionEvidence(
   release: LocalReleaseResult,
 ): ReleaseTaskCompletionEvidence {
   const releaseStreamId = `release:${release.releaseId}`;
-  const events = journal.readStream(releaseStreamId);
+  const events = readStreamEvents(journal, releaseStreamId);
   const first = events[0];
   const last = events.at(-1);
   if (first?.type !== "release.created" || last === undefined || first.streamId !== releaseStreamId || last.streamId !== releaseStreamId) {
@@ -230,7 +230,7 @@ function verifiedIntegratedCommit(journal: EventJournal, milestone: MilestoneRec
     throw new Error("local release preparation requires verified integration");
   }
   const observations = writers.map((writer) => {
-    const matches = journal.readStream(writer.taskId).filter((event) => event.type === "task.integration_observed");
+    const matches = readStreamEvents(journal, writer.taskId).filter((event) => event.type === "task.integration_observed");
     if (matches.length !== 1) throw new Error("local release preparation requires one verified integration observation per writer");
     const payload = record(matches[0]!.payload, "integration observation");
     const receipt = record(payload["receipt"], "integration receipt");

@@ -13,7 +13,7 @@ import {
   uncertainEffectPayload,
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
-import type { EventJournal } from "../journal/journal.js";
+import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
 import { CapabilityBoundaryPausedPayloadSchema } from "../contracts/capability-boundary.js";
 import { MilestoneRegistry } from "../milestones/milestone-registry.js";
@@ -236,7 +236,7 @@ export class RecoveryService {
       return decision(taskId, "record_failure", "task id must be one safe path and ref component");
     }
     try {
-      const source = this.journal.readAll().find((event) => event.type === "milestone.capability_boundary_paused" &&
+      const source = findAllEvent(this.journal, (event) => event.type === "milestone.capability_boundary_paused" &&
         CapabilityBoundaryPausedPayloadSchema.safeParse(event.payload).success &&
         CapabilityBoundaryPausedPayloadSchema.parse(event.payload).occurrence.taskId === taskId);
       if (source !== undefined) new MilestoneRegistry(this.journal).inspect(source.streamId);
@@ -245,7 +245,7 @@ export class RecoveryService {
     }
     let events: readonly StoredEvent[];
     try {
-      events = this.journal.readStream(taskId);
+      events = readStreamEvents(this.journal, taskId);
     } catch (error) {
       return decision(taskId, "record_failure", `journal read failed closed: ${errorMessage(error)}`);
     }
@@ -260,7 +260,7 @@ export class RecoveryService {
       return decision(taskId, "await_reconciliation", "capability boundary requires an explicit operator attention or replanning resolution");
     }
     try {
-      const worker = projectWorkerLifecycle(this.journal.readStream(workerStreamId(taskId)));
+      const worker = projectWorkerLifecycle(readStreamEvents(this.journal, workerStreamId(taskId)));
       const states = Object.values(worker.workers);
       if (states.some((candidate) => candidate.status === "uncertain")) {
         return decision(taskId, "await_reconciliation", "generic worker has an uncertain post-effect result; redispatch is forbidden");
@@ -737,7 +737,7 @@ export class RecoveryService {
   async retainClassification(taskId: string): Promise<RecoveryDecision> {
     const classification = await this.inspect(taskId);
     if (classification.action !== "await_reconciliation") return classification;
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     if (events.at(-1)?.type === "task.effect_uncertain") return classification;
     const task = this.tasks.get(taskId);
     if (task === null || task.lifecycle === "terminal") return classification;
@@ -778,7 +778,7 @@ export class RecoveryService {
   async authorizeBoundedCleanup(taskId: string): Promise<TaskView> {
     await this.assertBoundedCleanupAuthorized(taskId);
 
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     const chain = reconstructChain(taskId, events);
     const intent = chain.worktreeCreationStarted;
     if (intent === null) throw new Error("durable worktree creation intent is missing");
@@ -790,7 +790,7 @@ export class RecoveryService {
     // inspection alone (TOCTOU avoidance), the same pattern recordCompletion
     // uses before its cleanup effect.
     await this.assertBoundedCleanupAuthorized(taskId);
-    const refreshedEvents = this.journal.readStream(taskId);
+    const refreshedEvents = readStreamEvents(this.journal, taskId);
     if (refreshedEvents.at(-1)?.type !== "task.worktree_creation_started") {
       throw new Error("bounded cleanup state changed after reinspection");
     }
@@ -815,7 +815,7 @@ export class RecoveryService {
         `bounded cleanup is not authorized: ${authorization.action}`,
       );
     }
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     const last = events.at(-1);
     if (last === undefined || last.type !== "task.worktree_creation_started") {
       throw new Error(
@@ -832,7 +832,7 @@ export class RecoveryService {
       );
     }
 
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     const chain = reconstructChain(taskId, events);
     const last = events.at(-1);
     if (last === undefined) throw new Error(`task ${taskId} not found`);
@@ -851,7 +851,7 @@ export class RecoveryService {
           `cleanup completion is not authorized after reinspection: ${reauthorization.action}`,
         );
       }
-      const refreshedEvents = this.journal.readStream(taskId);
+      const refreshedEvents = readStreamEvents(this.journal, taskId);
       const refreshedChain = reconstructChain(taskId, refreshedEvents);
       if (refreshedEvents.at(-1)?.type !== "task.cleanup_started") {
         throw new Error("cleanup completion state changed after reinspection");

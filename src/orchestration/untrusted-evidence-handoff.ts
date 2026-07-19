@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 
 import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import type { EventJournal } from "../journal/journal.js";
+import { assertBoundedProjectionEntries, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { parseWebResearchEventPayload } from "../research/web-research.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -69,27 +69,28 @@ export function retainedGuidanceHandoff(
   requiredSource?: { readonly url: string; readonly method: "GET"; readonly status: 200 },
 ): UntrustedEvidenceHandoff {
   const expected = new Set(taskIds);
-  const retainedSources = new Map(journal.readAll()
-    .filter((event) => event.type === "web_research.observed")
-    .map((event) => parseWebResearchEventPayload(event.type, event.payload) as {
+  const retainedSources = new Map<string, z.infer<typeof HandoffSourceSchema>>();
+  for (const event of iterateAllEvents(journal)) {
+    if (event.type !== "web_research.observed") continue;
+    const result = parseWebResearchEventPayload(event.type, event.payload) as {
       readonly outcome: string;
       readonly evidence: null | z.infer<typeof HandoffSourceSchema>;
-    })
-    .filter((result) => result.outcome === "completed" && result.evidence !== null)
-    .map((result) => {
-      const evidence = result.evidence!;
-      const source = HandoffSourceSchema.parse({
-        evidenceId: evidence.evidenceId,
-        sourceUrl: evidence.sourceUrl,
-        method: evidence.method,
-        status: evidence.status,
-        contentSha256: evidence.contentSha256,
-        compressedBytes: evidence.compressedBytes,
-        decompressedBytes: evidence.decompressedBytes,
-      });
-      return [source.evidenceId, source] as const;
-    }));
-  const items = journal.readStream(milestoneId)
+    };
+    if (result.outcome !== "completed" || result.evidence === null) continue;
+    const evidence = result.evidence;
+    const source = HandoffSourceSchema.parse({
+      evidenceId: evidence.evidenceId,
+      sourceUrl: evidence.sourceUrl,
+      method: evidence.method,
+      status: evidence.status,
+      contentSha256: evidence.contentSha256,
+      compressedBytes: evidence.compressedBytes,
+      decompressedBytes: evidence.decompressedBytes,
+    });
+    retainedSources.set(source.evidenceId, source);
+    assertBoundedProjectionEntries(retainedSources.size, "retained research sources");
+  }
+  const items = readStreamEvents(journal, milestoneId)
     .filter((event) => event.type === "milestone.task_completed" &&
       typeof event.payload === "object" && event.payload !== null &&
       expected.has(String((event.payload as Readonly<Record<string, unknown>>)["taskId"])))

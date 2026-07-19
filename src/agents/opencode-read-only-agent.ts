@@ -11,7 +11,7 @@ import {
   type OpenCodeAdmissionPacket,
 } from "../contracts/authority-attention.js";
 import type { TerminalOutcome } from "../contracts/task.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { projectMilestone } from "../milestones/milestone-projection.js";
 import type { ModelBroker } from "../capsule/model-broker.js";
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
@@ -200,7 +200,7 @@ export class OpenCodeReadOnlyAgent {
   ) {}
 
   async run(request: OpenCodeReadOnlyAgentRequest): Promise<OpenCodeReadOnlyAgentResult> {
-    const events = this.journal.readStream(request.milestoneId);
+    const events = readStreamEvents(this.journal, request.milestoneId);
     const milestone = projectMilestone(events);
     if (milestone === null || milestone.plan === null) throw new Error("OpenCode role requires a planned milestone");
     if (milestone.lifecycle === "paused") throw new Error("OpenCode role cannot run while the milestone is paused");
@@ -307,7 +307,7 @@ export class OpenCodeReadOnlyAgent {
       trace: { traceId: correlationId, correlationId },
     });
     const intentPayload = OpenCodeResourceIntentPayloadSchema.parse({ taskId: request.taskId, ...identity });
-    const currentEvents = this.journal.readStream(request.milestoneId);
+    const currentEvents = readStreamEvents(this.journal, request.milestoneId);
     const currentMilestone = projectMilestone(currentEvents);
     if (currentMilestone?.lifecycle === "paused") throw new Error("OpenCode role cannot run while the milestone is paused");
     if (currentMilestone?.tasks[request.taskId]?.status !== "ready") throw new Error("OpenCode role task must remain ready");
@@ -488,7 +488,7 @@ export class OpenCodeReadOnlyAgent {
           } as const;
           const currentWorker = workers.inspect(request.taskId).workers[workerId];
           if (currentWorker?.activeModelTurns === 0) {
-            const retained = this.journal.readStream(workerStreamId(request.taskId)).findLast((event) =>
+            const retained = readStreamEvents(this.journal, workerStreamId(request.taskId)).findLast((event) =>
               event.type === "worker.observed" && typeof event.payload === "object" && event.payload !== null &&
               (event.payload as { readonly workerId?: string }).workerId === workerId &&
               (event.payload as { readonly observation?: { readonly kind?: string; readonly phase?: string } }).observation?.kind === "model" &&

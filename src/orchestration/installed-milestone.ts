@@ -281,7 +281,7 @@ export class InstalledMilestoneRunner {
     };
     const writers = new MultiWriterOwnershipScheduler(registry, execution, new WriterResourceGovernor(1));
     const coordinator = new MultiAgentMilestoneCoordinator(registry, program, writers);
-    return coordinator.run({
+    const coordinatorRequest: Parameters<MultiAgentMilestoneCoordinator["run"]>[0] = {
       milestoneId: request.milestoneId,
       readOnlyTasks: [
         readOnlyTask(request, repository, planningBase, planningBaseRevisionSha256, plannerTask, "planner"),
@@ -357,8 +357,26 @@ export class InstalledMilestoneRunner {
           }],
         };
       },
-    });
-    } catch {
+    };
+    let priorVersion = -1;
+    for (let attempt = 0; attempt < plan.tasks.length; attempt += 1) {
+      const result = await coordinator.run(coordinatorRequest);
+      if (result.lifecycle === "paused" || result.lifecycle === "terminal") return result;
+      if (result.streamVersion <= priorVersion) {
+        if (
+          result.executedTaskIds.includes(plannerTask.taskId) &&
+          result.tasks[researcherTask.taskId]?.terminalOutcome !== "completed"
+        ) throw new Error("required research source evidence is missing or invalid");
+        return result;
+      }
+      priorVersion = result.streamVersion;
+    }
+    return requireMilestone(registry, request.milestoneId);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /(?:required research|research findings|source evidence|IANA GET)/i.test(error.message)
+      ) throw new Error("required research source evidence is missing or invalid");
       const durable = requireMilestone(registry, request.milestoneId);
       if (durable.lifecycle === "paused" || durable.lifecycle === "terminal" ||
         durable.hasActiveEffects || durable.hasUncertainEffects) return durable;

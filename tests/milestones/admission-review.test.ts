@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { NewEvent } from "../../src/contracts/event.js";
 import type { MilestonePlan } from "../../src/contracts/milestone.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import {
   MilestoneRegistry,
@@ -235,6 +235,8 @@ describe("reviewed authority admission packet", () => {
       const racingJournal: EventJournal = {
         readStream: (...args) => inner.readStream(...args),
         readAll: (...args) => inner.readAll(...args),
+        readStreamPage: (...args) => inner.readStreamPage(...args),
+        readAllPage: (...args) => inner.readAllPage(...args),
         append: (streamId, expectedVersion, events) => {
           if (!injected && events[0]?.type === "milestone.paused") {
             injected = true;

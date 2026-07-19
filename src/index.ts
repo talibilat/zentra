@@ -7,7 +7,21 @@ export { DisabledModelBroker } from "./capsule/model-broker.js";
 export type { ModelBroker, ModelBrokerRequest, ModelBrokerReceipt } from "./capsule/model-broker.js";
 export type { AzureOpenAIProviderConfig } from "./providers/azure-openai-model-broker.js";
 export type { InstalledProviderConfig } from "./providers/provider-config.js";
-export type { EventJournal } from "./journal/journal.js";
+export type {
+  DurablePagedEventJournal,
+  EventJournal,
+  GlobalEventPage,
+  JournalPageLimits,
+  PagedEventJournal,
+  ProjectionClaim,
+  ProjectionCursor,
+  StreamEventPage,
+} from "./journal/journal.js";
+export {
+  DURABLE_PAGED_EVENT_JOURNAL,
+  createProjectionClaimantId,
+  isDurablePagedEventJournal,
+} from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
 export { ProjectingEventJournal } from "./journal/projecting-journal.js";
 export type { StoredEventSink } from "./journal/projecting-journal.js";

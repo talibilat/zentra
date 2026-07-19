@@ -21,7 +21,7 @@ import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
 import { openCodeResourceIdentity } from "../../src/agents/opencode-resource-identity.js";
 import { GovernedWebResearch } from "../../src/research/web-research.js";
 import { digestCanonical } from "../../src/contracts/authority-attention.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 
 const roots: string[] = [];
 
@@ -37,7 +37,7 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
     writeFileSync(path.join(root, "src/context.ts"), "allowed context\n");
     writeFileSync(path.join(root, "unrelated.txt"), "must not be mounted\n");
     const sqlite = new SqliteEventJournal(":memory:");
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"), "trace-18");
     const journal = new ProjectingEventJournal(sqlite, sink);
     const registry = new MilestoneRegistry(journal);
     registry.register({
@@ -201,16 +201,17 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
         payload: expect.objectContaining({
           capabilityId: "opencode-planner",
           transportModelId: "fixture/model",
-          model: { id: "fixture/model", provider: "fixture", name: "planner-v1" },
+          model: expect.objectContaining({ id: "fixture/model", provider: "fixture" }),
           evidence: [expect.objectContaining({
             kind: "plan",
-            summary: "1. Inspect contracts.\n2. Add the bounded adapter.",
             sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
             provenance: expect.objectContaining({ harness: "opencode" }),
           })],
         }),
       }),
     ]);
+    expect(JSON.stringify(agentLines)).not.toContain("1. Inspect contracts.");
+    expect(JSON.stringify(agentLines)).not.toContain("planner-v1");
     sqlite.close();
   });
 
@@ -752,6 +753,8 @@ describe("OpenCodeReadOnlyAgent milestone path", () => {
       },
       readStream: (streamId, afterVersion) => sqlite.readStream(streamId, afterVersion),
       readAll: (afterPosition) => sqlite.readAll(afterPosition),
+      readStreamPage: (streamId, afterVersion, limits) => sqlite.readStreamPage(streamId, afterVersion, limits),
+      readAllPage: (afterPosition, limits) => sqlite.readAllPage(afterPosition, limits),
     };
     const admission = readyMilestone(journal, "milestone-observer-retry");
     const execute = vi.fn(async (request, _broker, _signal, observe): Promise<OpenCodeReadOnlyCapsuleResult> => {

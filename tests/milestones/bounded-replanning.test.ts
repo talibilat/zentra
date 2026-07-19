@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { NewEvent, StoredEvent } from "../../src/contracts/event.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import type { MilestonePlan, PlannedTask } from "../../src/contracts/milestone.js";
 import { digestCanonical } from "../../src/contracts/authority-attention.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -132,7 +132,7 @@ describe("bounded milestone replanning", () => {
     const database = path.join(root, "journal.sqlite");
     const trace = path.join(root, "trace.jsonl");
     const inner = new SqliteEventJournal(database);
-    const sink = AgentTailJsonlFileSink.open(root, trace);
+    const sink = AgentTailJsonlFileSink.open(root, trace, "trace-replan");
     const journal = new ProjectingEventJournal(inner, sink);
     const registry = new MilestoneRegistry(journal);
     registry.register({
@@ -189,7 +189,7 @@ describe("bounded milestone replanning", () => {
       const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-replan-tail-")));
       roots.push(root);
       const trace = path.join(root, `${type.split(".").at(-1)}.jsonl`);
-      const sink = AgentTailJsonlFileSink.open(root, trace);
+      const sink = AgentTailJsonlFileSink.open(root, trace, "trace-replan");
       expect(() => sink.append([stored(type, 1, { arbitrary: "ATTACKER_SECRET_CANARY" })])).toThrow();
       sink.close();
       expect(readFileSync(trace, "utf8")).toBe("");
@@ -371,6 +371,7 @@ describe("bounded milestone replanning", () => {
     let injected = false;
     const stale: EventJournal = {
       readStream: (...args) => inner.readStream(...args), readAll: (...args) => inner.readAll(...args),
+      readStreamPage: (...args) => inner.readStreamPage(...args), readAllPage: (...args) => inner.readAllPage(...args),
       append: (streamId, expectedVersion, events: readonly NewEvent<string, unknown>[]) => {
         if (!injected && events[0]?.type === "milestone.plan_revised") {
           injected = true;
@@ -672,6 +673,7 @@ describe("bounded milestone replanning", () => {
     let injected = false;
     const stale: EventJournal = {
       readStream: (...args) => inner.readStream(...args), readAll: (...args) => inner.readAll(...args),
+      readStreamPage: (...args) => inner.readStreamPage(...args), readAllPage: (...args) => inner.readAllPage(...args),
       append: (streamId, expectedVersion, events) => {
         if (!injected && events[0]?.type === "milestone.replanning_resolved") {
           injected = true;

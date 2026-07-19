@@ -1,4 +1,5 @@
 import type { StoredEvent } from "../contracts/event.js";
+import { z } from "zod";
 import { parseCapsuleEventPayload } from "../capsule/capsule-events.js";
 import { parseOpenCodeMilestonePayload } from "../agents/opencode-agent-events.js";
 import { MilestonePausedPayloadSchema } from "../contracts/authority-attention.js";
@@ -10,9 +11,230 @@ import { envelopeReadPaths, envelopeWritePaths, parseWorkerEventPayload, type Wo
 import { parseRoleCapabilityEventPayload } from "../workers/role-capability-envelope.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema } from "../contracts/capability-boundary.js";
 import { parseWebResearchEventPayload } from "../research/web-research.js";
+import { ArtifactRecordedEventSchema, isArtifactRecordedEventType } from "../contracts/artifact.js";
+import {
+  OpenCodeCleanupObservedPayloadSchema,
+  OpenCodeMilestoneCompletedPayloadSchema,
+  OpenCodeResourceIntentPayloadSchema,
+  OpenCodeResourcesPreparedPayloadSchema,
+  OpenCodeTraceObservedPayloadSchema,
+} from "../agents/opencode-agent-events.js";
+import {
+  MilestoneCompletedPayloadSchema,
+  WriterBatchStartedPayloadSchema,
+  WriterIntegrationCompletedPayloadSchema,
+  WriterTerminalReleasedPayloadSchema,
+} from "../contracts/milestone.js";
+import { LegacyMilestoneNonSuccessPayloadSchema, MilestoneTerminalPayloadSchema } from "../contracts/milestone-result.js";
+import { PlanReplacementPayloadSchema, TaskReadyPayloadSchema } from "../contracts/authority-attention.js";
+import { IntegrationBranchPreparationIntentSchema, IntegrationBranchPreparationObservedSchema } from "../contracts/integration-branch-preparation.js";
+import { EffectReconciliationPayloadSchema, UncertainEffectPayloadSchema } from "../contracts/uncertain-effect.js";
+import { ReleaseOperationBoundPayloadSchema } from "../release/release-events.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
+
+export const AGENT_TAIL_EVENT_TYPES = [
+  "task.created", "task.worktree_creation_started", "task.leased", "task.started",
+  "task.writer_completed", "task.validation_started", "task.validation_completed",
+  "task.review_requested", "task.review_dispatch_intent", "task.review_approved",
+  "task.review_policy_blocked", "task.commit_observed", "task.integration_started",
+  "task.integration_prepared", "task.integration_observed", "task.cleanup_started",
+  "task.cleanup_completed", "task.cleanup_observed", "task.cleanup_reconciled",
+  "task.artifact_recording", "task.effect_uncertain", "task.effect_reconciled",
+  "task.capability_boundary_paused", "task.capability_boundary_resolved",
+  "task.completed", "task.cancelled", "task.failed", "task.timed_out", "task.denied",
+  "milestone.created", "milestone.plan_created", "milestone.authority_envelope_established",
+  "milestone.replanning_policy_bound", "milestone.integration_branch_preparation_intent",
+  "milestone.integration_branch_preparation_observed", "milestone.task_ready",
+  "milestone.task_running", "milestone.task_blocked", "milestone.task_completed",
+  "milestone.agent_execution_completed", "milestone.writer_batch_started",
+  "milestone.writer_integration_completed", "milestone.writer_terminal_released",
+  "milestone.release_operation_bound", "milestone.paused",
+  "milestone.capability_boundary_paused", "milestone.capability_boundary_resolved",
+  "milestone.plan_replaced", "milestone.plan_revised", "milestone.replanning_resolved",
+  "milestone.agent_trace_observed", "milestone.agent_resource_intent",
+  "milestone.agent_resources_prepared", "milestone.agent_cleanup_observed",
+  "milestone.completed", "milestone.cancelled", "milestone.denied",
+  "milestone.timed_out", "milestone.failed",
+  "worker.bound", "worker.started", "worker.observed", "worker.uncertain",
+  "worker.cleanup_observed", "worker.terminal",
+  "release.created", "release.worktree_intent", "release.environment_intent",
+  "release.refs_snapshot", "release.refs_verified", "release.step_started",
+  "release.step_observed", "release.artifact_hashed", "release.prepared_local_only",
+  "release.failed",
+  "capsule.started", "capsule.runtime_attested", "capsule.image_attested",
+  "capsule.resources_prepared", "capsule.worker_attested", "capsule.check_observed",
+  "capsule.harness_attested", "capsule.proxy_interaction_observed",
+  "capsule.github_grant_consumed", "capsule.github_broker_accepted",
+  "capsule.github_broker_denied", "capsule.github_broker_observed",
+  "capsule.github_broker_reconciled", "capsule.failure_observed",
+  "capsule.cleanup_observed", "capsule.completed", "capsule.cancelled",
+  "capsule.timed_out", "capsule.failed",
+  "routing.model_selected", "routing.outcome_recorded",
+  "capability_envelope.accepted", "capability_envelope.evaluated",
+  "web_research.observed",
+] as const;
+
+type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
+interface PayloadParser { parse(payload: unknown): unknown }
+
+const Id = z.string().min(1).max(4_096);
+const Digest = z.string().regex(/^[a-f0-9]{64}$/);
+const Commit = z.string().regex(/^[a-f0-9]{40,64}$/);
+const Outcome = z.enum(["completed", "cancelled", "denied", "timed_out", "failed"]);
+const mandatory = <T extends z.ZodRawShape>(shape: T) => z.object(shape).passthrough();
+const parseWith = (parse: (payload: unknown) => unknown): PayloadParser => ({ parse });
+const taskTerminal = mandatory({ stage: Id });
+const milestoneTerminal = z.union([
+  MilestoneTerminalPayloadSchema,
+  MilestoneCompletedPayloadSchema,
+  LegacyMilestoneNonSuccessPayloadSchema,
+]);
+const validationCompleted = z.union([
+  mandatory({ validation: mandatory({
+    name: Id, outcome: Outcome.exclude(["denied"]), exitCode: z.number().int().nullable(),
+    argvSha256: Digest, outputSha256: Digest, startedAt: z.string().datetime({ offset: true }),
+    finishedAt: z.string().datetime({ offset: true }),
+  }) }),
+  mandatory({
+    name: Id, outcome: Outcome.exclude(["denied"]), exitCode: z.number().int().nullable(),
+    argvSha256: Digest, outputSha256: Digest, startedAt: z.string().datetime({ offset: true }),
+    finishedAt: z.string().datetime({ offset: true }),
+  }),
+]);
+
+export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, PayloadParser>> = {
+  "task.created": mandatory({ projectId: Id, title: Id }),
+  "task.worktree_creation_started": mandatory({ taskId: Id, branch: Id, path: Id, baseCommit: Commit }),
+  "task.leased": mandatory({ leaseOwner: Id, workspace: Id }),
+  "task.started": mandatory({ workerId: Id }),
+  "task.writer_completed": mandatory({ workerId: Id, outcome: Outcome }),
+  "task.validation_started": mandatory({ patch: z.object({ type: z.literal("artifact.ready"), path: Id, sha256: Digest }), diffSha256: Digest }),
+  "task.validation_completed": validationCompleted,
+  "task.review_requested": mandatory({ reviewerId: Id, validation: z.object({ name: Id, outcome: Outcome.exclude(["denied"]) }).passthrough() }),
+  "task.review_dispatch_intent": mandatory({ schemaVersion: z.literal(1), reviewerId: Id, diffSha256: Digest, validationSha256: Digest, dispatchId: z.string().uuid() }),
+  "task.review_approved": mandatory({ review: mandatory({ reviewerId: Id, approved: z.boolean(), diffSha256: Digest, validationSha256: Digest }) }),
+  "task.review_policy_blocked": mandatory({ stage: Id, reason: Id, reviewPolicy: z.object({}).passthrough() }),
+  "task.commit_observed": mandatory({ stage: z.literal("commit"), reason: Id }),
+  "task.integration_started": mandatory({ sourceCommit: Commit, review: z.object({ reviewerId: Id }).passthrough() }),
+  "task.integration_prepared": mandatory({ receipt: mandatory({ taskId: Id, projectId: Id, outcome: z.literal("completed") }) }),
+  "task.integration_observed": z.union([
+    mandatory({ receipt: mandatory({ taskId: Id, projectId: Id, outcome: z.literal("completed") }), verification: z.enum(["verified", "failed"]) }),
+    mandatory({ reason: Id, evidence: z.object({}).passthrough() }),
+    mandatory({ error: mandatory({ name: Id, message: z.string() }) }),
+  ]),
+  "task.cleanup_started": mandatory({ sourceCommit: Commit, resultCommit: Commit, workspace: Id, branch: Id }),
+  "task.cleanup_completed": mandatory({ sourceCommit: Commit, resultCommit: Commit, workspace: Id, branch: Id }),
+  "task.cleanup_observed": mandatory({ phase: Id, uncertain: z.boolean(), evidence: z.record(z.string(), z.unknown()), reason: Id }),
+  "task.cleanup_reconciled": mandatory({ cleanup: z.object({ sourceCommit: Commit }).passthrough(), observation: z.object({ phase: Id, uncertain: z.boolean() }).passthrough() }),
+  "task.artifact_recording": mandatory({ artifactProtocolVersion: z.literal(1), artifactId: Id, kind: z.enum(["patch", "validation_report", "review_report", "integration_receipt"]), sha256: Digest }),
+  "task.effect_uncertain": UncertainEffectPayloadSchema,
+  "task.effect_reconciled": EffectReconciliationPayloadSchema,
+  "task.capability_boundary_paused": CapabilityBoundaryPausedPayloadSchema,
+  "task.capability_boundary_resolved": CapabilityBoundaryResolvedPayloadSchema,
+  "task.completed": z.union([mandatory({ receipt: z.object({ taskId: Id }).passthrough() }), mandatory({ stage: z.literal("validation"), validation: z.object({ name: Id }).passthrough(), diffSha256: Digest, changedPath: Id, workspace: Id })]),
+  "task.cancelled": taskTerminal,
+  "task.failed": taskTerminal,
+  "task.timed_out": taskTerminal,
+  "task.denied": taskTerminal,
+  "milestone.created": mandatory({ projectId: Id, title: Id }),
+  "milestone.plan_created": mandatory({ plan: z.object({ milestoneId: Id, projectId: Id, tasks: z.array(z.unknown()) }).passthrough() }),
+  "milestone.authority_envelope_established": MilestoneAuthorityEnvelopePayloadSchema,
+  "milestone.replanning_policy_bound": ReplanningPolicyBoundPayloadSchema,
+  "milestone.integration_branch_preparation_intent": IntegrationBranchPreparationIntentSchema,
+  "milestone.integration_branch_preparation_observed": IntegrationBranchPreparationObservedSchema,
+  "milestone.task_ready": TaskReadyPayloadSchema,
+  "milestone.task_running": parseWith((payload) => {
+    if (typeof payload === "object" && payload !== null &&
+      (payload as Readonly<Record<string, unknown>>)["harness"] === "opencode") {
+      return parseOpenCodeMilestonePayload("milestone.task_running", payload);
+    }
+    return z.union([
+      z.strictObject({ taskId: Id }),
+      z.strictObject({ taskId: Id, actorId: Id, role: Id }),
+    ]).parse(payload);
+  }),
+  "milestone.task_blocked": mandatory({ taskId: Id, reason: Id }),
+  "milestone.task_completed": parseWith((payload) => {
+    const record = typeof payload === "object" && payload !== null
+      ? payload as Readonly<Record<string, unknown>> : null;
+    if (record?.["harness"] === "opencode") {
+      return parseOpenCodeMilestonePayload("milestone.task_completed", payload);
+    }
+    if (typeof record?.["evidence"] === "object" && record["evidence"] !== null &&
+      "releaseStreamId" in record["evidence"]) {
+      return ReleaseMilestoneTaskCompletedPayloadSchema.parse(payload);
+    }
+    return z.union([
+      z.strictObject({ taskId: Id, outcome: Outcome }),
+      z.strictObject({
+        taskId: Id, actorId: Id, role: Id, outcome: Outcome,
+        evidence: z.record(z.string(), z.unknown()),
+      }),
+    ]).parse(payload);
+  }),
+  "milestone.agent_execution_completed": OpenCodeMilestoneCompletedPayloadSchema,
+  "milestone.writer_batch_started": WriterBatchStartedPayloadSchema,
+  "milestone.writer_integration_completed": WriterIntegrationCompletedPayloadSchema,
+  "milestone.writer_terminal_released": WriterTerminalReleasedPayloadSchema,
+  "milestone.release_operation_bound": ReleaseOperationBoundPayloadSchema,
+  "milestone.paused": parseWith(parseMilestonePausedPayload),
+  "milestone.capability_boundary_paused": CapabilityBoundaryPausedPayloadSchema,
+  "milestone.capability_boundary_resolved": CapabilityBoundaryResolvedPayloadSchema,
+  "milestone.plan_replaced": PlanReplacementPayloadSchema,
+  "milestone.plan_revised": PlanRevisionPayloadSchema,
+  "milestone.replanning_resolved": ReplanningResolutionPayloadSchema,
+  "milestone.agent_trace_observed": OpenCodeTraceObservedPayloadSchema,
+  "milestone.agent_resource_intent": OpenCodeResourceIntentPayloadSchema,
+  "milestone.agent_resources_prepared": OpenCodeResourcesPreparedPayloadSchema,
+  "milestone.agent_cleanup_observed": OpenCodeCleanupObservedPayloadSchema,
+  "milestone.completed": milestoneTerminal,
+  "milestone.cancelled": milestoneTerminal,
+  "milestone.denied": milestoneTerminal,
+  "milestone.timed_out": milestoneTerminal,
+  "milestone.failed": milestoneTerminal,
+  "worker.bound": parseWith((payload) => parseWorkerEventPayload("worker.bound", payload)),
+  "worker.started": parseWith((payload) => parseWorkerEventPayload("worker.started", payload)),
+  "worker.observed": parseWith((payload) => parseWorkerEventPayload("worker.observed", payload)),
+  "worker.uncertain": parseWith((payload) => parseWorkerEventPayload("worker.uncertain", payload)),
+  "worker.cleanup_observed": parseWith((payload) => parseWorkerEventPayload("worker.cleanup_observed", payload)),
+  "worker.terminal": parseWith((payload) => parseWorkerEventPayload("worker.terminal", payload)),
+  "release.created": parseWith((payload) => parseReleaseEventPayload("release.created", payload)),
+  "release.worktree_intent": parseWith((payload) => parseReleaseEventPayload("release.worktree_intent", payload)),
+  "release.environment_intent": parseWith((payload) => parseReleaseEventPayload("release.environment_intent", payload)),
+  "release.refs_snapshot": parseWith((payload) => parseReleaseEventPayload("release.refs_snapshot", payload)),
+  "release.refs_verified": parseWith((payload) => parseReleaseEventPayload("release.refs_verified", payload)),
+  "release.step_started": parseWith((payload) => parseReleaseEventPayload("release.step_started", payload)),
+  "release.step_observed": parseWith((payload) => parseReleaseEventPayload("release.step_observed", payload)),
+  "release.artifact_hashed": parseWith((payload) => parseReleaseEventPayload("release.artifact_hashed", payload)),
+  "release.prepared_local_only": parseWith((payload) => parseReleaseEventPayload("release.prepared_local_only", payload)),
+  "release.failed": parseWith((payload) => parseReleaseEventPayload("release.failed", payload)),
+  "capsule.started": parseWith((payload) => parseCapsuleEventPayload("capsule.started", payload)),
+  "capsule.runtime_attested": parseWith((payload) => parseCapsuleEventPayload("capsule.runtime_attested", payload)),
+  "capsule.image_attested": parseWith((payload) => parseCapsuleEventPayload("capsule.image_attested", payload)),
+  "capsule.resources_prepared": parseWith((payload) => parseCapsuleEventPayload("capsule.resources_prepared", payload)),
+  "capsule.worker_attested": parseWith((payload) => parseCapsuleEventPayload("capsule.worker_attested", payload)),
+  "capsule.check_observed": parseWith((payload) => parseCapsuleEventPayload("capsule.check_observed", payload)),
+  "capsule.harness_attested": parseWith((payload) => parseCapsuleEventPayload("capsule.harness_attested", payload)),
+  "capsule.proxy_interaction_observed": parseWith((payload) => parseCapsuleEventPayload("capsule.proxy_interaction_observed", payload)),
+  "capsule.github_grant_consumed": parseWith((payload) => parseCapsuleEventPayload("capsule.github_grant_consumed", payload)),
+  "capsule.github_broker_accepted": parseWith((payload) => parseCapsuleEventPayload("capsule.github_broker_accepted", payload)),
+  "capsule.github_broker_denied": parseWith((payload) => parseCapsuleEventPayload("capsule.github_broker_denied", payload)),
+  "capsule.github_broker_observed": parseWith((payload) => parseCapsuleEventPayload("capsule.github_broker_observed", payload)),
+  "capsule.github_broker_reconciled": parseWith((payload) => parseCapsuleEventPayload("capsule.github_broker_reconciled", payload)),
+  "capsule.failure_observed": parseWith((payload) => parseCapsuleEventPayload("capsule.failure_observed", payload)),
+  "capsule.cleanup_observed": parseWith((payload) => parseCapsuleEventPayload("capsule.cleanup_observed", payload)),
+  "capsule.completed": parseWith((payload) => parseCapsuleEventPayload("capsule.completed", payload)),
+  "capsule.cancelled": parseWith((payload) => parseCapsuleEventPayload("capsule.cancelled", payload)),
+  "capsule.timed_out": parseWith((payload) => parseCapsuleEventPayload("capsule.timed_out", payload)),
+  "capsule.failed": parseWith((payload) => parseCapsuleEventPayload("capsule.failed", payload)),
+  "routing.model_selected": parseWith((payload) => parseRoutingEventPayload("routing.model_selected", payload)),
+  "routing.outcome_recorded": parseWith((payload) => parseRoutingEventPayload("routing.outcome_recorded", payload)),
+  "capability_envelope.accepted": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.accepted", payload)),
+  "capability_envelope.evaluated": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.evaluated", payload)),
+  "web_research.observed": parseWith((payload) => parseWebResearchEventPayload("web_research.observed", payload)),
+};
 
 export interface AgentTailActor {
   readonly id: string;
@@ -67,7 +289,13 @@ export function storedEventsToAgentTailEvents(
 
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
   assertAgentTailCompatibleEvent(event);
-  const payload = event.type === "milestone.capability_boundary_resolved" || event.type === "task.capability_boundary_resolved"
+  const payload = isArtifactRecordedEventType(event.type)
+    ? redactedArtifactPayload(event.type, event.payload)
+    : event.type === "task.validation_completed"
+      ? redactedTaskValidationPayload(event.payload)
+    : event.type === "task.writer_completed"
+      ? redactedWriterCompletedPayload(event.payload)
+    : event.type === "milestone.capability_boundary_resolved" || event.type === "task.capability_boundary_resolved"
     ? CapabilityBoundaryResolvedPayloadSchema.parse(event.payload)
     : event.type === "milestone.capability_boundary_paused" || event.type === "task.capability_boundary_paused"
     ? redactedCapabilityBoundaryPayload(event.payload)
@@ -96,8 +324,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     : event.type.startsWith("worker.")
       ? redactedWorkerPayload(event.type, event.payload)
     : isPotentialOpenCodeRoleEvent(event)
-      ? parseOpenCodeMilestonePayload(event.type, event.payload)
-      : event.payload;
+      ? redactedOpenCodeMilestonePayload(event.type, event.payload)
+      : projectExactSafeFields(event.type, event.payload);
   return Object.freeze({
     schema_version: AGENT_TAIL_SCHEMA_VERSION,
     event_id: event.eventId,
@@ -129,11 +357,80 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
   });
 }
 
+function redactedTaskValidationPayload(payload: unknown): unknown {
+  const record = payload as Readonly<Record<string, unknown>>;
+  const validation = (record?.["validation"] ?? payload) as Readonly<Record<string, unknown>>;
+  const name = validation["name"];
+  const outcome = validation["outcome"];
+  const exitCode = validation["exitCode"];
+  const argvSha256 = validation["argvSha256"];
+  const outputSha256 = validation["outputSha256"];
+  const startedAt = validation["startedAt"];
+  const finishedAt = validation["finishedAt"];
+  const subjectSha256 = (validation["provenance"] as Readonly<Record<string, unknown>> | undefined)?.["subjectSha256"] ?? null;
+  if (
+    typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(name) ||
+    typeof outcome !== "string" || !["completed", "cancelled", "timed_out", "failed"].includes(outcome) ||
+    (exitCode !== null && (!Number.isSafeInteger(exitCode) || typeof exitCode !== "number")) ||
+    typeof argvSha256 !== "string" || !/^[a-f0-9]{64}$/.test(argvSha256) ||
+    typeof outputSha256 !== "string" || !/^[a-f0-9]{64}$/.test(outputSha256) ||
+    typeof startedAt !== "string" || !Number.isFinite(Date.parse(startedAt)) ||
+    typeof finishedAt !== "string" || !Number.isFinite(Date.parse(finishedAt)) ||
+    (subjectSha256 !== null && (typeof subjectSha256 !== "string" || !/^[a-f0-9]{64}$/.test(subjectSha256)))
+  ) throw new Error("Agent Tail validation projection is invalid");
+  return {
+    validation: {
+      name, outcome, exitCode, argvSha256, outputSha256, startedAt, finishedAt, subjectSha256,
+    },
+  };
+}
+
+function redactedArtifactPayload(type: string, payload: unknown): unknown {
+  const parsed = ArtifactRecordedEventSchema.parse({ type, payload }).payload as Readonly<Record<string, unknown>>;
+  const artifact = parsed["artifact"] as Readonly<Record<string, unknown>>;
+  const evidence = parsed["evidence"] as Readonly<Record<string, unknown>>;
+  const safeArtifact = {
+    artifactId: artifact["artifactId"],
+    taskId: artifact["taskId"],
+    kind: artifact["kind"],
+    sha256: artifact["sha256"],
+    createdAt: artifact["createdAt"],
+  };
+  if (type === "artifact.patch_recorded") {
+    return { artifact: safeArtifact, evidence: {
+      diffSha256: evidence["diffSha256"],
+      changedContentSha256: evidence["changedContentSha256"],
+    } };
+  }
+  if (type === "artifact.validation_report_recorded") {
+    return { artifact: safeArtifact, ...redactedTaskValidationPayload(evidence) as object };
+  }
+  if (type === "artifact.review_report_recorded") {
+    return { artifact: safeArtifact, evidence: {
+      reviewerId: evidence["reviewerId"], approved: evidence["approved"],
+      diffSha256: evidence["diffSha256"], validationSha256: evidence["validationSha256"],
+      decidedAt: evidence["decidedAt"],
+    } };
+  }
+  return { artifact: safeArtifact, evidence: {
+    taskId: evidence["taskId"], projectId: evidence["projectId"],
+    sourceCommit: evidence["sourceCommit"], resultCommit: evidence["resultCommit"],
+    outcome: evidence["outcome"],
+  }, phase: parsed["phase"] ?? null };
+}
+
 export function agentTailEventToJsonLine(event: AgentTailEvent): string {
   return `${JSON.stringify(event)}\n`;
 }
 
 function assertAgentTailCompatibleEvent(event: StoredEvent): void {
+  if (!isArtifactRecordedEventType(event.type) &&
+    !AGENT_TAIL_EVENT_TYPES.includes(event.type as AgentTailEventType)) {
+    throw new Error("Agent Tail projection policy does not recognize the event type");
+  }
+  if (!isArtifactRecordedEventType(event.type)) {
+    AGENT_TAIL_PAYLOAD_SCHEMAS[event.type as AgentTailEventType].parse(event.payload);
+  }
   for (const [field, value] of [
     ["eventId", event.eventId],
     ["streamId", event.streamId],
@@ -158,6 +455,71 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
   if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(event.recordedAt)) {
     throw new Error("Agent Tail timestamp must include a timezone");
   }
+}
+
+const SAFE_FIELDS_BY_EVENT = new Map<string, readonly string[]>([
+  ["task.created", ["projectId"]],
+  ["task.started", ["workerId"]],
+  ["task.failed", ["outcome", "evidenceSha256"]],
+  ["task.cancelled", ["outcome"]], ["task.timed_out", ["outcome"]],
+  ["task.denied", ["outcome", "reviewerId", "diffSha256", "validationSha256"]],
+  ["task.review_requested", ["reviewId", "diffSha256", "validationSha256"]],
+  ["task.review_approved", ["reviewerId", "diffSha256", "validationSha256", "approved"]],
+  ["task.integration_observed", ["outcome", "receiptSha256"]],
+  ["task.integration_prepared", ["outcome", "receiptSha256"]],
+  ["milestone.created", ["projectId"]],
+  ["milestone.completed", ["outcome"]], ["milestone.failed", ["outcome"]],
+  ["milestone.cancelled", ["outcome"]], ["milestone.denied", ["outcome"]],
+  ["milestone.timed_out", ["outcome"]],
+]);
+
+function projectExactSafeFields(type: string, payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return {};
+  const fields = SAFE_FIELDS_BY_EVENT.get(type) ?? [];
+  const safe: Record<string, unknown> = {};
+  const record = payload as Readonly<Record<string, unknown>>;
+  for (const key of fields) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (key.endsWith("Sha256") || key.endsWith("Digest")) {
+      if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new Error("Agent Tail digest field is invalid");
+    } else if (key.endsWith("Id")) {
+      if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) throw new Error("Agent Tail identity field is invalid");
+    } else if (key.endsWith("At")) {
+      if (typeof value !== "string" || !Number.isFinite(Date.parse(value)) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) throw new Error("Agent Tail timestamp field is invalid");
+    } else if (key === "outcome") {
+      if (typeof value !== "string" || !["completed", "cancelled", "timed_out", "failed", "denied", "uncertain"].includes(value)) throw new Error("Agent Tail outcome field is invalid");
+    } else if (typeof value !== "boolean" && (!Number.isSafeInteger(value) || typeof value !== "number")) {
+      throw new Error("Agent Tail safe scalar field is invalid");
+    }
+    safe[key] = value;
+  }
+  return safe;
+}
+
+function redactedWriterCompletedPayload(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return {};
+  const record = payload as Readonly<Record<string, unknown>>;
+  const boundary = typeof record["networkBoundary"] === "object" && record["networkBoundary"] !== null
+    ? record["networkBoundary"] as Readonly<Record<string, unknown>> : {};
+  const networkBoundary: Record<string, unknown> = {};
+  if (boundary["modelTools"] === "denied") networkBoundary["modelTools"] = "denied";
+  if (boundary["harnessProviderTransport"] === "user_os_network_authority") {
+    networkBoundary["harnessProviderTransport"] = "user_os_network_authority";
+  }
+  for (const key of ["networkDisabled", "nativeWebToolsDenied", "mcpDenied"] as const) {
+    if (typeof boundary[key] === "boolean") networkBoundary[key] = boundary[key];
+  }
+  if (typeof boundary["mode"] === "string" && ["denied", "declared", "model_provider_only"].includes(boundary["mode"])) {
+    networkBoundary["mode"] = boundary["mode"];
+  }
+  if (typeof boundary["configurationDigest"] === "string" && /^[a-f0-9]{64}$/.test(boundary["configurationDigest"])) {
+    networkBoundary["configurationDigest"] = boundary["configurationDigest"];
+  }
+  return {
+    ...projectExactSafeFields("task.failed", payload) as object,
+    networkBoundary,
+  };
 }
 
 function spanIdFor(event: StoredEvent): string {
@@ -682,6 +1044,92 @@ function redactedWorkerPayload(type: string, payload: unknown): unknown {
       capabilityDigest: digestCanonical(binding.envelope.capabilities),
       effectDigest: digestCanonical(binding.envelope.effects),
     }),
+  });
+}
+
+function redactedOpenCodeMilestonePayload(type: string, payload: unknown): unknown {
+  const parsed = parseOpenCodeMilestonePayload(type, payload) as Readonly<Record<string, unknown>>;
+  if (type === "milestone.task_running") {
+    const requestedModel = parsed["requestedModel"] as Readonly<Record<string, unknown>>;
+    const budget = parsed["budget"] as Readonly<Record<string, unknown>>;
+    const boundary = parsed["securityBoundary"] as Readonly<Record<string, unknown>>;
+    const readableScopes = boundary["readableScopes"] as readonly unknown[];
+    const forbiddenPaths = boundary["forbiddenPaths"] as readonly unknown[];
+    return Object.freeze({
+      taskId: parsed["taskId"],
+      capsuleId: parsed["capsuleId"],
+      actorId: parsed["actorId"],
+      role: parsed["role"],
+      harness: parsed["harness"],
+      requestedModel: Object.freeze({
+        capabilityId: requestedModel["capabilityId"],
+        transportModelId: requestedModel["transportModelId"],
+      }),
+      budget: Object.freeze({
+        maxSeconds: budget["maxSeconds"],
+        maxCostUsd: budget["maxCostUsd"],
+        maxInputTokens: budget["maxInputTokens"],
+        maxOutputTokens: budget["maxOutputTokens"],
+      }),
+      timeoutMs: parsed["timeoutMs"],
+      securityBoundary: Object.freeze({
+        repository: boundary["repository"],
+        scratch: boundary["scratch"],
+        network: boundary["network"],
+        home: boundary["home"],
+        credentials: boundary["credentials"],
+        shell: boundary["shell"],
+        repositoryRevision: boundary["repositoryRevision"],
+        readableScopeCount: readableScopes.length,
+        readableScopesDigest: digestCanonical(readableScopes),
+        forbiddenPathCount: forbiddenPaths.length,
+        forbiddenPathsDigest: digestCanonical(forbiddenPaths),
+      }),
+    });
+  }
+  const measuredHarness = parsed["measuredHarness"] as Readonly<Record<string, unknown>> | null;
+  const model = parsed["model"] as Readonly<Record<string, unknown>> | null;
+  const evidence = parsed["evidence"] as readonly Readonly<Record<string, unknown>>[];
+  return Object.freeze({
+    taskId: parsed["taskId"],
+    capsuleId: parsed["capsuleId"],
+    outcome: parsed["outcome"],
+    actorId: parsed["actorId"],
+    role: parsed["role"],
+    harness: parsed["harness"],
+    capabilityId: parsed["capabilityId"],
+    transportModelId: parsed["transportModelId"],
+    measuredHarness: measuredHarness === null ? null : Object.freeze({
+      version: measuredHarness["version"],
+      executableSha256: measuredHarness["executableSha256"],
+    }),
+    model: model === null ? null : Object.freeze({
+      id: model["id"],
+      provider: model["provider"],
+      configurationDigest: model["configurationDigest"] ?? null,
+    }),
+    evidenceCount: evidence.length,
+    evidence: evidence.map((item) => {
+      const provenance = item["provenance"] as Readonly<Record<string, unknown>>;
+      const sourceEvidenceIds = (item["sourceEvidenceIds"] as readonly unknown[] | undefined) ?? [];
+      return Object.freeze({
+        kind: item["kind"],
+        sha256: item["sha256"],
+        sourceEvidenceCount: sourceEvidenceIds.length,
+        sourceEvidenceIds,
+        provenance: Object.freeze({
+          harness: provenance["harness"],
+          capabilityId: provenance["capabilityId"],
+          transportModelId: provenance["transportModelId"],
+          repositoryRevision: provenance["repositoryRevision"],
+          providerConfigurationDigest: provenance["providerConfigurationDigest"] ?? null,
+        }),
+      });
+    }),
+    cleanup: parsed["cleanup"],
+    brokerTransport: parsed["brokerTransport"],
+    brokerFailureReason: parsed["brokerFailureReason"],
+    brokerFailureTool: parsed["brokerFailureTool"] ?? null,
   });
 }
 
