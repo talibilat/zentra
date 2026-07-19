@@ -170,6 +170,67 @@ describe("BoundedTicketIntake real filesystem", () => {
     ]);
   });
 
+  it("counts rejected regular files before accepted files against effective maxFiles", async () => {
+    const root = temporaryDirectory();
+    writeFileSync(path.join(root, "a.bin"), Buffer.from([0x41, 0x00, 0x42]));
+    writeFileSync(path.join(root, "b.txt"), "accepted");
+    writeFileSync(path.join(root, "c.txt"), "must-not-open");
+    const opened: string[] = [];
+
+    const request = directoryRequest(root, {
+      maxFileBytes: 32,
+      maxFiles: 3,
+      maxTotalBytes: 64,
+      maxDepth: 1,
+    });
+    const snapshot = await new BoundedTicketIntake({
+      testHooks: { beforeFileOpen: (relativePath) => { opened.push(relativePath); } },
+    }).collect({
+      ...request,
+      run: { ...request.run, budget: { ...request.run.budget, maxSourceFiles: 2 } },
+    });
+
+    expect(opened).toEqual(["a.bin", "b.txt"]);
+    expect(snapshot.limits.maxFiles).toBe(2);
+    expect(snapshot.sources.map((source) => source.relativePath)).toEqual(["b.txt"]);
+    expect(snapshot.rejected.map((item) => [item.relativePath, item.reason])).toEqual([
+      ["a.bin", "binary"],
+      ["c.txt", "source_count_exceeded"],
+    ]);
+  });
+
+  it("counts all rejected regular files against maxFiles", async () => {
+    const root = temporaryDirectory();
+    writeFileSync(path.join(root, "a.large"), "oversized");
+    writeFileSync(path.join(root, "b.bin"), Buffer.from([0x41, 0x00, 0x42]));
+    writeFileSync(path.join(root, "c.invalid"), Buffer.from([0xc3, 0x28]));
+    const opened: string[] = [];
+
+    let error: unknown;
+    try {
+      await new BoundedTicketIntake({
+        testHooks: { beforeFileOpen: (relativePath) => { opened.push(relativePath); } },
+      }).collect(directoryRequest(root, {
+        maxFileBytes: 4,
+        maxFiles: 2,
+        maxTotalBytes: 16,
+        maxDepth: 1,
+      }));
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(opened).toEqual(["b.bin"]);
+    expect(error).toMatchObject({
+      code: "no_accepted_sources",
+      rejections: [
+        expect.objectContaining({ relativePath: "a.large", reason: "file_too_large" }),
+        expect.objectContaining({ relativePath: "b.bin", reason: "binary" }),
+        expect.objectContaining({ relativePath: "c.invalid", reason: "source_count_exceeded" }),
+      ],
+    });
+  });
+
   it("bounds incremental directory enumeration independently from maxFiles", async () => {
     const root = temporaryDirectory();
     writeFileSync(path.join(root, "a.txt"), "a");
@@ -206,6 +267,76 @@ describe("BoundedTicketIntake real filesystem", () => {
         reason: "path_escape",
       }),
     ]);
+  });
+
+  it("counts a backslash-named regular file before an accepted source against maxFiles", async () => {
+    const root = temporaryDirectory();
+    writeFileSync(path.join(root, "a\\invalid"), "invalid identity");
+    writeFileSync(path.join(root, "z.txt"), "must-not-open");
+    const opened: string[] = [];
+
+    let error: unknown;
+    try {
+      await new BoundedTicketIntake({
+        testHooks: { beforeFileOpen: (relativePath) => { opened.push(relativePath); } },
+      }).collect(directoryRequest(root, {
+        maxFileBytes: 32,
+        maxFiles: 1,
+        maxTotalBytes: 64,
+        maxDepth: 1,
+      }));
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(opened).toEqual([]);
+    expect(error).toMatchObject({
+      code: "no_accepted_sources",
+      rejections: [
+        expect.objectContaining({
+          relativePath: `$path-sha256:${sha256("a\\invalid")}`,
+          reason: "path_escape",
+        }),
+        expect.objectContaining({ relativePath: "z.txt", reason: "source_count_exceeded" }),
+      ],
+    });
+  });
+
+  it("counts an overlong-named regular file before an accepted source against maxFiles", async () => {
+    const root = temporaryDirectory();
+    const overlong = "a".repeat(17);
+    writeFileSync(path.join(root, overlong), "invalid identity");
+    writeFileSync(path.join(root, "z.txt"), "must-not-open");
+    const opened: string[] = [];
+
+    let error: unknown;
+    try {
+      await new BoundedTicketIntake({
+        testHooks: {
+          relativePathByteLimit: 16,
+          beforeFileOpen: (relativePath) => { opened.push(relativePath); },
+        },
+      }).collect(directoryRequest(root, {
+        maxFileBytes: 32,
+        maxFiles: 1,
+        maxTotalBytes: 64,
+        maxDepth: 1,
+      }));
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(opened).toEqual([]);
+    expect(error).toMatchObject({
+      code: "no_accepted_sources",
+      rejections: [
+        expect.objectContaining({
+          relativePath: `$path-sha256:${sha256(overlong)}`,
+          reason: "path_too_long",
+        }),
+        expect.objectContaining({ relativePath: "z.txt", reason: "source_count_exceeded" }),
+      ],
+    });
   });
 
   it("fails empty and wholly rejected directories with retained rejection evidence", async () => {

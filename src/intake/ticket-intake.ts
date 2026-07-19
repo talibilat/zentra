@@ -151,10 +151,12 @@ export class IntakeError extends Error {
 /** Trusted-project race hardening; this is not an OS sandbox against a malicious same-user process. */
 export class BoundedTicketIntake {
   private readonly readChunkBytes: number;
+  private readonly relativePathByteLimit: number;
   private readonly testHooks: {
     readonly beforeFileOpen?: (relativePath: string) => void | Promise<void>;
     readonly beforeDescriptorOpen?: (relativePath: string) => void | Promise<void>;
     readonly afterDirectoryEnumerated?: (relativePath: string) => void | Promise<void>;
+    readonly relativePathByteLimit?: number;
   };
 
   constructor(options: {
@@ -163,13 +165,21 @@ export class BoundedTicketIntake {
       readonly beforeFileOpen?: (relativePath: string) => void | Promise<void>;
       readonly beforeDescriptorOpen?: (relativePath: string) => void | Promise<void>;
       readonly afterDirectoryEnumerated?: (relativePath: string) => void | Promise<void>;
+      readonly relativePathByteLimit?: number;
     };
   } = {}) {
     const chunkBytes = options.readChunkBytes ?? DEFAULT_READ_CHUNK_BYTES;
+    const relativePathByteLimit = options.testHooks?.relativePathByteLimit ?? MAX_RELATIVE_PATH_BYTES;
     if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 1 || chunkBytes > 1024 * 1024) {
       throw new IntakeError("invalid_limits", "intake read chunk limit is invalid");
     }
+    if (!Number.isSafeInteger(relativePathByteLimit)
+      || relativePathByteLimit < 1
+      || relativePathByteLimit > MAX_RELATIVE_PATH_BYTES) {
+      throw new IntakeError("invalid_limits", "intake relative path limit is invalid");
+    }
     this.readChunkBytes = chunkBytes;
+    this.relativePathByteLimit = relativePathByteLimit;
     this.testHooks = options.testHooks ?? {};
   }
 
@@ -244,6 +254,7 @@ export class BoundedTicketIntake {
     const rejected: RejectedTicketSource[] = [];
     let totalBytes = 0;
     let examinedEntries = 0;
+    let examinedRegularFiles = 0;
     let stopped = false;
     const reservedCanonicalRoots = new Set<string>();
     for (const reservedRoot of reservedRoots) {
@@ -264,7 +275,7 @@ export class BoundedTicketIntake {
       bytesRead = 0,
     ): void => {
       rejected.push(rejection(
-        boundedPath(relativePath),
+        boundedPath(relativePath, this.relativePathByteLimit),
         reason,
         sizeBytes,
         digest,
@@ -331,28 +342,40 @@ export class BoundedTicketIntake {
       for (const name of names) {
         if (stopped) break;
         const rawRelative = relativeDirectory === "" ? name : `${relativeDirectory}/${name}`;
-        const relativePath = normalizeSourceRelativePath(rawRelative);
-        if (relativePath === null) {
-          reject(rawRelative, rawRelative.includes("\0") || Buffer.byteLength(rawRelative) > MAX_RELATIVE_PATH_BYTES
-            ? "path_too_long"
-            : "path_escape", null, null, null);
-          continue;
-        }
-
         const absolute = path.join(current.expectedPath, name);
         let stat: BigIntStats;
         try {
           await validateDirectoryFrames(frames);
           stat = await lstat(absolute, { bigint: true });
         } catch {
-          reject(relativePath, "changed_during_read", null, null, null);
+          reject(rawRelative, "changed_during_read", null, null, null);
           continue;
         }
-        if (stat.isSymbolicLink()) {
+        const isSymbolicLink = stat.isSymbolicLink();
+        const isDirectory = stat.isDirectory();
+        const isRegularFile = stat.isFile();
+        if (isRegularFile) {
+          examinedRegularFiles += 1;
+          if (examinedRegularFiles > limits.maxFiles) {
+            reject(rawRelative, "source_count_exceeded", null, null, stat);
+            stopped = true;
+            break;
+          }
+        }
+
+        const relativePath = normalizeSourceRelativePathWithin(rawRelative, this.relativePathByteLimit);
+        if (relativePath === null) {
+          reject(rawRelative, rawRelative.includes("\0")
+            || Buffer.byteLength(rawRelative) > this.relativePathByteLimit
+            ? "path_too_long"
+            : "path_escape", null, null, stat);
+          continue;
+        }
+        if (isSymbolicLink) {
           reject(relativePath, "symlink", null, null, stat);
           continue;
         }
-        if (stat.isDirectory()) {
+        if (isDirectory) {
           let canonicalDirectory: string;
           try {
             canonicalDirectory = await realpath(absolute);
@@ -380,12 +403,7 @@ export class BoundedTicketIntake {
           }
           continue;
         }
-        if (stat.isFile() && sources.length >= limits.maxFiles) {
-          reject(relativePath, "source_count_exceeded", null, null, stat);
-          stopped = true;
-          break;
-        }
-        if (!stat.isFile()) {
+        if (!isRegularFile) {
           reject(relativePath, "special_file", sizeNumber(stat), null, stat);
           continue;
         }
@@ -546,6 +564,10 @@ export function decodeTicketText(bytes: Uint8Array): TicketTextDecodeResult {
 }
 
 export function normalizeSourceRelativePath(candidate: string): string | null {
+  return normalizeSourceRelativePathWithin(candidate, MAX_RELATIVE_PATH_BYTES);
+}
+
+function normalizeSourceRelativePathWithin(candidate: string, byteLimit: number): string | null {
   if (candidate.length === 0
     || candidate.includes("\0")
     || candidate.includes("\\")
@@ -557,7 +579,7 @@ export function normalizeSourceRelativePath(candidate: string): string | null {
   const components = portable.split("/");
   if (components.some((component) => component === "" || component === "." || component === "..")) return null;
   const normalized = components.join("/");
-  return Buffer.byteLength(normalized, "utf8") <= MAX_RELATIVE_PATH_BYTES ? normalized : null;
+  return Buffer.byteLength(normalized, "utf8") <= byteLimit ? normalized : null;
 }
 
 function assertRunBoundary(request: TicketIntakeRequest): void {
@@ -774,11 +796,11 @@ function isReservedPath(candidate: string, reservedRoots: ReadonlySet<string>): 
   return false;
 }
 
-function boundedPath(relativePath: string): string {
+function boundedPath(relativePath: string, byteLimit = MAX_RELATIVE_PATH_BYTES): string {
   if (relativePath.length > 0
     && !relativePath.includes("\0")
     && !relativePath.includes("\\")
-    && Buffer.byteLength(relativePath, "utf8") <= MAX_RELATIVE_PATH_BYTES) {
+    && Buffer.byteLength(relativePath, "utf8") <= byteLimit) {
     return relativePath;
   }
   return `$path-sha256:${sha256(relativePath)}`;
