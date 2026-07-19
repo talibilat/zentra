@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "sourceDateEpoch": 1767225600,
+  "inputs": {
+    "importManifestSha256": "381a82b35880255aff2f969b242fc31742002a9fcc86a45bf179e602f17fa3fb",
+    "buildRequirementsSha256": "f1e46aafaa2cfa92e4daa0ef0ef98cd740fc777704f20ecb58cbab8376e6d033",
+    "entrypointSha256": "17bbef375ca12278414d4437cd439dd5c135efec86087860e261975c0e382a6d"
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.12.0",
+    "platform": "darwin-arm64",
+    "executableSha256": "f4cd716d4b54f205398bec6932cc59361b087494ca2ddb157a5e8631d4d6f863"
+  },
+  "packages": {
+    "altgraph": "0.17.4",
+    "macholib": "1.16.3",
+    "packaging": "25.0",
+    "pyinstaller": "6.14.2",
+    "pyinstaller-hooks-contrib": "2025.5",
+    "setuptools": "80.9.0"
+  }
+}

@@ -285,6 +285,42 @@ export {
   discoverProject,
   initializeProjectRuntime,
 } from "./runtime/repository-runtime.js";
+export { AgentTrailSupervisor } from "./agenttrail/agenttrail-supervisor.js";
+export type {
+  AgentTrailEvidence,
+  AgentTrailFailedEvidence,
+  AgentTrailReady,
+  AgentTrailReadyEvidence,
+  AgentTrailRestartedEvidence,
+  AgentTrailStartRequest,
+  AgentTrailStartingEvidence,
+  AgentTrailSupervisorOptions,
+} from "./agenttrail/agenttrail-supervisor.js";
+export {
+  AGENTTRAIL_EVENT_SCHEMA_VERSION,
+  AgentTrailEvidenceSchema,
+  AgentTrailFailedEvidenceSchema,
+  AgentTrailReadyEvidenceSchema,
+  AgentTrailRestartedEvidenceSchema,
+  AgentTrailStartingEvidenceSchema,
+  JournalAgentTrailEvidenceSink,
+  agentTrailStreamId,
+  replayAgentTrailEvidence,
+} from "./agenttrail/agenttrail-events.js";
+export type {
+  AgentTrailJournalContext,
+  ReplayAgentTrailEvidenceOptions,
+} from "./agenttrail/agenttrail-events.js";
+export { createJournaledAgentTrailSupervisor } from "./agenttrail/agenttrail-composition.js";
+export type {
+  JournaledAgentTrail,
+  JournaledAgentTrailOptions,
+} from "./agenttrail/agenttrail-composition.js";
+export {
+  packagedAgentTrailRoot,
+  resolvePackagedAgentTrail,
+} from "./agenttrail/package-attestation.js";
+export type { PackagedAgentTrail } from "./agenttrail/package-attestation.js";
 export {
   RUN_SCHEMA_VERSION,
   IntakeClosureReferenceSchema,

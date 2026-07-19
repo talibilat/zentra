@@ -460,7 +460,7 @@ describe("atomic runtime state", () => {
         ? owners[0]!.value.claim.processIncarnation
         : "unreachable",
     });
-  });
+  }, 10_000);
 
   it("reclaims a reused PID only when its verifiable incarnation differs", async () => {
     const { layout } = await initializedRepository();

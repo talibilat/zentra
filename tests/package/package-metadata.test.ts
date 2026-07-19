@@ -206,7 +206,7 @@ function copyPackageSource(destination: string): void {
     const source = path.join(repositoryRoot, name);
     if (existsSync(source)) copyFileSync(source, path.join(destination, name));
   }
-  for (const name of ["src", "fixtures", "scripts"]) {
+  for (const name of ["agenttrail", "src", "fixtures", "scripts"]) {
     cpSync(path.join(repositoryRoot, name), path.join(destination, name), { recursive: true });
   }
   symlinkSync(path.join(repositoryRoot, "node_modules"), path.join(destination, "node_modules"));
