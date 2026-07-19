@@ -73,6 +73,24 @@ describe("generic worker lifecycle", () => {
     journal.close();
   });
 
+  it("records at most one durable active-worker heartbeat per 60 seconds", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const service = new WorkerLifecycleService(journal);
+    service.bind(binding("writer"));
+    expect(() => service.heartbeat("task-1", "writer", "process-1",
+      "2026-07-19T00:00:00.000Z")).toThrow(/active worker/i);
+    service.start("task-1", "writer");
+    expect(service.heartbeat("task-1", "writer", "process-1",
+      "2026-07-19T00:00:00.000Z")).toBe(true);
+    expect(service.heartbeat("task-1", "writer", "process-1",
+      "2026-07-19T00:00:59.999Z")).toBe(false);
+    expect(service.heartbeat("task-1", "writer", "process-1",
+      "2026-07-19T00:01:00.000Z")).toBe(true);
+    expect(journal.readStream(workerStreamId("task-1")).filter((event) =>
+      event.type === "worker.heartbeat")).toHaveLength(2);
+    journal.close();
+  });
+
   it("accepts a harness-neutral nested fixture with semantically narrower paths and no effect authority", () => {
     const journal = new SqliteEventJournal(":memory:");
     const service = new WorkerLifecycleService(journal);

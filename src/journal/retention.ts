@@ -1765,11 +1765,13 @@ export class ArchivedEventJournal implements DurablePagedEventJournal, AtomicEve
         nextPosition: events.at(-1)?.globalPosition ?? afterPosition,
         hasMore: (events.at(-1)?.globalPosition ?? afterPosition) < combinedHead,
         bytes,
+        highWaterPosition: combinedHead,
       };
     }
     return {
       ...archived,
       hasMore: archived.nextPosition < combinedHead,
+      highWaterPosition: combinedHead,
     };
   }
 

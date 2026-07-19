@@ -44,6 +44,7 @@ export interface GlobalEventPage {
   readonly nextPosition: number;
   readonly hasMore: boolean;
   readonly bytes: number;
+  readonly highWaterPosition?: number;
 }
 
 export interface StreamEventPage {

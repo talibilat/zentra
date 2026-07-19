@@ -99,7 +99,7 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "milestone.agent_resources_prepared", "milestone.agent_cleanup_observed",
   "milestone.completed", "milestone.cancelled", "milestone.denied",
   "milestone.timed_out", "milestone.failed",
-  "worker.bound", "worker.started", "worker.observed", "worker.uncertain",
+  "worker.bound", "worker.started", "worker.heartbeat", "worker.observed", "worker.uncertain",
   "worker.cleanup_observed", "worker.terminal",
   "release.created", "release.worktree_intent", "release.environment_intent",
   "release.refs_snapshot", "release.refs_verified", "release.step_started",
@@ -252,6 +252,7 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "milestone.failed": milestoneTerminal,
   "worker.bound": parseWith((payload) => parseWorkerEventPayload("worker.bound", payload)),
   "worker.started": parseWith((payload) => parseWorkerEventPayload("worker.started", payload)),
+  "worker.heartbeat": parseWith((payload) => parseWorkerEventPayload("worker.heartbeat", payload)),
   "worker.observed": parseWith((payload) => parseWorkerEventPayload("worker.observed", payload)),
   "worker.uncertain": parseWith((payload) => parseWorkerEventPayload("worker.uncertain", payload)),
   "worker.cleanup_observed": parseWith((payload) => parseWorkerEventPayload("worker.cleanup_observed", payload)),
@@ -347,6 +348,22 @@ export interface AgentTailOperation {
   readonly status: string;
 }
 
+export interface AgentTailRelationship {
+  readonly type: string;
+  readonly event_id: string;
+}
+
+export interface AgentTailIdentities {
+  readonly project_id?: string;
+  readonly run_id?: string;
+  readonly milestone_id?: string;
+  readonly task_id?: string;
+  readonly pod_id?: string;
+  readonly worker_id?: string;
+  readonly process_incarnation?: string;
+  readonly emitter_id: string;
+}
+
 export interface AgentTailEvent {
   readonly schema_version: string;
   readonly event_id: string;
@@ -359,6 +376,8 @@ export interface AgentTailEvent {
   readonly kind: string;
   readonly actor: AgentTailActor;
   readonly operation: AgentTailOperation;
+  readonly relationships: readonly AgentTailRelationship[];
+  readonly identities: AgentTailIdentities;
   readonly attributes: {
     readonly zentra: {
       readonly event_id: string;
@@ -385,7 +404,26 @@ export interface AgentTailEvent {
 export function storedEventsToAgentTailEvents(
   events: readonly StoredEvent[],
 ): readonly AgentTailEvent[] {
-  return Object.freeze(events.map((event) => storedEventToAgentTailEvent(event)));
+  const eventIds = new Set<string>();
+  const unique: StoredEvent[] = [];
+  for (const event of events) {
+    if (eventIds.has(event.eventId)) throw new Error("Agent Tail batch contains a duplicate event identity");
+    eventIds.add(event.eventId);
+    unique.push(event);
+  }
+  return Object.freeze(unique.map((event) => storedEventToAgentTailEvent(event)));
+}
+
+export function isAgentTailProjectableEventType(type: string): boolean {
+  return isArtifactRecordedEventType(type) ||
+    AGENT_TAIL_EVENT_TYPES.includes(type as AgentTailEventType);
+}
+
+export function assertAgentTailExternalIdentity(value: string, label: string): void {
+  if (value.length < 1 || value.length > 256 || /[\u0000\r\n]/.test(value)) {
+    throw new Error(`Agent Tail ${label} is invalid`);
+  }
+  assertNoCredentialShapes(value);
 }
 
 export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent {
@@ -431,7 +469,7 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     : isPotentialOpenCodeRoleEvent(event)
       ? redactedOpenCodeMilestonePayload(event.type, event.payload)
       : projectExactSafeFields(event.type, event.payload);
-  return Object.freeze({
+  const projected = {
     schema_version: AGENT_TAIL_SCHEMA_VERSION,
     event_id: event.eventId,
     trace_id: event.correlationId,
@@ -446,6 +484,11 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       name: operationName(event),
       status: operationStatus(event),
     }),
+    relationships: Object.freeze(event.causationId === null ? [] : [Object.freeze({
+      type: "caused_by",
+      event_id: event.causationId,
+    })]),
+    identities: Object.freeze(identitiesFor(event, event.payload)),
     attributes: Object.freeze({
       zentra: Object.freeze({
         event_id: event.eventId,
@@ -459,7 +502,9 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       }),
     }),
     payload: cloneJson(payload),
-  });
+  } satisfies AgentTailEvent;
+  assertNoCredentialShapes(projected);
+  return Object.freeze(projected);
 }
 
 const ATTENTION_EVENT_TYPES = new Set<string>([
@@ -596,7 +641,7 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
       throw new Error(`Agent Tail ${field} must be a nonempty string`);
     }
   }
-  if (!Number.isInteger(event.globalPosition) || event.globalPosition < 0) {
+  if (!Number.isSafeInteger(event.globalPosition) || event.globalPosition < 0) {
     throw new Error("Agent Tail sequence must be a non-negative integer");
   }
   if (!Number.isInteger(event.streamVersion) || event.streamVersion < 1) {
@@ -606,9 +651,63 @@ function assertAgentTailCompatibleEvent(event: StoredEvent): void {
     throw new Error("Agent Tail timestamp must be ISO-like");
   }
   const parsed = Date.parse(event.recordedAt);
-  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(event.recordedAt)) {
+  if (!Number.isFinite(parsed) || !/(?:Z|[+-]\d{2}:\d{2})$/.test(event.recordedAt) ||
+    !hasValidCalendarComponents(event.recordedAt)) {
     throw new Error("Agent Tail timestamp must include a timezone");
   }
+}
+
+function hasValidCalendarComponents(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(value);
+  if (match === null) return false;
+  const [, yearValue, monthValue, dayValue, hourValue, minuteValue, secondValue] = match;
+  const year = Number(yearValue);
+  const month = Number(monthValue);
+  const day = Number(dayValue);
+  const hour = Number(hourValue);
+  const minute = Number(minuteValue);
+  const second = Number(secondValue);
+  if (year < 1 || year > 9999 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  return day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+const CREDENTIAL_SHAPE = /(?:\bBearer\s+[^\s,;"']+|\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[opusr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{82,}\b|\bglpat-[A-Za-z0-9_-]{20,}\b|\bxox[bpar]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35,}|-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----)/i;
+
+function assertNoCredentialShapes(value: unknown): void {
+  if (typeof value === "string") {
+    if (CREDENTIAL_SHAPE.test(value)) throw new Error("Agent Tail projection contains a credential-shaped value");
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoCredentialShapes(item);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, item] of Object.entries(value)) {
+      if (CREDENTIAL_SHAPE.test(key)) throw new Error("Agent Tail projection contains a credential-shaped key");
+      assertNoCredentialShapes(item);
+    }
+  }
+}
+
+function identitiesFor(event: StoredEvent, payload: unknown): AgentTailIdentities {
+  const identities: Record<string, string> = { emitter_id: AGENT_TAIL_JOURNAL_EMITTER_ID };
+  const assign = (target: string, value: string | null): void => {
+    if (value !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) identities[target] = value;
+  };
+  assign("project_id", payloadString(payload, "projectId"));
+  assign("run_id", payloadString(payload, "runId") ??
+    (event.type.startsWith("run.") || event.type.startsWith("preflight.")
+      ? event.streamId.replace(/^run:/, "") : null));
+  assign("milestone_id", payloadString(payload, "milestoneId") ??
+    (event.type.startsWith("milestone.") ? event.streamId : null));
+  assign("task_id", payloadString(payload, "taskId") ??
+    (event.type.startsWith("task.") || event.type.startsWith("artifact.") ? event.streamId : null));
+  assign("pod_id", payloadString(payload, "podId"));
+  assign("worker_id", payloadString(payload, "workerId") ?? payloadString(payload, "actorId"));
+  assign("process_incarnation", payloadString(payload, "processIncarnation") ??
+    payloadString(payloadRecord(payload, "process"), "processIncarnation"));
+  return identities as unknown as AgentTailIdentities;
 }
 
 const SAFE_FIELDS_BY_EVENT = new Map<string, readonly string[]>([
@@ -905,7 +1004,7 @@ function operationStatus(event: StoredEvent): string {
     return payloadString(payloadRecord(event.payload, "decision"), "status") === "allowed" ? "completed" : "waiting";
   }
   if (type === "worker.bound") return "waiting";
-  if (type === "worker.started" || type === "worker.observed") return "running";
+  if (type === "worker.started" || type === "worker.heartbeat" || type === "worker.observed") return "running";
   if (type === "worker.cleanup_observed") {
     return payloadString(event.payload, "outcome") === "completed" ? "completed" : "waiting";
   }

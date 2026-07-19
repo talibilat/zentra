@@ -123,6 +123,21 @@ export type {
   ScopeDependencies,
 } from "./attention/attention-dispatcher.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";
+export { AgentTailSegmentStore } from "./observability/agent-tail-segment-store.js";
+export type {
+  AgentTailSegmentDescriptor,
+  AgentTailSegmentLimits,
+  AgentTailTraceReport,
+} from "./observability/agent-tail-segment-store.js";
+export {
+  AgentTailTraceService,
+  createSegmentedAgentTailProjection,
+} from "./observability/agent-tail-trace.js";
+export type {
+  AgentTailEvent,
+  AgentTailIdentities,
+  AgentTailRelationship,
+} from "./observability/agent-tail.js";
 export { loadModelSheet, parseModelSheetMarkdown } from "./policy/model-sheet.js";
 export type { ModelCapability, ModelSheet } from "./policy/model-sheet.js";
 export { MilestoneRegistry } from "./milestones/milestone-registry.js";

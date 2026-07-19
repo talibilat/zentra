@@ -425,7 +425,10 @@ export class OpenCodeReadOnlyAgent {
     }
 
     const deadline = AbortSignal.timeout(request.timeoutMs);
-    const signal = AbortSignal.any([request.signal, deadline]);
+    const heartbeatFailure = new AbortController();
+    const signal = AbortSignal.any([request.signal, deadline, heartbeatFailure.signal]);
+    const heartbeat = workers.superviseHeartbeats(request.taskId, workerId, signal,
+      (error) => heartbeatFailure.abort(error));
     let capabilityAttention: RoleCapabilityDecision | null = null;
     const researchCapability = roleBinding === null ? undefined : {
       execute: async (rawResearchRequest: unknown, policy: unknown, researchSignal: AbortSignal): Promise<WebResearchResult> => {
@@ -523,6 +526,7 @@ export class OpenCodeReadOnlyAgent {
         brokerFailureReason: "broker_receipt_invalid",
       };
     } finally {
+      heartbeat.close();
       try {
         rmSync(view.path, { recursive: true, force: true });
         repositoryViewAbsent = true;

@@ -171,6 +171,13 @@ Add `--agent-tail-stream` and pipe stdout to `agent-tail -` for live stdin visua
 Agent Tail file input is a snapshot and does not follow appended files.
 In live stream mode stdout contains only Agent Tail JSONL, and Zentra writes its final operational result to stderr.
 
+The programmatic segmented projection is the restartable AgentTrail path for long-running traces.
+`createSegmentedAgentTailProjection` attaches the durable projection before run acceptance or preflight, writes owner-private immutable JSONL segments and claim manifests, and recovers publication that completed before its cursor commit without duplicating logical events.
+`AgentTailTraceService` validates and exports those canonical bytes, rebuilds repair output into a new directory from one fixed journal high-water position, and provides reconnectable journal-backed live tailing by global position.
+Unknown event families are withheld using bounded hashed alerts, and known envelopes are rejected if any externally materialized field has a canonical credential shape.
+Durable `worker.heartbeat` events are limited to one observation per active worker per 60 seconds so backfill and live views reproduce the same liveness evidence.
+The legacy `--agent-tail-jsonl` option remains a single-file compatibility projection.
+
 Run the Darwin arm64 Docker capsule conformance path with a strict external JSON policy.
 
 ```bash
