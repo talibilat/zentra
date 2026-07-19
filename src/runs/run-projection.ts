@@ -4,9 +4,11 @@ import {
   PreflightPayloadSchema,
   PreflightFailedPayloadSchema,
   RunAcceptedPayloadSchema,
+  RunAnalysisCompletedPayloadSchema,
   RunApprovalRequestedPayloadSchema,
   RunCancelledPayloadSchema,
   RunPhasePayloadSchema,
+  RunIntakeCompletedPayloadSchema,
   RunReadyPayloadSchema,
   RunReopenedPayloadSchema,
   RunResumedPayloadSchema,
@@ -70,6 +72,8 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
     cancellation: null as ReturnType<typeof RunCancelledPayloadSchema.parse> | null,
     activeProcess: accepted.process as RunProcess,
     seenProcessIncarnations: new Set([accepted.process.processIncarnation]),
+    intakeClosure: null as ReturnType<typeof RunIntakeCompletedPayloadSchema.parse>["intake"] | null,
+    intakeCompletionEventId: null as string | null,
   };
   const commandBindings = new Map<string, string>([[accepted.commandId, JSON.stringify(first.payload)]]);
 
@@ -137,11 +141,16 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
         }
         break;
       }
-      case "run.intake_completed":
-        bindPhase(commandBindings, event.payload);
+      case "run.intake_completed": {
+        const payload = RunIntakeCompletedPayloadSchema.parse(event.payload);
+        bindCommand(commandBindings, payload.commandId, event.payload);
         requireTransition(state.lifecycle, "intake", event.type);
+        if (event.causationId !== payload.intake.closureEventId) throw new Error("run intake completion is not caused by its closure");
+        state.intakeClosure = payload.intake;
+        state.intakeCompletionEventId = event.eventId;
         state.lifecycle = "analyzing";
         break;
+      }
       case "run.reopened": {
         const payload = RunReopenedPayloadSchema.parse(event.payload);
         bindCommand(commandBindings, payload.commandId, event.payload);
@@ -158,11 +167,17 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
         state.activeProcess = payload.process;
         break;
       }
-      case "run.analysis_completed":
-        bindPhase(commandBindings, event.payload);
+      case "run.analysis_completed": {
+        const payload = RunAnalysisCompletedPayloadSchema.parse(event.payload);
+        bindCommand(commandBindings, payload.commandId, event.payload);
         requireTransition(state.lifecycle, "analyzing", event.type);
+        if (state.intakeClosure === null || JSON.stringify(payload.intake) !== JSON.stringify(state.intakeClosure)) {
+          throw new Error("run analysis does not match the durable intake closure");
+        }
+        if (event.causationId !== state.intakeCompletionEventId) throw new Error("run analysis is not caused by intake completion");
         state.lifecycle = "planning";
         break;
+      }
       case "run.approval_requested": {
         const payload = RunApprovalRequestedPayloadSchema.parse(event.payload);
         bindCommand(commandBindings, payload.commandId, event.payload);

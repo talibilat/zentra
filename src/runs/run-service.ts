@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
+
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
 import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   RUN_SCHEMA_VERSION,
+  IntakeClosureReferenceSchema,
   ProjectRevisionSchema,
   RunActorSchema,
   RunBudgetSchema,
@@ -13,11 +16,23 @@ import {
   serviceStreamId,
   runStreamId,
   type ProjectRevision,
+  type IntakeClosureReference,
   type RunActor,
   type RunBudget,
   type RunProcess,
   type RunSource,
 } from "./run-contracts.js";
+import {
+  IntakeSnapshotClosedPayloadSchema,
+  SourceDiscoveredPayloadSchema,
+  SourceRejectedPayloadSchema,
+  computeIntakeArtifactAggregateSha256,
+  computeIntakeSnapshotSha256,
+} from "../intake/intake-contracts.js";
+import {
+  consumeAndVerifyIntakeArtifacts,
+  type IntakeArtifactVerificationCapability,
+} from "../intake/intake-artifact-store.js";
 import { projectRun, type RunView } from "./run-projection.js";
 
 export interface AcceptRunInput {
@@ -106,8 +121,27 @@ export class RunService {
     });
   }
 
-  completeIntake(runId: string, expectedVersion: number, commandId: string): RunView {
-    return this.appendPhase(runId, expectedVersion, commandId, "run.intake_completed");
+  completeIntake(
+    runId: string,
+    expectedVersion: number,
+    commandId: string,
+    intake: IntakeClosureReference,
+  ): RunView {
+    const current = this.require(runId);
+    if (current.lifecycle === "terminal") throw new Error("run is already terminal");
+    if (current.lifecycle !== "intake") throw new Error(`invalid run transition ${current.lifecycle} -> run.intake_completed`);
+    const verified = this.verifyIntakeClosure(current, intake);
+    return this.append(runId, {
+      expectedVersion,
+      commandId,
+      causationId: verified.closureEventId,
+      process: current.activeProcess,
+    }, "run.intake_completed", {
+      schemaVersion: RUN_SCHEMA_VERSION,
+      commandId,
+      intake: verified,
+      executionAuthority: "none",
+    });
   }
 
   reopenWithProcess(runId: string, expectedVersion: number, commandId: string, process: RunProcess, serviceReadyEventId: string): RunView {
@@ -123,8 +157,41 @@ export class RunService {
     });
   }
 
-  completeAnalysis(runId: string, expectedVersion: number, commandId: string): RunView {
-    return this.appendPhase(runId, expectedVersion, commandId, "run.analysis_completed");
+  completeAnalysis(
+    runId: string,
+    expectedVersion: number,
+    commandId: string,
+    artifactVerificationCapability: IntakeArtifactVerificationCapability,
+  ): RunView {
+    const current = this.require(runId);
+    if (current.lifecycle !== "analyzing") throw new Error(`invalid run transition ${current.lifecycle} -> run.analysis_completed`);
+    const intakeEvent = this.readStream(runId).find((event) => event.type === "run.intake_completed");
+    if (intakeEvent === undefined || typeof intakeEvent.payload !== "object" || intakeEvent.payload === null) {
+      throw new Error("analysis requires durable intake closure evidence");
+    }
+    const intake = IntakeClosureReferenceSchema.parse(
+      (intakeEvent.payload as Readonly<Record<string, unknown>>)["intake"],
+    );
+    const verified = this.verifyIntakeClosure(current, intake);
+    const artifactVerification = consumeAndVerifyIntakeArtifacts(artifactVerificationCapability);
+    if (artifactVerification.runId !== runId
+      || artifactVerification.snapshotSha256 !== verified.snapshotSha256
+      || artifactVerification.sourceStreamId !== verified.sourceStreamId
+      || artifactVerification.closureEventId !== verified.closureEventId
+      || artifactVerification.artifactAggregateSha256 !== this.intakeArtifactAggregate(verified.sourceStreamId)) {
+      throw new Error("verified intake artifact evidence does not match the durable closure");
+    }
+    return this.append(runId, {
+      expectedVersion,
+      commandId,
+      causationId: intakeEvent.eventId,
+      process: current.activeProcess,
+    }, "run.analysis_completed", {
+      schemaVersion: RUN_SCHEMA_VERSION,
+      commandId,
+      intake: verified,
+      executionAuthority: "none",
+    });
   }
 
   requestApproval(runId: string, expectedVersion: number, commandId: string, input: { readonly planDigest: string; readonly envelopeDigest: string }): RunView {
@@ -240,6 +307,119 @@ export class RunService {
     const run = this.get(runId);
     if (run === null) throw new Error(`run ${runId} not found`);
     return run;
+  }
+
+  private verifyIntakeClosure(run: RunView, input: IntakeClosureReference): IntakeClosureReference {
+    const intake = IntakeClosureReferenceSchema.parse(input);
+    const expectedStreamId = `source-intake:${createHash("sha256").update(run.runId).digest("hex")}`;
+    if (intake.sourceStreamId !== expectedStreamId) throw new Error("intake closure source stream identity is invalid");
+    const closure = findAllEvent(this.journal, (event) => event.eventId === intake.closureEventId);
+    if (closure?.type !== "intake.snapshot_closed"
+      || closure.streamId !== intake.sourceStreamId
+      || closure.correlationId !== run.runId) {
+      throw new Error("intake closure evidence is missing or incorrectly bound");
+    }
+    const payload = IntakeSnapshotClosedPayloadSchema.parse(closure.payload);
+    if (payload.runId !== run.runId
+      || payload.projectId !== run.projectId
+      || JSON.stringify(payload.projectRevision) !== JSON.stringify(run.projectRevision)
+      || payload.snapshotSha256 !== intake.snapshotSha256
+      || payload.sourceCount !== intake.sourceCount
+      || payload.rejectedCount !== intake.rejectedCount
+      || payload.totalBytes !== intake.totalBytes) {
+      throw new Error("intake closure evidence contradicts the authoritative run");
+    }
+    const sourceEvents = readStreamEvents(this.journal, intake.sourceStreamId);
+    if (sourceEvents.length !== payload.evidenceCount + 1 || sourceEvents.at(-1)?.eventId !== closure.eventId) {
+      throw new Error("intake closure does not cover the complete source evidence stream");
+    }
+    const evidence = sourceEvents.slice(0, -1);
+    if (evidence.length === 0) throw new Error("intake closure cannot cover empty source evidence");
+    const discovered = evidence.filter((event) => event.type === "source.discovered")
+      .map((event) => SourceDiscoveredPayloadSchema.parse(event.payload));
+    const rejected = evidence.filter((event) => event.type === "source.rejected")
+      .map((event) => SourceRejectedPayloadSchema.parse(event.payload));
+    if (discovered.length !== payload.sourceCount
+      || rejected.length !== payload.rejectedCount
+      || discovered.length + rejected.length !== evidence.length) {
+      throw new Error("intake closure source counts contradict durable evidence");
+    }
+    if (discovered.length === 0) throw new Error("intake closure requires at least one accepted source");
+    const parsed = evidence.map((event) => event.type === "source.discovered"
+      ? { type: event.type, payload: SourceDiscoveredPayloadSchema.parse(event.payload) }
+      : { type: event.type, payload: SourceRejectedPayloadSchema.parse(event.payload) });
+    const rootIdentitySha256 = parsed[0]?.payload.provenance.rootIdentitySha256;
+    for (let index = 0; index < parsed.length; index += 1) {
+      const item = parsed[index]!;
+      const itemPayload = item.payload;
+      if (itemPayload.runId !== run.runId
+        || itemPayload.projectId !== run.projectId
+        || itemPayload.commandId !== payload.commandId
+        || itemPayload.requestSha256 !== payload.requestSha256
+        || itemPayload.eventIndex !== index
+        || itemPayload.evidenceCount !== evidence.length
+        || itemPayload.sourceKind !== payload.sourceKind
+        || itemPayload.snapshotTotalBytes !== payload.totalBytes
+        || JSON.stringify(itemPayload.limits) !== JSON.stringify(payload.limits)
+        || itemPayload.provenance.runId !== run.runId
+        || itemPayload.provenance.projectId !== run.projectId
+        || itemPayload.provenance.sourceKind !== payload.sourceKind
+        || itemPayload.provenance.rootIdentitySha256 !== rootIdentitySha256
+        || JSON.stringify(itemPayload.provenance.projectRevision) !== JSON.stringify(run.projectRevision)) {
+        throw new Error("intake evidence payload contradicts the durable closure");
+      }
+      if (index > 0) {
+        const prior = parsed[index - 1]!;
+        const order = prior.payload.path === itemPayload.path
+          ? prior.type < item.type ? -1 : prior.type > item.type ? 1 : 0
+          : prior.payload.path < itemPayload.path ? -1 : 1;
+        if (order >= 0) throw new Error("intake evidence order is not deterministic");
+      }
+    }
+    const totalBytes = discovered.reduce((sum, item) => sum + item.sizeBytes, 0)
+      + rejected.reduce((sum, item) => sum + item.bytesRead, 0);
+    if (totalBytes !== payload.totalBytes) throw new Error("intake closure byte total contradicts durable evidence");
+    const recomputedSnapshotSha256 = computeIntakeSnapshotSha256({
+      closure: {
+        schemaVersion: payload.schemaVersion,
+        runId: payload.runId,
+        projectId: payload.projectId,
+        projectRevision: payload.projectRevision,
+        commandId: payload.commandId,
+        requestSha256: payload.requestSha256,
+        sourceKind: payload.sourceKind,
+        limits: payload.limits,
+        totalBytes: payload.totalBytes,
+      },
+      discovered,
+      rejected,
+    });
+    if (payload.snapshotSha256 !== recomputedSnapshotSha256) {
+      throw new Error("intake closure snapshot digest contradicts canonical durable evidence");
+    }
+    const preflight = this.readStream(run.runId).findLast((event) => event.type === "preflight.completed");
+    for (let index = 0; index < sourceEvents.length; index += 1) {
+      const event = sourceEvents[index]!;
+      const expectedCause = index === 0 ? preflight?.eventId : sourceEvents[index - 1]!.eventId;
+      if (event.streamId !== intake.sourceStreamId
+        || event.streamVersion !== index + 1
+        || event.correlationId !== run.runId
+        || event.causationId !== expectedCause) {
+        throw new Error("intake evidence causal chain contradicts the authoritative run");
+      }
+    }
+    return intake;
+  }
+
+  private intakeArtifactAggregate(sourceStreamId: string): string {
+    const discovered = readStreamEvents(this.journal, sourceStreamId)
+      .filter((event) => event.type === "source.discovered")
+      .map((event) => SourceDiscoveredPayloadSchema.parse(event.payload));
+    return computeIntakeArtifactAggregateSha256(discovered.map((source) => ({
+      sourceId: source.sourceId,
+      relativePath: source.path,
+      artifact: source.artifact,
+    })));
   }
 
   private verifyServiceReady(eventId: string, process: RunProcess): void {

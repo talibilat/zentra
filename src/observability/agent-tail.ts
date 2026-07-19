@@ -34,9 +34,10 @@ import {
   PreflightFailedPayloadSchema,
   PreflightPayloadSchema,
   RunAcceptedPayloadSchema,
+  RunAnalysisCompletedPayloadSchema,
   RunApprovalRequestedPayloadSchema,
   RunCancelledPayloadSchema,
-  RunPhasePayloadSchema,
+  RunIntakeCompletedPayloadSchema,
   RunReadyPayloadSchema,
   RunReopenedPayloadSchema,
   RunResumedPayloadSchema,
@@ -45,6 +46,11 @@ import {
   ServiceReadyPayloadSchema,
   ServiceStartingPayloadSchema,
 } from "../runs/run-contracts.js";
+import {
+  IntakeSnapshotClosedPayloadSchema,
+  SourceDiscoveredPayloadSchema,
+  SourceRejectedPayloadSchema,
+} from "../intake/intake-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -94,6 +100,7 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "run.waiting", "run.blocked", "run.resumed", "run.reopened", "run.intake_completed",
   "run.analysis_completed", "run.approval_requested", "run.ready_for_execution",
   "run.completed", "run.cancelled", "run.denied", "run.timed_out", "run.failed",
+  "source.discovered", "source.rejected", "intake.snapshot_closed",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -255,6 +262,9 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "capability_envelope.accepted": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.accepted", payload)),
   "capability_envelope.evaluated": parseWith((payload) => parseRoleCapabilityEventPayload("capability_envelope.evaluated", payload)),
   "web_research.observed": parseWith((payload) => parseWebResearchEventPayload("web_research.observed", payload)),
+  "source.discovered": SourceDiscoveredPayloadSchema,
+  "source.rejected": SourceRejectedPayloadSchema,
+  "intake.snapshot_closed": IntakeSnapshotClosedPayloadSchema,
   "service.starting": ServiceStartingPayloadSchema,
   "service.ready": ServiceReadyPayloadSchema,
   "run.accepted": RunAcceptedPayloadSchema,
@@ -265,8 +275,8 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "run.blocked": RunSuspendedPayloadSchema,
   "run.resumed": RunResumedPayloadSchema,
   "run.reopened": RunReopenedPayloadSchema,
-  "run.intake_completed": RunPhasePayloadSchema,
-  "run.analysis_completed": RunPhasePayloadSchema,
+  "run.intake_completed": RunIntakeCompletedPayloadSchema,
+  "run.analysis_completed": RunAnalysisCompletedPayloadSchema,
   "run.approval_requested": RunApprovalRequestedPayloadSchema,
   "run.ready_for_execution": RunReadyPayloadSchema,
   "run.completed": RunTerminalPayloadSchema,
@@ -663,6 +673,7 @@ function redactedWriterCompletedPayload(payload: unknown): unknown {
 }
 
 function spanIdFor(event: StoredEvent): string {
+  if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return `intake:${event.streamId}`;
   if (event.type.startsWith("service.")) return `service:${event.streamId}`;
   if (event.type.startsWith("preflight.")) return `run:${event.streamId}:preflight`;
   if (event.type.startsWith("run.")) return `run:${event.streamId}`;
@@ -700,6 +711,9 @@ function parentSpanIdFor(event: StoredEvent): string | null {
 }
 
 function actorFor(event: StoredEvent): AgentTailActor {
+  if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") {
+    return { id: "zentra-intake-service", role: "orchestrator" };
+  }
   if (event.type.startsWith("service.")) return { id: "zentra-runtime", role: "service" };
   if (event.type === "run.accepted") {
     const actor = payloadRecord(event.payload, "actor");
@@ -809,6 +823,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
 }
 
 function operationName(event: StoredEvent): string {
+  if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return "source_intake";
   if (event.type.startsWith("service.")) return "service_startup";
   if (event.type.startsWith("preflight.")) return "run_preflight";
   if (event.type.startsWith("run.")) return "run";

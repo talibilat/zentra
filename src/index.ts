@@ -219,15 +219,18 @@ export {
 } from "./runtime/repository-runtime.js";
 export {
   RUN_SCHEMA_VERSION,
+  IntakeClosureReferenceSchema,
   PreflightFailedPayloadSchema,
   PreflightPayloadSchema,
   ProjectRevisionSchema,
   RunAcceptedPayloadSchema,
+  RunAnalysisCompletedPayloadSchema,
   RunActorSchema,
   RunAuthoritySchema,
   RunBudgetSchema,
   RunCancelledPayloadSchema,
   RunLifecycleSchema,
+  RunIntakeCompletedPayloadSchema,
   RunProcessSchema,
   RunReadyPayloadSchema,
   RunSourceSchema,
@@ -236,7 +239,26 @@ export {
   runStreamId,
   serviceStreamId,
 } from "./runs/run-contracts.js";
+export {
+  IntakeArtifactReferenceSchema,
+  IntakeLimitsSchema,
+  IntakeSnapshotClosedPayloadSchema,
+  SourceDiscoveredPayloadSchema,
+  SourceProvenanceSchema,
+  SourceRejectedPayloadSchema,
+  SourceRejectionReasonSchema,
+  computeIntakeArtifactAggregateSha256,
+  computeIntakeSnapshotSha256,
+} from "./intake/intake-contracts.js";
 export type {
+  IntakeArtifactReference,
+  IntakeLimits,
+  IntakeSnapshotClosedPayload,
+  SourceDiscoveredPayload,
+  SourceRejectedPayload,
+} from "./intake/intake-contracts.js";
+export type {
+  IntakeClosureReference,
   ProjectRevision,
   RunActor,
   RunAuthority,
@@ -252,6 +274,28 @@ export type { AcceptRunInput, RunCommandContext } from "./runs/run-service.js";
 export { RunPreflightCoordinator } from "./runs/run-preflight.js";
 export { ServiceLifecycleService } from "./runs/service-lifecycle.js";
 export { projectRevisionMatches, resolveProjectRevision } from "./runs/project-revision.js";
+export {
+  BoundedTicketIntake,
+  IntakeError,
+  decodeTicketText,
+  normalizeSourceRelativePath,
+} from "./intake/ticket-intake.js";
+export { IntakeService, intakeStreamId } from "./intake/intake-service.js";
+export type { IntakeAnalysisResult, IntakeServiceRequest, IntakeServiceResult } from "./intake/intake-service.js";
+export { IntakeArtifactStore } from "./intake/intake-artifact-store.js";
+export type { PreparedIntakeArtifact } from "./intake/intake-artifact-store.js";
+export type {
+  DiscoveredTicketSource,
+  RejectedTicketSource,
+  SourceIntakeEvent,
+  SourceProvenance,
+  SourceRejectionReason,
+  TicketIntakeLimits,
+  TicketIntakeRequest,
+  TicketIntakeSnapshot,
+  TicketIntakeSource,
+  TicketTextDecodeResult,
+} from "./intake/ticket-intake.js";
 export type {
   ProjectDiscoveredEvidence,
   ProjectDiscovery,

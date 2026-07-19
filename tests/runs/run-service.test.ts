@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,8 @@ import { projectRun } from "../../src/runs/run-projection.js";
 import { RunService } from "../../src/runs/run-service.js";
 import { ServiceLifecycleService } from "../../src/runs/service-lifecycle.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
+import { intakeStreamId } from "../../src/intake/intake-service.js";
+import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
 
 const cleanup: string[] = [];
 
@@ -93,7 +96,7 @@ describe("RunService", () => {
     journal.close();
   });
 
-  it("reopens the exact authority-neutral ready state", () => {
+  it("reopens the exact authority-neutral intake state and denies direct unverified analysis", () => {
     const { databasePath, journal, service, input } = fixture();
     let run = service.accept(input);
     run = service.startPreflight("run-89", {
@@ -108,28 +111,16 @@ describe("RunService", () => {
       causationId: service.readStream("run-89").at(-1)!.eventId,
       process: accepted.process,
     });
-    run = service.completeIntake("run-89", run.streamVersion, "intake-1");
-    run = service.completeAnalysis("run-89", run.streamVersion, "analysis-1");
-    run = service.requestApproval("run-89", run.streamVersion, "approval-request-1", {
-      planDigest: "d".repeat(64),
-      envelopeDigest: "e".repeat(64),
-    });
-    run = service.markApprovedAndReadyForExecution(
-      "run-89",
-      run.streamVersion,
-      "approval-ready-1",
-      { planDigest: "d".repeat(64), envelopeDigest: "e".repeat(64), approvalDecisionId: "decision-1" },
-    );
+    run = service.completeIntake("run-89", run.streamVersion, "intake-1", seedIntakeClosure(journal, service));
+    expect(() => service.completeAnalysis("run-89", run.streamVersion, "analysis-1", undefined as never))
+      .toThrow(/capability|verified intake artifact/i);
 
     expect(run).toMatchObject({
-      lifecycle: "approved_and_ready_for_execution",
+      lifecycle: "analyzing",
       terminalOutcome: null,
       authority: {
-        approvalState: "approved",
+        approvalState: "not_proposed",
         executionAuthority: "none",
-        planDigest: "d".repeat(64),
-        envelopeDigest: "e".repeat(64),
-        approvalDecisionId: "decision-1",
       },
     });
     journal.close();
@@ -148,6 +139,30 @@ describe("RunService", () => {
     expect(() => service.accept({ ...input, source: { ...input.source, declaredBytes: 33 } }))
       .toThrow("already exists with different acceptance input");
     journal.close();
+  });
+
+  it("rejects minimal source payloads and fabricated canonical snapshot digests", () => {
+    for (const mode of ["minimal", "fabricated_digest"] as const) {
+      const { journal, service, input } = fixture();
+      let run = service.accept(input);
+      run = service.startPreflight("run-89", {
+        expectedVersion: run.streamVersion,
+        commandId: `preflight-start-${mode}`,
+        causationId: service.readStream("run-89")[0]!.eventId,
+        process: accepted.process,
+      });
+      run = service.completePreflight("run-89", {
+        expectedVersion: run.streamVersion,
+        commandId: `preflight-complete-${mode}`,
+        causationId: service.readStream("run-89").at(-1)!.eventId,
+        process: accepted.process,
+      });
+      const closure = seedIntakeClosure(journal, service, mode);
+      expect(() => service.completeIntake("run-89", run.streamVersion, `intake-${mode}`, closure))
+        .toThrow(/intake|source|snapshot|unrecognized|required/i);
+      expect(service.get("run-89")?.lifecycle).toBe("intake");
+      journal.close();
+    }
   });
 
   it("durably reopens under a separately ready process incarnation", () => {
@@ -189,7 +204,7 @@ describe("RunService", () => {
     const { journal, service, input } = fixture();
     const run = service.accept(input);
 
-    expect(() => service.completeAnalysis("run-89", run.streamVersion, "bad-analysis"))
+    expect(() => service.completeAnalysis("run-89", run.streamVersion, "bad-analysis", undefined as never))
       .toThrow(/invalid run transition/);
     expect(service.readStream("run-89")).toHaveLength(1);
     expect(() => service.startPreflight("run-89", {
@@ -235,7 +250,14 @@ describe("RunService", () => {
       reasonCode: "operator_requested",
     })).toEqual(cancelled);
     expect(service.readStream("run-89").filter((event) => event.type === "run.cancelled")).toHaveLength(1);
-    expect(() => service.completeIntake("run-89", cancelled.streamVersion, "after-terminal"))
+    expect(() => service.completeIntake("run-89", cancelled.streamVersion, "after-terminal", {
+      sourceStreamId: "source-intake:terminal",
+      closureEventId: "missing",
+      snapshotSha256: "c".repeat(64),
+      sourceCount: 0,
+      rejectedCount: 0,
+      totalBytes: 0,
+    }))
       .toThrow("run is already terminal");
     journal.close();
 
@@ -262,3 +284,103 @@ describe("RunService", () => {
     journal.close();
   });
 });
+
+function seedIntakeClosure(
+  journal: SqliteEventJournal,
+  service: RunService,
+  mode: "valid" | "minimal" | "fabricated_digest" = "valid",
+) {
+  const streamId = intakeStreamId("run-89");
+  const preflightEventId = service.readStream("run-89").at(-1)!.eventId;
+  const digest = "c".repeat(64);
+  const limits = {
+    maxFileBytes: 1024,
+    maxFiles: 100,
+    maxTotalBytes: 1_000_000,
+    maxDepth: 0,
+    maxEntries: 100,
+    maxDirectoryEntries: 100,
+  };
+  const provenance = {
+    runId: "run-89",
+    projectId: accepted.projectId,
+    projectRevision: accepted.projectRevision,
+    sourceKind: "inline_goal" as const,
+    rootIdentitySha256: "e".repeat(64),
+    device: null,
+    inode: null,
+    modifiedNanoseconds: null,
+    changedNanoseconds: null,
+  };
+  const discovered = {
+    schemaVersion: 1 as const,
+    runId: "run-89",
+    projectId: accepted.projectId,
+    commandId: "fixture-intake-close",
+    requestSha256: "d".repeat(64),
+    eventIndex: 0,
+    evidenceCount: 1,
+    sourceKind: "inline_goal" as const,
+    limits,
+    snapshotTotalBytes: 32,
+    path: "$inline",
+    provenance,
+    sourceId: `source-v1:${createHash("sha256").update(`run-89\0$inline\0${digest}`).digest("hex")}`,
+    sizeBytes: 32,
+    digest,
+    trust: "untrusted_planning_data" as const,
+    mediaType: "text/plain; charset=utf-8" as const,
+    artifact: { artifactId: `intake-text-v1:${digest}`, sha256: digest, sizeBytes: 32 },
+  };
+  const snapshotSha256 = computeIntakeSnapshotSha256({
+    closure: {
+      schemaVersion: 1,
+      runId: "run-89",
+      projectId: accepted.projectId,
+      projectRevision: accepted.projectRevision,
+      commandId: "fixture-intake-close",
+      requestSha256: "d".repeat(64),
+      sourceKind: "inline_goal",
+      limits,
+      totalBytes: 32,
+    },
+    discovered: [discovered],
+    rejected: [],
+  });
+  const evidence = journal.append(streamId, 0, [{
+    streamId,
+    type: "source.discovered",
+    payload: mode === "minimal" ? { schemaVersion: 1, runId: "run-89", path: "$inline" } : discovered,
+    causationId: preflightEventId,
+    correlationId: "run-89",
+  }])[0]!;
+  const stored = journal.append(streamId, 1, [{
+    streamId,
+    type: "intake.snapshot_closed",
+    payload: {
+      schemaVersion: 1,
+      runId: "run-89",
+      projectId: accepted.projectId,
+      projectRevision: accepted.projectRevision,
+      commandId: "fixture-intake-close",
+      requestSha256: "d".repeat(64),
+      sourceKind: "inline_goal",
+      limits,
+      snapshotSha256: mode === "fabricated_digest" ? "f".repeat(64) : snapshotSha256,
+      sourceCount: 1,
+      rejectedCount: 0,
+      totalBytes: 32,
+      evidenceCount: 1,
+    },
+    causationId: evidence.eventId,
+    correlationId: "run-89",
+  }])[0]!;
+  return {
+    sourceStreamId: streamId,
+    closureEventId: stored.eventId,
+    snapshotSha256: mode === "fabricated_digest" ? "f".repeat(64) : snapshotSha256,
+    sourceCount: 1,
+    rejectedCount: 0,
+    totalBytes: 32,
+  };
+}
