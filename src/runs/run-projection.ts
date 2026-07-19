@@ -9,6 +9,7 @@ import {
   RunCancelledPayloadSchema,
   RunPhasePayloadSchema,
   RunIntakeCompletedPayloadSchema,
+  RunPlanRevisedPayloadSchema,
   RunReadyPayloadSchema,
   RunReopenedPayloadSchema,
   RunResumedPayloadSchema,
@@ -193,8 +194,33 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
         if (payload.planDigest !== state.authority.planDigest || payload.envelopeDigest !== state.authority.envelopeDigest) {
           throw new Error("run ready evidence contradicts the approval request");
         }
+        const approvalRequest = events[index - 1]!;
+        if (approvalRequest.type !== "run.approval_requested" ||
+          payload.approvalRequestEventId !== approvalRequest.eventId ||
+          payload.approvalDecisionEventId !== event.causationId) {
+          throw new Error("run ready evidence does not bind the current request and accepted decision event");
+        }
         state.lifecycle = "approved_and_ready_for_execution";
         state.authority = { ...state.authority, approvalState: "approved", approvalDecisionId: payload.approvalDecisionId };
+        break;
+      }
+      case "run.plan_revised": {
+        const payload = RunPlanRevisedPayloadSchema.parse(event.payload);
+        bindCommand(commandBindings, payload.commandId, event.payload);
+        requireTransition(state.lifecycle, "awaiting_approval", event.type);
+        const priorApproval = events[index - 1]!;
+        if (priorApproval.type !== "run.approval_requested" || payload.priorApprovalRequestEventId !== priorApproval.eventId ||
+          event.causationId !== priorApproval.eventId) {
+          throw new Error("run plan revision does not bind the current approval request");
+        }
+        state.lifecycle = "planning";
+        state.authority = {
+          approvalState: "not_proposed",
+          planDigest: null,
+          envelopeDigest: null,
+          approvalDecisionId: null,
+          executionAuthority: "none",
+        };
         break;
       }
       case "run.waiting":

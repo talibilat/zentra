@@ -73,6 +73,37 @@ describe("SqliteEventJournal", () => {
       .toThrow(/streamId does not match/i);
   });
 
+  it("atomically compares multiple stream versions before appending any event", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    journal.append("run:1", 0, [event("run:1", 1)]);
+    journal.append("decision:1", 0, [event("decision:1", 1)]);
+
+    expect(() => journal.appendAtomically([
+      { streamId: "run:1", expectedVersion: 0, events: [] },
+      { streamId: "decision:1", expectedVersion: 1, events: [event("decision:1", 2)] },
+    ])).toThrow("expected version 0, actual 1");
+    expect(journal.readStream("decision:1")).toHaveLength(1);
+
+    const stored = journal.appendAtomically([
+      { streamId: "run:1", expectedVersion: 1, events: [] },
+      { streamId: "decision:1", expectedVersion: 1, events: [event("decision:1", 2)] },
+    ]);
+    expect(stored).toHaveLength(1);
+    expect(journal.readStream("run:1")).toHaveLength(1);
+    expect(journal.readStream("decision:1")).toHaveLength(2);
+  });
+
+  it("preserves a canonical preassigned event identity atomically", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    journals.push(journal);
+    const eventId = "00000000-0000-4000-8000-000000000091";
+    const stored = journal.append("bound", 0, [{ ...event("bound", 1), eventId }]);
+    expect(stored[0]?.eventId).toBe(eventId);
+    expect(() => journal.append("other", 0, [{ ...event("other", 1), eventId }])).toThrow();
+    expect(journal.readStream("other")).toEqual([]);
+  });
+
   it("preserves event identity and positions across close and reopen", () => {
     const { databasePath } = temporaryDatabase();
     const first = new SqliteEventJournal(databasePath);

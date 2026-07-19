@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { NewEvent, StoredEvent } from "../../src/contracts/event.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import { isAtomicEventJournal, type EventJournal } from "../../src/journal/journal.js";
 import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 
@@ -134,6 +134,34 @@ describe("ProjectingEventJournal", () => {
     expect(projected.readStreamPage("task-1").events).toEqual(stored);
     expect(projected.projectionFailed).toBe(true);
     inner.close();
+  });
+
+  it("preserves branded atomic append and isolates durable sink failure after commit", () => {
+    const inner = new SqliteEventJournal(":memory:");
+    const projected = new ProjectingEventJournal(inner, {
+      append: () => { throw new Error("atomic projection failed"); },
+    }, "test:atomic-failure");
+    expect(isAtomicEventJournal(projected)).toBe(true);
+
+    const stored = projected.appendAtomically([
+      { streamId: "run:1", expectedVersion: 0, events: [{ ...proposed, streamId: "run:1" }] },
+      { streamId: "decision:1", expectedVersion: 0, events: [{ ...proposed, streamId: "decision:1" }] },
+    ]);
+    expect(stored.map((event) => event.globalPosition)).toEqual([1, 2]);
+    expect(projected.projectionFailed).toBe(true);
+    expect(inner.readAll()).toHaveLength(2);
+    expect(inner.inspectProjectionCursor("test:atomic-failure")).toMatchObject({
+      position: 0,
+      activeClaimId: expect.any(String),
+    });
+    inner.close();
+  });
+
+  it("does not infer atomic capability from an unbranded method", () => {
+    const fake = {
+      append: () => [], readStream: () => [], readAll: () => [], appendAtomically: () => [],
+    };
+    expect(isAtomicEventJournal(fake)).toBe(false);
   });
 
   it("replays authoritative events accepted before fanout construction", () => {
