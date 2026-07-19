@@ -26,6 +26,8 @@ import {
   openAuthoritativeJournal,
 } from "../../src/index.js";
 import type {
+  ArchiveManifest,
+  ArchiveResult,
   DurablePagedEventJournal,
   GlobalEventPage,
   JournalPageLimits,
@@ -34,6 +36,11 @@ import type {
   StreamEventPage,
   EventJournal,
   PagedEventJournal,
+  PruneRequest,
+  RetentionPolicy,
+  RetentionRecovery,
+  RetentionReconcileResult,
+  VacuumEvidence,
 } from "../../src/index.js";
 import * as packageApi from "../../src/index.js";
 
@@ -80,6 +87,13 @@ describe("package-root programmatic API", () => {
       ProjectionCursor?,
       StreamEventPage?,
       PagedEventJournal?,
+      ArchiveManifest?,
+      ArchiveResult?,
+      PruneRequest?,
+      RetentionPolicy?,
+      RetentionRecovery?,
+      RetentionReconcileResult?,
+      VacuumEvidence?,
     ] = [];
     expect(contracts).toEqual([]);
   });

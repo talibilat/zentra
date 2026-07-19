@@ -96,7 +96,7 @@ interface ManifestFile {
 
 interface OperationRow {
   readonly operation_id: string;
-  readonly kind: "archive" | "prune_request" | "prune" | "maintenance";
+  readonly kind: "archive" | "prune_request" | "prune" | "maintenance" | "restore";
   readonly state: "publishing" | "authorized" | "effect_applied" | "consumed" | "completed" | "failed";
   readonly from_position: number | null;
   readonly through_position: number;
@@ -128,6 +128,14 @@ interface MaintenanceEvidence {
   readonly backupBytes: number;
 }
 
+interface RestoreEvidence {
+  readonly name: string;
+  readonly eventCount?: number;
+  readonly throughPosition: number;
+  readonly sha256?: string;
+  readonly bytes?: number;
+}
+
 interface ProjectionRow {
   readonly name: string;
   readonly position: number;
@@ -149,7 +157,7 @@ export interface RetentionRecovery {
   readonly outcome: "clean" | "uncertain";
   readonly operationId: string | null;
   readonly requestId: string | null;
-  readonly kind: "archive" | "prune" | "maintenance" | null;
+  readonly kind: "archive" | "prune" | "maintenance" | "restore" | null;
   readonly state: string;
   readonly confirmation: string | null;
 }
@@ -186,6 +194,11 @@ export class JournalRetentionService {
     if (!databaseInfo.isFile() || databaseInfo.isSymbolicLink() || databaseInfo.nlink !== 1) {
       throw new Error("journal database must be a private regular file without links");
     }
+    assertSafeSqliteSidecars(this.databasePath);
+    if (options.readOnly !== true) {
+      const migrated = new SqliteEventJournal(this.databasePath);
+      migrated.close();
+    }
     this.directoryIdentity = identity(statSync(this.databaseDirectory));
     this.databaseIdentity = identity(databaseInfo);
     this.archiveRoot = `${this.databasePath}.archives`;
@@ -197,12 +210,18 @@ export class JournalRetentionService {
       }
       mkdirSync(this.archiveRoot, { mode: 0o700 });
     }
-    const archiveInfo = lstatSync(this.archiveRoot);
+    let archiveInfo = lstatSync(this.archiveRoot);
     if (!archiveInfo.isDirectory() || archiveInfo.isSymbolicLink() ||
       realpathSync.native(this.archiveRoot) !== this.archiveRoot) {
       throw new Error("journal archive root must be a canonical private directory");
     }
-    if (options.readOnly !== true) chmodSync(this.archiveRoot, 0o700);
+    if (options.readOnly !== true) {
+      chmodSync(this.archiveRoot, 0o700);
+      archiveInfo = lstatSync(this.archiveRoot);
+    }
+    if ((archiveInfo.mode & 0o777) !== 0o700 || !ownedByCurrentUser(archiveInfo)) {
+      throw new Error("journal archive root must have private owner permissions");
+    }
     this.archiveIdentity = identity(archiveInfo);
     this.assertIdentities();
   }
@@ -426,6 +445,7 @@ export class JournalRetentionService {
     const effect = this.openDatabase();
     try {
       effect.transaction(() => {
+        this.verifyArchiveOverlap(input.throughPosition);
         const operation = requiredOperation(effect, operationId, "authorized");
         assertNoCursorBlockers(effect, input.throughPosition);
         const metadata = metadataFromDatabase(effect);
@@ -523,6 +543,30 @@ export class JournalRetentionService {
         operationId: operation.operation_id,
         requestId: null,
         kind: "maintenance",
+        state,
+        confirmation: reconcileConfirmation(operation.operation_id, state),
+      };
+    }
+    if (operation.kind === "restore") {
+      const evidence = parseRestoreEvidence(operation.maintenance_evidence, false);
+      const destination = this.siblingPath(evidence.name);
+      const temporary = `${destination}.tmp-${operation.operation_id}`;
+      const temporaryExists = [temporary, `${temporary}-wal`, `${temporary}-shm`]
+        .some((candidate) => existsSync(candidate));
+      let state = existsSync(destination) ? "restore_published_missing_completion" :
+        temporaryExists ? "restore_temp_only" : "restore_no_artifact";
+      if (state === "restore_published_missing_completion") {
+        try {
+          verifyRestoredDatabase(destination, parseRestoreEvidence(operation.maintenance_evidence, true));
+        } catch {
+          state = "restore_published_invalid";
+        }
+      }
+      return {
+        outcome: "uncertain",
+        operationId: operation.operation_id,
+        requestId: null,
+        kind: "restore",
         state,
         confirmation: reconcileConfirmation(operation.operation_id, state),
       };
@@ -703,6 +747,48 @@ export class JournalRetentionService {
         repeated: false,
       };
     }
+    if (operation.kind === "restore") {
+      const evidence = parseRestoreEvidence(operation.maintenance_evidence,
+        inspection.state === "restore_published_missing_completion");
+      const destination = this.siblingPath(evidence.name);
+      if (inspection.state === "restore_published_missing_completion") {
+        verifyRestoredDatabase(destination, evidence);
+        const db = this.openDatabase();
+        try {
+          db.transaction(() => {
+            requiredOperation(db, operation.operation_id, "publishing");
+            appendAudit(db, "journal.restore.recovered_completed", {
+              operationId: operation.operation_id,
+              ...evidence,
+              recovered: true,
+            });
+            db.prepare("UPDATE retention_operations SET state = 'completed' WHERE operation_id = ?")
+              .run(operation.operation_id);
+          }).immediate();
+        } finally {
+          db.close();
+        }
+        return {
+          operationId: operation.operation_id,
+          outcome: "completed",
+          state: "recovered_restore_completion",
+          repeated: false,
+        };
+      }
+      if (inspection.state === "restore_temp_only") {
+        this.removeExactPrivateDatabaseFiles(`${destination}.tmp-${operation.operation_id}`);
+      } else if (inspection.state === "restore_published_invalid") {
+        this.removeExactPrivateFile(destination);
+      }
+      this.recordReconciledFailure(operation, "journal.restore.failed", inspection.state);
+      return {
+        operationId: operation.operation_id,
+        outcome: "failed",
+        state: inspection.state === "restore_no_artifact" ? "restore_no_effect_recorded" :
+          "restore_artifact_cleaned",
+        repeated: false,
+      };
+    }
     throw new Error("retention operation kind cannot be reconciled");
   }
 
@@ -714,8 +800,9 @@ export class JournalRetentionService {
   export(input: {
     readonly name: string;
     readonly failurePoint?: "after_write";
-  }): { readonly path: string; readonly eventCount: number; readonly sha256: string } {
+  }): { readonly path: string; readonly eventCount: number; readonly throughPosition: number; readonly sha256: string } {
     this.verify();
+    const throughPosition = this.globalHead();
     const destination = this.siblingPath(input.name);
     this.assertNewDestination(destination);
     const temporary = `${destination}.tmp-${randomUUID()}`;
@@ -726,9 +813,10 @@ export class JournalRetentionService {
     let completed = false;
     try {
       let position = 0;
-      while (true) {
+      while (position < throughPosition) {
         const page = journal.readAllPage(position, DEFAULT_LIMITS);
-        for (const event of page.events) {
+        const events = page.events.filter((event) => event.globalPosition <= throughPosition);
+        for (const event of events) {
           const line = canonicalEventLine(event);
           writeSync(descriptor, line);
           digest.update(line);
@@ -737,9 +825,9 @@ export class JournalRetentionService {
         if (input.failurePoint === "after_write" && eventCount > 0) {
           throw new Error("injected export failure after write");
         }
-        if (!page.hasMore) break;
-        if (page.nextPosition <= position) throw new Error("journal export did not make progress");
-        position = page.nextPosition;
+        const nextPosition = events.at(-1)?.globalPosition ?? position;
+        if (nextPosition <= position) throw new Error("journal export did not make progress");
+        position = nextPosition;
       }
       fsyncSync(descriptor);
       completed = true;
@@ -759,17 +847,43 @@ export class JournalRetentionService {
       if (published && existsSync(destination)) unlinkSync(destination);
       throw error;
     }
-    return { path: destination, eventCount, sha256: digest.digest("hex") };
+    return { path: destination, eventCount, throughPosition, sha256: digest.digest("hex") };
   }
 
   restore(input: {
     readonly name: string;
     readonly failurePoint?: "after_write";
-  }): { readonly path: string; readonly eventCount: number } {
+    readonly crashPoint?: "after_publish";
+  }): { readonly path: string; readonly eventCount: number; readonly throughPosition: number; readonly sha256: string } {
     this.verify();
     const destination = this.siblingPath(input.name);
     this.assertNewDestination(destination);
-    const temporary = `${destination}.tmp-${randomUUID()}`;
+    const throughPosition = this.globalHead();
+    const operationId = randomUUID();
+    const intent = this.openDatabase();
+    try {
+      intent.transaction(() => {
+        intent.prepare(`
+          INSERT INTO retention_operations (
+            operation_id, kind, state, through_position, maintenance_evidence, created_at
+          ) VALUES (?, 'restore', 'publishing', ?, ?, ?)
+        `).run(operationId, throughPosition, JSON.stringify({ name: input.name, throughPosition }),
+          new Date().toISOString());
+        appendAudit(intent, "journal.restore.started", {
+          operationId,
+          name: input.name,
+          throughPosition,
+        });
+      }).immediate();
+    } catch (error) {
+      if (String(error).includes("retention_one_active_operation")) {
+        throw new Error("retention operation is already active");
+      }
+      throw error;
+    } finally {
+      intent.close();
+    }
+    const temporary = `${destination}.tmp-${operationId}`;
     const destinationDescriptor = openPrivate(temporary);
     closeSync(destinationDescriptor);
     const restored = new SqliteEventJournal(temporary);
@@ -777,6 +891,7 @@ export class JournalRetentionService {
     const target = new Database(temporary);
     const journal = this.openCombinedJournal();
     let eventCount = 0;
+    let restoredSha256 = "";
     try {
       const insert = target.prepare(`
         INSERT INTO events (global_position, event_id, stream_id, stream_version, type, payload,
@@ -784,10 +899,11 @@ export class JournalRetentionService {
       `);
       const stream = target.prepare("INSERT OR IGNORE INTO streams (stream_id, current_version) VALUES (?, 0)");
       let position = 0;
-      while (true) {
+      while (position < throughPosition) {
         const page = journal.readAllPage(position, DEFAULT_LIMITS);
+        const events = page.events.filter((event) => event.globalPosition <= throughPosition);
         target.transaction(() => {
-          for (const event of page.events) {
+          for (const event of events) {
             stream.run(event.streamId);
             insert.run(event.globalPosition, event.eventId, event.streamId, event.streamVersion, event.type,
               JSON.stringify(event.payload), event.causationId, event.correlationId, event.recordedAt);
@@ -797,8 +913,9 @@ export class JournalRetentionService {
         if (input.failurePoint === "after_write" && eventCount > 0) {
           throw new Error("injected restore failure after write");
         }
-        if (!page.hasMore) break;
-        position = page.nextPosition;
+        const nextPosition = events.at(-1)?.globalPosition ?? position;
+        if (nextPosition <= position) throw new Error("journal restore did not make progress");
+        position = nextPosition;
       }
       target.exec("UPDATE streams SET current_version = (SELECT MAX(stream_version) FROM events WHERE events.stream_id = streams.stream_id)");
       target.pragma("wal_checkpoint(TRUNCATE)");
@@ -806,6 +923,7 @@ export class JournalRetentionService {
       target.close();
       journal.close();
       unlinkDatabaseFiles(temporary);
+      this.failOperation(operationId, "journal.restore.failed", error);
       throw error;
     }
     target.close();
@@ -820,15 +938,51 @@ export class JournalRetentionService {
         verify.close();
       }
       fsyncFile(temporary);
+      restoredSha256 = sha256File(temporary);
+      const restoredBytes = statSync(temporary).size;
+      const evidence = { name: input.name, eventCount, throughPosition, sha256: restoredSha256,
+        bytes: restoredBytes } satisfies RestoreEvidence;
+      const evidenceDatabase = this.openDatabase();
+      try {
+        evidenceDatabase.prepare(`
+          UPDATE retention_operations SET maintenance_evidence = ?
+          WHERE operation_id = ? AND state = 'publishing'
+        `).run(JSON.stringify(evidence), operationId);
+      } finally {
+        evidenceDatabase.close();
+      }
       publishNoClobber(temporary, destination, 0o600);
       published = true;
-      fsyncDirectory(this.databaseDirectory);
     } catch (error) {
       unlinkDatabaseFiles(temporary);
-      if (published && existsSync(destination)) unlinkSync(destination);
+      this.failOperation(operationId, "journal.restore.failed", error);
       throw error;
     }
-    return { path: destination, eventCount };
+    try {
+      fsyncDirectory(this.databaseDirectory);
+    } catch (error) {
+      if (!published) this.failOperation(operationId, "journal.restore.failed", error);
+      throw error;
+    }
+    if (input.crashPoint === "after_publish") throw new Error("simulated crash after restore publication");
+    const completion = this.openDatabase();
+    try {
+      completion.transaction(() => {
+        requiredOperation(completion, operationId, "publishing");
+        appendAudit(completion, "journal.restore.completed", {
+          operationId,
+          name: input.name,
+          throughPosition,
+          eventCount,
+          sha256: restoredSha256,
+        });
+        completion.prepare("UPDATE retention_operations SET state = 'completed' WHERE operation_id = ?")
+          .run(operationId);
+      }).immediate();
+    } finally {
+      completion.close();
+    }
+    return { path: destination, eventCount, throughPosition, sha256: restoredSha256 };
   }
 
   async maintain(input: {
@@ -1010,23 +1164,28 @@ export class JournalRetentionService {
     const events: StoredEvent[] = [];
     let bytes = 0;
     let hasMore = false;
+    let pageFull = false;
     outer: for (const item of this.anchoredManifestFiles().manifests) {
       if (item.manifest.throughPosition <= afterPosition) continue;
       this.scanSegment(item, (event) => {
         if (event.globalPosition <= afterPosition) return;
         const size = storedEventBytes(event);
+        if (pageFull) {
+          hasMore = true;
+          return;
+        }
         if (events.length >= limits.maxEvents || bytes + size > limits.maxBytes) {
           hasMore = true;
-          return false;
+          pageFull = true;
+          return;
         }
         events.push(event);
         bytes += size;
         if (events.length === limits.maxEvents || bytes === limits.maxBytes) {
-          hasMore = event.globalPosition < metadata.archiveHeadPosition;
-          return false;
+          pageFull = true;
         }
-      }, true, false);
-      if (hasMore) break outer;
+      }, true);
+      if (pageFull) break outer;
     }
     if (hasMore && events.length === 0) throw new Error("journal page maxBytes is smaller than the next archived event");
     return {
@@ -1043,25 +1202,32 @@ export class JournalRetentionService {
     let bytes = 0;
     let archivedVersion = 0;
     let hasMore = false;
-    const streamHead = this.streamHead(streamId);
+    let pageFull = false;
     outer: for (const item of this.anchoredManifestFiles().manifests) {
       this.scanSegment(item, (event) => {
         if (event.streamId !== streamId) return;
-        archivedVersion = event.streamVersion;
-        if (event.streamVersion <= afterVersion) return;
+        if (event.streamVersion <= afterVersion) {
+          archivedVersion = event.streamVersion;
+          return;
+        }
+        if (pageFull) {
+          hasMore = true;
+          return;
+        }
         const size = storedEventBytes(event);
         if (events.length >= limits.maxEvents || bytes + size > limits.maxBytes) {
           hasMore = true;
-          return false;
+          pageFull = true;
+          return;
         }
         events.push(event);
+        archivedVersion = event.streamVersion;
         bytes += size;
         if (events.length === limits.maxEvents || bytes === limits.maxBytes) {
-          hasMore = event.streamVersion < streamHead;
-          return false;
+          pageFull = true;
         }
-      }, true, false);
-      if (hasMore) break outer;
+      }, true);
+      if (pageFull) break outer;
     }
     if (hasMore && events.length === 0) throw new Error("journal page maxBytes is smaller than the next archived event");
     return { events, nextVersion: events.at(-1)?.streamVersion ?? afterVersion, hasMore, bytes, archivedVersion };
@@ -1400,6 +1566,13 @@ export class JournalRetentionService {
     unlinkSync(candidate);
   }
 
+  private removeExactPrivateDatabaseFiles(databasePath: string): void {
+    for (const candidate of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+      this.removeExactPrivateFile(candidate);
+    }
+    fsyncDirectory(this.databaseDirectory);
+  }
+
   private recordReconciledFailure(operation: OperationRow, type: string, reason: string): void {
     const db = this.openDatabase();
     try {
@@ -1461,6 +1634,11 @@ export class JournalRetentionService {
 
   private siblingPath(name: string): string {
     assertSafeName(name);
+    const databaseName = path.basename(this.databasePath).toLowerCase();
+    if ([databaseName, `${databaseName}-wal`, `${databaseName}-shm`, `${databaseName}-journal`,
+      `${databaseName}.archives`].includes(name.toLowerCase())) {
+      throw new Error("destination name is reserved for the journal");
+    }
     return path.join(this.databaseDirectory, name);
   }
 
@@ -1491,8 +1669,9 @@ export class JournalRetentionService {
     const descriptor = openNoFollow(filePath);
     try {
       const info = fstatSync(descriptor);
-      if (!info.isFile() || info.nlink !== 1 || info.size > maximumBytes || (info.mode & 0o077) !== 0) {
-        throw new Error("archive file is linked, permissive, or exceeds its bound");
+      if (!info.isFile() || info.nlink !== 1 || info.size > maximumBytes ||
+        (info.mode & 0o777) !== 0o400 || !ownedByCurrentUser(info)) {
+        throw new Error("archive file is linked, permissive, has an invalid mode, or exceeds its bound");
       }
       return readFileSync(descriptor, "utf8");
     } finally {
@@ -1513,19 +1692,16 @@ export class JournalRetentionService {
       throw new Error("journal database identity is unsafe");
     }
     assertSameIdentity(database, this.databaseIdentity, "journal database");
-    for (const sidecar of [`${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
-      if (!existsSync(sidecar)) continue;
-      const info = lstatSync(sidecar);
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
-        throw new Error("journal SQLite sidecar identity is unsafe");
-      }
-    }
+    assertSafeSqliteSidecars(this.databasePath);
     if (this.archiveIdentity === null) {
       if (existsSync(this.archiveRoot)) throw new Error("archive directory identity changed");
       return;
     }
     const archive = lstatSync(this.archiveRoot);
-    if (!archive.isDirectory() || archive.isSymbolicLink()) throw new Error("archive directory identity is unsafe");
+    if (!archive.isDirectory() || archive.isSymbolicLink() ||
+      (archive.mode & 0o777) !== 0o700 || !ownedByCurrentUser(archive)) {
+      throw new Error("archive directory identity or private permissions are unsafe");
+    }
     assertSameIdentity(archive, this.archiveIdentity, "archive directory");
   }
 }
@@ -1533,11 +1709,13 @@ export class JournalRetentionService {
 export class ArchivedEventJournal implements DurablePagedEventJournal {
   readonly [DURABLE_PAGED_EVENT_JOURNAL] = true;
   private readonly active: SqliteEventJournal;
+  private readonly readOnly: boolean;
 
   constructor(
     private readonly retention: JournalRetentionService,
     mode: "read-only" | "read-write" = "read-only",
   ) {
+    this.readOnly = mode === "read-only";
     this.active = mode === "read-only"
       ? SqliteEventJournal.openReadOnly(retention.databasePath)
       : new SqliteEventJournal(retention.databasePath);
@@ -1627,6 +1805,7 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
   }
 
   ensureProjectionCursor(name: string, initialPosition?: number | "head"): ProjectionCursor {
+    this.assertWritable();
     validateProjectionName(name);
     const db = this.projectionDatabase(false);
     try {
@@ -1645,6 +1824,7 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
   }
 
   claimProjection(name: string, claimantId: string, limits?: JournalPageLimits): ProjectionClaim | null {
+    this.assertWritable();
     validateProjectionName(name);
     validateClaimantId(claimantId);
     const bounded = limits ?? DEFAULT_LIMITS;
@@ -1686,6 +1866,7 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
   }
 
   recoverProjectionClaim(name: string, claimId: string, claimantId: string): ProjectionClaim {
+    this.assertWritable();
     validateProjectionName(name);
     validateClaimantId(claimantId);
     if (!claimId) throw new Error("projection claim ID must not be empty");
@@ -1711,6 +1892,7 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
   }
 
   commitProjection(name: string, claimId: string, claimantId: string): ProjectionCursor {
+    this.assertWritable();
     validateProjectionName(name);
     validateClaimantId(claimantId);
     if (!claimId) throw new Error("projection claim ID must not be empty");
@@ -1772,6 +1954,10 @@ export class ArchivedEventJournal implements DurablePagedEventJournal {
       fileMustExist: true,
       timeout: 1_000,
     });
+  }
+
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error("event journal is read-only");
   }
 
   close(): void { this.active.close(); }
@@ -2028,6 +2214,45 @@ function parseMaintenanceEvidence(value: string | null): MaintenanceEvidence {
   return evidence;
 }
 
+function parseRestoreEvidence(value: string | null, requirePublished: boolean): RestoreEvidence {
+  let evidence: RestoreEvidence;
+  try {
+    evidence = JSON.parse(value ?? "") as RestoreEvidence;
+  } catch {
+    throw new Error("restore operation evidence is corrupt");
+  }
+  if (!SAFE_NAME.test(evidence.name) || !Number.isSafeInteger(evidence.throughPosition) ||
+    evidence.throughPosition < 0 || (requirePublished &&
+      (!Number.isSafeInteger(evidence.eventCount) || evidence.eventCount! < 0 ||
+        !Number.isSafeInteger(evidence.bytes) || evidence.bytes! <= 0 ||
+        typeof evidence.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(evidence.sha256)))) {
+    throw new Error("restore operation evidence is corrupt");
+  }
+  return evidence;
+}
+
+function verifyRestoredDatabase(databasePath: string, evidence: RestoreEvidence): void {
+  const descriptor = openNoFollow(databasePath);
+  try {
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600 ||
+      !ownedByCurrentUser(info) || info.size !== evidence.bytes) {
+      throw new Error("restored journal identity, mode, or size is invalid");
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  if (sha256File(databasePath) !== evidence.sha256) throw new Error("restored journal digest is invalid");
+  const database = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    if (database.pragma("integrity_check", { simple: true }) !== "ok") {
+      throw new Error("restored journal integrity check failed");
+    }
+  } finally {
+    database.close();
+  }
+}
+
 function verifyMaintenanceBackup(backupPath: string, evidence: MaintenanceEvidence): void {
   if (backupPath !== evidence.backupPath) throw new Error("maintenance backup path does not match evidence");
   const descriptor = openNoFollow(backupPath);
@@ -2060,8 +2285,9 @@ function forEachLine(filePath: string, visitor: (line: string) => void | false):
   const descriptor = openNoFollow(filePath);
   try {
     const info = fstatSync(descriptor);
-    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_ARCHIVE_BYTES || (info.mode & 0o077) !== 0) {
-      throw new Error("archive segment is linked, permissive, or oversized");
+    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_ARCHIVE_BYTES ||
+      (info.mode & 0o777) !== 0o400 || !ownedByCurrentUser(info)) {
+      throw new Error("archive segment is linked, permissive, has an invalid mode, or is oversized");
     }
     const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
     const decoder = new StringDecoder("utf8");
@@ -2247,6 +2473,20 @@ function unlinkDatabaseSidecars(databasePath: string): void {
 
 function identity(info: { readonly dev: number; readonly ino: number }): FileIdentity {
   return { dev: info.dev, ino: info.ino };
+}
+
+function ownedByCurrentUser(info: { readonly uid: number }): boolean {
+  return process.getuid === undefined || info.uid === process.getuid();
+}
+
+function assertSafeSqliteSidecars(databasePath: string): void {
+  for (const sidecar of [`${databasePath}-wal`, `${databasePath}-shm`]) {
+    if (!existsSync(sidecar)) continue;
+    const info = lstatSync(sidecar);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || !ownedByCurrentUser(info)) {
+      throw new Error("journal SQLite sidecar identity is unsafe");
+    }
+  }
 }
 
 function assertSameIdentity(

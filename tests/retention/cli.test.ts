@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 
 import { runCli } from "../../src/cli/main.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -25,6 +26,54 @@ async function invoke(args: readonly string[]) {
 }
 
 describe("journal maintenance CLI", () => {
+  it("migrates a schema-v4 journal before running retention commands", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-retention-migration-"));
+    directories.push(directory);
+    const database = path.join(directory, "journal.sqlite");
+    const journal = new SqliteEventJournal(database);
+    journal.append("events", 0, [{
+      streamId: "events", type: "test.event", payload: {}, causationId: null,
+      correlationId: "migration",
+    }]);
+    journal.close();
+    const legacy = new Database(database);
+    legacy.exec(`
+      DROP INDEX retention_one_active_operation;
+      DROP INDEX retention_operations_request;
+      DROP INDEX retention_operations_state;
+      ALTER TABLE retention_operations RENAME TO retention_operations_current;
+      CREATE TABLE retention_operations (
+        operation_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'prune_request', 'prune', 'maintenance')),
+        state TEXT NOT NULL CHECK (state IN (
+          'publishing', 'authorized', 'effect_applied', 'consumed', 'completed', 'failed'
+        )),
+        from_position INTEGER,
+        through_position INTEGER NOT NULL CHECK (through_position >= 0),
+        segment_id TEXT,
+        segment_sha256 TEXT,
+        manifest_sha256 TEXT,
+        request_id TEXT,
+        operator_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      DROP TABLE retention_operations_current;
+    `);
+    legacy.pragma("user_version = 4");
+    legacy.close();
+
+    expect(await invoke(["journal", "restore", "--database", database,
+      "--name", "restored.sqlite"])).toMatchObject({
+      code: 0,
+      value: { command: "journal.restore", throughPosition: 1 },
+    });
+    const migrated = new Database(database, { readonly: true });
+    expect(migrated.pragma("user_version", { simple: true })).toBe(6);
+    expect((migrated.pragma("table_info(retention_operations)") as Array<{ name: string }>)
+      .some((column) => column.name === "maintenance_evidence")).toBe(true);
+    migrated.close();
+  });
+
   it("composes archive, verification, explicit prune, and replay-safe export", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "zentra-retention-cli-"));
     directories.push(directory);

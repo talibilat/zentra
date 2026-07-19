@@ -396,9 +396,10 @@ Commander help remains human-readable text rather than an operational JSON resul
 ## Journal Retention
 
 The default policy retains journal history forever and never deletes events because of age, size, archive creation, backup, checkpoint, or maintenance.
-Archives are restrictive immutable JSONL segments with checksummed manifests, exact inclusive global-position ranges, a journal identity, and a checksummed manifest chain under the fixed `<database>.archives` directory.
+Archives are owner-restricted, tamper-evident JSONL segments with checksummed manifests, exact inclusive global-position ranges, a journal identity, and a checksummed manifest chain under the fixed `<database>.archives` directory.
 SQLite durably anchors that identity, the exact archive head position, head-manifest digest, segment count, and retained-through position, so deletion or replacement of the complete filesystem chain fails verification.
 Archive, verification, replay, export, and restore preserve event IDs, stream versions, and global positions.
+Export and restore capture one fixed source high-water position, and restore records started and completed evidence with the resulting digest.
 Normal CLI reads and writes use the authoritative active-plus-archive adapter after prune, including task status, milestone replay, outcome history, recovery, and appends to existing streams.
 
 Archive one explicit bounded range and verify the complete archive chain.
@@ -415,7 +416,7 @@ The request and authorization records are appended above the selected boundary a
 Archive publication and prune use serialized durable intent states; `journal recover` only reports reconciled filesystem/database state and never retries or completes an interrupted effect automatically.
 Use `journal inspect-recovery` for the explicit read-only classification.
 Use `journal reconcile` only with the exact operation identity and generated classification-bound confirmation phrase.
-Reconciliation anchors a fully published valid archive, records completion for a prune whose deleted rows and retained boundary prove the effect, records failure for authorization proven not executed, or explicitly removes an orphan publication while retaining repair evidence.
+Reconciliation anchors a fully published valid archive, records completion for a prune whose deleted rows and retained boundary prove the effect, verifies a published restore without repeating it, records failure for authorization proven not executed, or explicitly removes an orphan publication while retaining repair evidence.
 Incomplete maintenance is reconciled without rerunning checkpoint, backup, or vacuum: a digest-bound published backup may be completed, while exact operation-named private temp residue is explicitly cleaned and terminalized as failed.
 Repeating a settled reconciliation is idempotent.
 

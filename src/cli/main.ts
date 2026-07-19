@@ -1096,16 +1096,31 @@ function openJournal(
   databasePath: string,
   mode: "read-only" | "read-write",
 ): ArchivedEventJournal {
-  if (mode === "read-write" && !existsSync(databasePath)) {
-    const created = new SqliteEventJournal(databasePath);
+  const canonicalDatabasePath = canonicalDatabasePathForCreation(databasePath);
+  if (mode === "read-write" && !existsSync(canonicalDatabasePath)) {
+    const created = new SqliteEventJournal(canonicalDatabasePath);
     created.close();
   }
-  if (!existsSync(databasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
+  if (!existsSync(canonicalDatabasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
   try {
-    return openAuthoritativeJournal(databasePath, mode);
+    return openAuthoritativeJournal(canonicalDatabasePath, mode);
   } catch (error) {
-    if (!existsSync(databasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
+    if (!existsSync(canonicalDatabasePath)) throw new CliFailure("DATABASE_NOT_FOUND");
     throw error;
+  }
+}
+
+function canonicalDatabasePathForCreation(databasePath: string): string {
+  if (!path.isAbsolute(databasePath) || path.normalize(databasePath) !== databasePath) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+  try {
+    const parent = realpathSync.native(path.dirname(databasePath));
+    if (!statSync(parent).isDirectory()) throw new CliFailure("INVALID_COMMAND");
+    return path.join(parent, path.basename(databasePath));
+  } catch (error) {
+    if (error instanceof CliFailure) throw error;
+    throw new CliFailure("INVALID_COMMAND");
   }
 }
 

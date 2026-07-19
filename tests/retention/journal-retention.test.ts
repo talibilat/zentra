@@ -68,6 +68,25 @@ describe("JournalRetentionService", () => {
     expect(existsSync(archiveRoot)).toBe(false);
   });
 
+  it("rejects every projection mutation through a read-only authoritative journal", () => {
+    const { databasePath } = fixture();
+    const writable = openAuthoritativeJournal(realpathPath(databasePath), "read-write");
+    writable.ensureProjectionCursor("existing", 0);
+    writable.close();
+
+    const journal = openAuthoritativeJournal(realpathPath(databasePath), "read-only");
+    const claimant = "process:1:00000000-0000-4000-8000-000000000001";
+    expect(() => journal.ensureProjectionCursor("new", 0)).toThrow(/read-only/i);
+    expect(() => journal.claimProjection("existing", claimant)).toThrow(/read-only/i);
+    expect(() => journal.recoverProjectionClaim("existing", "claim", claimant)).toThrow(/read-only/i);
+    expect(() => journal.commitProjection("existing", "claim", claimant)).toThrow(/read-only/i);
+    journal.close();
+
+    const inspect = SqliteEventJournal.openReadOnly(databasePath);
+    expect(inspect.inspectProjectionCursor("new")).toBeNull();
+    inspect.close();
+  });
+
   it("retains forever by default and never deletes during archive or maintenance", async () => {
     const { databasePath } = fixture();
     const retention = new JournalRetentionService(databasePath);
@@ -135,6 +154,20 @@ describe("JournalRetentionService", () => {
     expect(() => retention.verify()).toThrow(/checksum|tamper/i);
     expect(() => retention.openCombinedJournal()).toThrow(/checksum|tamper/i);
     expect(() => retention.restore({ name: "restored.sqlite" })).toThrow(/checksum|tamper/i);
+  });
+
+  it("rejects permissive archive roots and owner-writable archive files on reopen", () => {
+    const { databasePath } = fixture();
+    const retention = new JournalRetentionService(databasePath);
+    retention.archive({ throughPosition: 8, maxEvents: 8 });
+    chmodSync(retention.archiveRoot, 0o755);
+    expect(() => JournalRetentionService.openReadOnly(databasePath)).toThrow(/permission|private/i);
+
+    chmodSync(retention.archiveRoot, 0o700);
+    const manifest = readdirSync(retention.archiveRoot).find((name) => name.endsWith(".manifest.json"))!;
+    chmodSync(path.join(retention.archiveRoot, manifest), 0o600);
+    expect(() => JournalRetentionService.openReadOnly(databasePath).verify())
+      .toThrow(/permission|mode|permissive/i);
   });
 
   it("detects a missing manifest as an archive gap instead of silently shortening history", () => {
@@ -208,6 +241,11 @@ describe("JournalRetentionService", () => {
     expect(statSync(exported.path).mode & 0o777).toBe(0o400);
     const restored = retention.restore({ name: "restored.sqlite" });
     expect(path.dirname(restored.path)).toBe(path.dirname(retention.databasePath));
+    expect(restored).toMatchObject({
+      eventCount: exported.eventCount,
+      throughPosition: exported.throughPosition,
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     const journal = SqliteEventJournal.openReadOnly(restored.path);
     const events = journal.readAllPage(0, { maxEvents: 100, maxBytes: 1024 * 1024 }).events;
     expect(events).toHaveLength(exported.eventCount);
@@ -216,6 +254,10 @@ describe("JournalRetentionService", () => {
     };
     expect(events[0]).toMatchObject({ globalPosition: 1, eventId: exportedFirst.eventId });
     journal.close();
+    const source = SqliteEventJournal.openReadOnly(databasePath);
+    expect(source.readStream("journal:retention").map((event) => event.type))
+      .toEqual(expect.arrayContaining(["journal.restore.started", "journal.restore.completed"]));
+    source.close();
   });
 
   it("rejects path escapes and records an interrupted prune as uncertain without retrying it", () => {
@@ -224,6 +266,11 @@ describe("JournalRetentionService", () => {
     retention.archive({ throughPosition: 8, maxEvents: 8 });
     expect(() => retention.export({ name: "../escape.jsonl" })).toThrow(/safe file name/i);
     expect(() => retention.restore({ name: "/tmp/escape.sqlite" })).toThrow(/safe file name/i);
+    expect(() => retention.export({ name: "journal.sqlite-wal" })).toThrow(/reserved/i);
+    expect(() => retention.restore({ name: "journal.sqlite-shm" })).toThrow(/reserved/i);
+    expect(() => retention.export({ name: "journal.sqlite.archives" })).toThrow(/reserved/i);
+    expect(() => retention.export({ name: "JOURNAL.SQLITE-WAL" })).toThrow(/reserved/i);
+    expect(() => retention.restore({ name: "journal.sqlite-journal" })).toThrow(/reserved/i);
 
     const request = retention.requestPrune({ throughPosition: 8, operatorId: "operator-1" });
     expect(() => retention.prune({
@@ -325,6 +372,28 @@ describe("JournalRetentionService", () => {
       .toMatchObject({ outcome: "completed", state: "recovered_prune_completion" });
     expect(prune.reconcile({ operationId: pruneInspection.operationId!, confirmation: pruneConfirmation }))
       .toMatchObject({ outcome: "completed", repeated: true });
+  });
+
+  it("reconciles a restore published before completion without repeating the effect", () => {
+    const { databasePath } = fixture();
+    const retention = new JournalRetentionService(databasePath);
+    expect(() => retention.restore({ name: "recovered.sqlite", crashPoint: "after_publish" }))
+      .toThrow(/simulated crash/i);
+    const inspection = retention.inspectRecovery();
+    expect(inspection).toMatchObject({
+      outcome: "uncertain",
+      kind: "restore",
+      state: "restore_published_missing_completion",
+    });
+    const result = retention.reconcile({
+      operationId: inspection.operationId!,
+      confirmation: inspection.confirmation!,
+    });
+    expect(result).toMatchObject({ outcome: "completed", state: "recovered_restore_completion" });
+    expect(retention.inspectRecovery()).toMatchObject({ outcome: "clean" });
+    const restored = SqliteEventJournal.openReadOnly(path.join(path.dirname(databasePath), "recovered.sqlite"));
+    expect(restored.readAllPage().events).toHaveLength(24);
+    restored.close();
   });
 
   it("cancels proven no-effect prune authorization and explicitly cleans segment-only publication", () => {
@@ -490,7 +559,7 @@ describe("JournalRetentionService", () => {
     journal.close();
   });
 
-  it("stops archive scanning at a satisfied global or sparse-stream page boundary", () => {
+  it("verifies complete segments even when a global or sparse-stream page fills early", () => {
     const { databasePath } = fixture(12);
     const retention = new JournalRetentionService(databasePath);
     const archived = retention.archive({ throughPosition: 12, maxEvents: 12 });
@@ -499,12 +568,10 @@ describe("JournalRetentionService", () => {
     writeFileSync(archived.segmentPath, `${readFileSync(archived.segmentPath, "utf8")}corrupt`, "utf8");
     chmodSync(archived.segmentPath, 0o400);
 
-    expect(journal.readAllPage(0, { maxEvents: 1, maxBytes: 1024 * 1024 }).events)
-      .toEqual([expect.objectContaining({ globalPosition: 1 })]);
-    expect(journal.readStreamPage("stream-1", 0, { maxEvents: 1, maxBytes: 1024 * 1024 }).events)
-      .toEqual([expect.objectContaining({ globalPosition: 1, streamVersion: 1 })]);
-    expect(() => journal.readAllPage(1, { maxEvents: 100, maxBytes: 1024 * 1024 }))
-      .toThrow(/checksum|tampered|incomplete/i);
+    expect(() => journal.readAllPage(0, { maxEvents: 1, maxBytes: 1024 * 1024 }))
+      .toThrow(/checksum|canonical|tampered|incomplete/i);
+    expect(() => journal.readStreamPage("stream-1", 0, { maxEvents: 1, maxBytes: 1024 * 1024 }))
+      .toThrow(/checksum|canonical|tampered|incomplete/i);
     journal.close();
   });
 

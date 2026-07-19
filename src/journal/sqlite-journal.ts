@@ -66,7 +66,7 @@ const DEFAULT_PAGE_LIMITS: JournalPageLimits = {
 const SQLITE_BUSY_TIMEOUT_MS = 1_000;
 const SQLITE_OPERATION_TIMEOUT_MS = 1_000;
 const SQLITE_OPERATION_TIMEOUT_NS = BigInt(SQLITE_OPERATION_TIMEOUT_MS) * 1_000_000n;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const PROJECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const GLOBAL_HEAD_TRIGGER_SQL = `
   CREATE TRIGGER events_update_global_head
@@ -764,7 +764,7 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
         );
         CREATE TABLE IF NOT EXISTS retention_operations (
           operation_id TEXT PRIMARY KEY,
-          kind TEXT NOT NULL CHECK (kind IN ('archive', 'prune_request', 'prune', 'maintenance')),
+          kind TEXT NOT NULL CHECK (kind IN ('archive', 'prune_request', 'prune', 'maintenance', 'restore')),
           state TEXT NOT NULL CHECK (state IN (
             'publishing', 'authorized', 'effect_applied', 'consumed', 'completed', 'failed'
           )),
@@ -806,6 +806,49 @@ export class SqliteEventJournal implements DurablePagedEventJournal {
       }
       if (!tableHasColumn(this.db, "retention_operations", "maintenance_evidence")) {
         this.db.exec("ALTER TABLE retention_operations ADD COLUMN maintenance_evidence TEXT");
+      }
+      if (version > 0 && version < 6) {
+        this.db.exec(`
+          DROP INDEX IF EXISTS retention_one_active_operation;
+          DROP INDEX IF EXISTS retention_operations_request;
+          DROP INDEX IF EXISTS retention_operations_state;
+          ALTER TABLE retention_operations RENAME TO retention_operations_before_restore;
+          CREATE TABLE retention_operations (
+            operation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN (
+              'archive', 'prune_request', 'prune', 'maintenance', 'restore'
+            )),
+            state TEXT NOT NULL CHECK (state IN (
+              'publishing', 'authorized', 'effect_applied', 'consumed', 'completed', 'failed'
+            )),
+            from_position INTEGER,
+            through_position INTEGER NOT NULL CHECK (through_position >= 0),
+            segment_id TEXT,
+            segment_sha256 TEXT,
+            manifest_sha256 TEXT,
+            request_id TEXT,
+            operator_id TEXT,
+            maintenance_evidence TEXT,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO retention_operations (
+            operation_id, kind, state, from_position, through_position, segment_id,
+            segment_sha256, manifest_sha256, request_id, operator_id,
+            maintenance_evidence, created_at
+          )
+          SELECT operation_id, kind, state, from_position, through_position, segment_id,
+            segment_sha256, manifest_sha256, request_id, operator_id,
+            maintenance_evidence, created_at
+          FROM retention_operations_before_restore;
+          DROP TABLE retention_operations_before_restore;
+          CREATE UNIQUE INDEX retention_one_active_operation
+          ON retention_operations ((1))
+          WHERE state IN ('publishing', 'authorized', 'effect_applied');
+          CREATE INDEX retention_operations_request
+          ON retention_operations (request_id, kind, state);
+          CREATE INDEX retention_operations_state
+          ON retention_operations (state, created_at);
+        `);
       }
       const identity = this.db.prepare(
         "SELECT journal_id FROM journal_metadata WHERE singleton = 1",
