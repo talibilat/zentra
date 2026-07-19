@@ -168,3 +168,21 @@ export type {
   OpenCodeReviewerAssignment,
   OpenCodeReviewerProgram,
 } from "./reviews/opencode-reviewer-adapter.js";
+export {
+  RUNTIME_SCHEMA_VERSION,
+  RuntimeStateManager,
+  discoverProject,
+  initializeProjectRuntime,
+} from "./runtime/repository-runtime.js";
+export type {
+  ProjectDiscoveredEvidence,
+  ProjectDiscovery,
+  ProjectRuntimeLayout,
+  RuntimeClaim,
+  RuntimeOwnership,
+  RuntimePublicationEvidence,
+  RuntimeState,
+  RuntimeStateInput,
+  ServiceStartingEvidence,
+  StaleRuntimeEvidence,
+} from "./runtime/repository-runtime.js";
