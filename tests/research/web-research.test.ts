@@ -61,6 +61,40 @@ function transport(steps: Parameters<WebResearchTransport["dispatch"]>[0][] = []
 }
 
 describe("governed web research", () => {
+  it("folds a long retained request stream through bounded pages", async () => {
+    const journal = new SqliteEventJournal(":memory:");
+    const deniedRequest = request("https://docs.example.com/outside");
+    await new GovernedWebResearch(journal, transport()).execute(
+      deniedRequest,
+      policy(),
+      new AbortController().signal,
+    );
+    const retained = journal.readStream("web-research:task-1")[0]!;
+    journal.append(
+      "web-research:task-1",
+      1,
+      Array.from({ length: 10_000 }, () => ({
+        streamId: "web-research:task-1",
+        type: retained.type,
+        payload: retained.payload,
+        causationId: null,
+        correlationId: retained.correlationId,
+      })),
+    );
+    const dispatch = transport();
+
+    const result = await new GovernedWebResearch(journal, dispatch).execute(
+      deniedRequest,
+      policy(),
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({ outcome: "denied", reason: "invalid_request" });
+    expect(dispatch.dispatch).not.toHaveBeenCalled();
+    expect(journal.readStreamPage("web-research:task-1", 10_001).nextVersion).toBe(10_002);
+    journal.close();
+  });
+
   it("treats a non-directory destination path as exact", async () => {
     const journal = new SqliteEventJournal(":memory:");
     const exact = WebResearchPolicySchema.parse({

@@ -400,14 +400,14 @@ function createProgram(
       const milestoneId = `milestone-${createHash("sha256")
         .update(`${project.projectId}\0${options.goal}\0${options.file}`, "utf8")
         .digest("hex").slice(0, 16)}`;
-      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, liveStdout);
+      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, liveStdout, milestoneId);
       const sqlite = new SqliteEventJournal(options.database);
       let sink: AgentTailJsonlFileSink | undefined;
       let runner: InstalledMilestoneRunner | undefined;
       let projectionFailed = false;
       let runFailed = false;
       try {
-        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
+        sink = openAgentTailSink(sqlite, trace);
         runner = new InstalledMilestoneRunner({
           journal: sqlite,
           sink,
@@ -604,13 +604,14 @@ function createProgram(
         options.database,
         options.agentTailJsonl,
         options.agentTailStream === true ? liveStdout : undefined,
+        milestoneId,
       );
       const sqliteJournal = new SqliteEventJournal(options.database);
       let sink: AgentTailJsonlFileSink | undefined;
       let journal: ProjectingEventJournal | undefined;
       let stored;
       try {
-        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
+        sink = openAgentTailSink(sqliteJournal, trace);
         journal = new ProjectingEventJournal(sqliteJournal, sink);
         new JournalOutcomeHistoryStore(journal).begin({
           executionId: routed.executionId,
@@ -696,12 +697,12 @@ function createProgram(
     .requiredOption("--agent-tail-jsonl <path>", "new Agent Tail v1 JSONL trace path")
     .action(async (options: CapsuleConformanceOptions) => {
       assertSafeTaskId(options.capsuleId);
-      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+      const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, undefined, options.capsuleId);
       const sqliteJournal = new SqliteEventJournal(options.database);
       let sink: AgentTailJsonlFileSink | undefined;
       let journal: ProjectingEventJournal | undefined;
       try {
-        sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+        sink = openAgentTailSink(sqliteJournal, trace);
         journal = new ProjectingEventJournal(sqliteJournal, sink);
         const report = await new DockerCapsuleConformance(journal).run({
           capsuleId: options.capsuleId,
@@ -808,6 +809,7 @@ function createProgram(
           options.database,
           options.agentTailJsonl,
           options.agentTailStream === true ? liveStdout : undefined,
+          options.taskId,
         );
       const workerFixture = attestedWorkerFixture(fixtureAnchor);
       try {
@@ -895,14 +897,14 @@ async function runGitHubBrokerCli(
 ): Promise<void> {
   assertSafeTaskId(options.grantId);
   const policy = loadCapsulePolicy(options.policy);
-  const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl);
+  const trace = prepareAgentTailTrace(options.database, options.agentTailJsonl, undefined, options.grantId);
   const sqlite = new SqliteEventJournal(options.database);
   let sink: AgentTailJsonlFileSink | undefined;
   let journal: ProjectingEventJournal | undefined;
   let repositoryLeases: IntegrationLeaseStore | undefined;
   try {
     repositoryLeases = new IntegrationLeaseStore(realpathSync.native(options.database));
-    sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath);
+    sink = openAgentTailSink(sqlite, trace);
     journal = new ProjectingEventJournal(sqlite, sink);
     const broker = new GitHubEffectBroker(
       policy,
@@ -948,7 +950,7 @@ async function withSystem<T>(
     let journal: EventJournal = sqliteJournal;
     if (trace !== undefined) {
       if (mode !== "read-write") throw new Error("Agent Tail traces require a writable journal");
-      sink = AgentTailJsonlFileSink.open(trace.trustedRoot, trace.canonicalPath, trace.liveWriter);
+      sink = openAgentTailSink(sqliteJournal, trace);
       projectingJournal = new ProjectingEventJournal(sqliteJournal, sink);
       journal = projectingJournal;
     }
@@ -1065,13 +1067,15 @@ interface AgentTailTraceDestination {
   readonly trustedRoot: string;
   readonly canonicalPath: string;
   readonly liveWriter?: WriteOutput;
+  readonly traceId: string;
   projectionFailed: boolean;
 }
 
 function prepareAgentTailTrace(
   databasePath: string,
   requestedPath: string,
-  liveWriter?: WriteOutput,
+  liveWriter: WriteOutput | undefined,
+  traceId: string,
 ): AgentTailTraceDestination {
   if (!path.isAbsolute(requestedPath)) throw new Error("Agent Tail trace path must be absolute");
   if (path.normalize(requestedPath) !== requestedPath) {
@@ -1100,13 +1104,29 @@ function prepareAgentTailTrace(
   ) {
     throw new Error("Agent Tail trace path must not alias event journal files");
   }
-  assertSafeAgentTailJsonlPath(trustedRoot, canonicalPath);
+  assertSafeAgentTailJsonlPath(trustedRoot, canonicalPath, true);
   return {
     trustedRoot,
     canonicalPath,
+    traceId,
     ...(liveWriter === undefined ? {} : { liveWriter }),
     projectionFailed: false,
   };
+}
+
+function openAgentTailSink(
+  journal: SqliteEventJournal,
+  trace: AgentTailTraceDestination,
+): AgentTailJsonlFileSink {
+  const cursorName = AgentTailJsonlFileSink.projectionCursorName(trace.canonicalPath);
+  const resume = journal.inspectProjectionCursor(cursorName) !== null;
+  return AgentTailJsonlFileSink.open(
+    trace.trustedRoot,
+    trace.canonicalPath,
+    trace.traceId,
+    trace.liveWriter,
+    resume,
+  );
 }
 
 class LiveStdoutOutput {

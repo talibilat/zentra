@@ -1,4 +1,9 @@
-import type { EventJournal } from "../journal/journal.js";
+import {
+  iterateAllEvents,
+  readStreamEvents,
+  type DurablePagedEventJournal,
+  type EventJournal,
+} from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import type { AgentTailJsonlFileSink } from "../observability/agent-tail-file-sink.js";
 import type { ModelSheet } from "../policy/model-sheet.js";
@@ -65,7 +70,7 @@ export class OpenCodeReadOnlyProgram {
     readonly taskId: string;
     readonly capsuleId?: string;
   }): Promise<{ readonly outcome: "completed" | "uncertain"; readonly trace: "emitted" | "failed" }> {
-    const events = this.journal.readStream(request.milestoneId);
+    const events = readStreamEvents(this.journal, request.milestoneId);
     if (events.length === 0) throw new Error("OpenCode milestone does not exist");
     const pendingAttention = findPendingResearchAttention(this.journal, request.milestoneId, request.taskId);
     if (projectMilestone(events)?.lifecycle === "paused") return Object.freeze({ outcome: "completed", trace: this.projected.projectionFailed ? "failed" : "emitted" });
@@ -131,9 +136,9 @@ export class OpenCodeReadOnlyProgram {
   }
 
   async run(request: OpenCodeReadOnlyProgramRequest): Promise<OpenCodeReadOnlyProgramResult> {
-    const eventsBeforeAdmission = this.journal.readStream(request.milestoneId);
+    const eventsBeforeAdmission = readStreamEvents(this.journal, request.milestoneId);
     const retainedWorkers = Object.values(projectWorkerLifecycle(
-      this.journal.readStream(workerStreamId(request.taskId)),
+      readStreamEvents(this.journal, workerStreamId(request.taskId)),
     ).workers).filter((worker) => worker.taskId === request.taskId);
     if (retainedWorkers.length !== 0) {
       const states = [...new Set(retainedWorkers.map((worker) => worker.status))].sort().join(",");
@@ -184,7 +189,7 @@ export class OpenCodeReadOnlyProgram {
       admission: admission.admission,
     });
     const postRunWorkers = Object.values(projectWorkerLifecycle(
-      this.journal.readStream(workerStreamId(request.taskId)),
+      readStreamEvents(this.journal, workerStreamId(request.taskId)),
     ).workers).filter((worker) => worker.taskId === request.taskId);
     if (postRunWorkers.some((worker) => worker.status === "uncertain")) {
       return Object.freeze({
@@ -194,7 +199,7 @@ export class OpenCodeReadOnlyProgram {
       });
     }
     const observedTraceOutcome = this.projected.projectionFailed ? "failed" : "emitted";
-    const events = this.journal.readStream(request.milestoneId);
+    const events = readStreamEvents(this.journal, request.milestoneId);
     const correlationId = events[0]?.correlationId;
     if (correlationId === undefined) throw new Error("OpenCode milestone stream disappeared before trace observation");
     this.projected.append(request.milestoneId, events.at(-1)!.streamVersion, [{
@@ -206,7 +211,7 @@ export class OpenCodeReadOnlyProgram {
       correlationId,
     }]);
     if (observedTraceOutcome === "emitted" && this.projected.projectionFailed) {
-      const corrected = this.journal.readStream(request.milestoneId);
+      const corrected = readStreamEvents(this.journal, request.milestoneId);
       this.projected.append(request.milestoneId, corrected.at(-1)!.streamVersion, [{
         streamId: request.milestoneId,
         type: "milestone.agent_trace_observed",
@@ -233,14 +238,15 @@ interface PendingResearchAttention {
 }
 
 function findPendingResearchAttention(journal: EventJournal, milestoneId: string, taskId: string): PendingResearchAttention | null {
-  const pauses = new Set(journal.readStream(milestoneId).filter((event) => event.type === "milestone.capability_boundary_paused")
+  const pauses = new Set(readStreamEvents(journal, milestoneId).filter((event) => event.type === "milestone.capability_boundary_paused")
     .map((event) => typeof event.payload === "object" && event.payload !== null
       ? (event.payload as { occurrence?: { decisionId?: string } }).occurrence?.decisionId : undefined).filter((value): value is string => value !== undefined));
-  for (const acceptedEvent of journal.readAll().filter((event) => event.type === "capability_envelope.accepted")) {
+  for (const acceptedEvent of iterateAllEvents(journal)) {
+    if (acceptedEvent.type !== "capability_envelope.accepted") continue;
     const accepted = parseRoleCapabilityEventPayload(acceptedEvent.type, acceptedEvent.payload) as { readonly binding: RoleCapabilityBinding };
     if (accepted.binding.milestoneId !== milestoneId || accepted.binding.taskId !== taskId) continue;
     new RoleCapabilityEnvelopeService(journal).inspect(accepted.binding);
-    const evaluations = journal.readStream(acceptedEvent.streamId).filter((event) => event.type === "capability_envelope.evaluated");
+    const evaluations = readStreamEvents(journal, acceptedEvent.streamId).filter((event) => event.type === "capability_envelope.evaluated");
     for (const evaluationEvent of [...evaluations].reverse()) {
       const evaluation = parseRoleCapabilityEventPayload(evaluationEvent.type, evaluationEvent.payload) as { readonly request: { readonly kind: string }; readonly decision: RoleCapabilityDecision };
       if (evaluation.request.kind === "network" && evaluation.decision.status !== "allowed" && !pauses.has(evaluation.decision.decisionId)) {
@@ -272,12 +278,12 @@ function recoverResearchAttention(
     if (current.status === "running" || current.status === "bound") current = workers.cleanup(taskId, current.workerId, "completed");
     if (current.status === "cleaned") workers.terminate(taskId, current.workerId, "denied");
   }
-  const milestone = projectMilestone(journal.readStream(milestoneId));
+  const milestone = projectMilestone(readStreamEvents(journal, milestoneId));
   const planned = milestone?.plan?.tasks.find((task) => task.taskId === taskId);
   if (milestone === null || planned === undefined) throw new Error("research attention recovery lacks its planned task");
   const tasks = new TaskService(journal);
   if (tasks.readStream(taskId).length === 0) {
-    tasks.create({ taskId, projectId: milestone.projectId, title: planned.title, correlationId: journal.readStream(milestoneId)[0]!.correlationId });
+    tasks.create({ taskId, projectId: milestone.projectId, title: planned.title, correlationId: readStreamEvents(journal, milestoneId)[0]!.correlationId });
   }
   const occurrence = createCapabilityBoundaryOccurrence({
     binding: pending.binding, decision: pending.decision, evaluationEvent: pending.evaluationEvent,

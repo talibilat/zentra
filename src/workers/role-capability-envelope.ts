@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { digestCanonical } from "../contracts/authority-attention.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { capabilityEnvelope, CapabilityEnvelopeSchema } from "./worker-lifecycle.js";
 import { WebResearchPolicySchema } from "../research/web-research.js";
 import { researchDestinationAllows } from "../research/destination-policy.js";
@@ -250,7 +250,7 @@ export class RoleCapabilityEnvelopeService {
     const binding = RoleCapabilityBindingSchema.parse(rawBinding);
     assertCurrentAdmission(this.journal, binding);
     const streamId = roleCapabilityStreamId(binding);
-    const events = this.journal.readStream(streamId);
+    const events = readStreamEvents(this.journal, streamId);
     const accepted = events.filter((event) => event.type === "capability_envelope.accepted")
       .map((event) => AcceptedPayloadSchema.parse(event.payload).binding);
     if (accepted.length > 0) {
@@ -282,7 +282,7 @@ export class RoleCapabilityEnvelopeService {
     if (retained === null || retained.digest !== binding.digest) throw new Error("role capability envelope substitution is forbidden");
     const decision = evaluateRoleCapabilityRequest(binding, request);
     const streamId = roleCapabilityStreamId(binding);
-    const events = this.journal.readStream(streamId);
+    const events = readStreamEvents(this.journal, streamId);
     this.journal.append(streamId, events.length, [{
       streamId,
       type: "capability_envelope.evaluated",
@@ -298,7 +298,7 @@ export class RoleCapabilityEnvelopeService {
     const streamId = roleCapabilityStreamId(expectedBinding);
     let binding: RoleCapabilityBinding | null = null;
     let evaluationCount = 0;
-    for (const event of this.journal.readStream(streamId)) {
+    for (const event of readStreamEvents(this.journal, streamId)) {
       if (event.streamId !== streamId || event.correlationId !== expectedBinding.correlationId) throw new Error("capability envelope event identity mismatch");
       if (event.type === "capability_envelope.accepted") {
         const candidate = AcceptedPayloadSchema.parse(event.payload).binding;
@@ -318,7 +318,7 @@ export class RoleCapabilityEnvelopeService {
 
   evaluationEvent(binding: RoleCapabilityBinding, decisionId: string): import("../contracts/event.js").StoredEvent {
     this.inspect(binding);
-    const event = this.journal.readStream(roleCapabilityStreamId(binding)).find((candidate) => {
+    const event = readStreamEvents(this.journal, roleCapabilityStreamId(binding)).find((candidate) => {
       if (candidate.type !== "capability_envelope.evaluated") return false;
       const payload = EvaluatedPayloadSchema.parse(candidate.payload);
       return payload.decision.decisionId === decisionId;
@@ -420,7 +420,7 @@ function decisionId(bindingDigest: string, requestDigest: string, status: string
 }
 
 function assertCurrentAdmission(journal: EventJournal, binding: RoleCapabilityBinding): void {
-  const milestoneEvents = journal.readStream(binding.milestoneId);
+  const milestoneEvents = readStreamEvents(journal, binding.milestoneId);
   if (!milestoneEvents.some((event) => event.type === "milestone.created")) return;
   const admission = [...milestoneEvents].reverse().find((event) => {
     if (event.type !== "milestone.task_ready" || typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) return false;

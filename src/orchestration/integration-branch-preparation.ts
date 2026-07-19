@@ -6,7 +6,7 @@ import {
   createIntegrationBranchPreparationIntent,
   type IntegrationBranchPreparationIntent,
 } from "../contracts/integration-branch-preparation.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import type { MilestoneRecord, MilestoneRegistry } from "../milestones/milestone-registry.js";
 import type { ProjectConfig } from "../projects/project-config.js";
 import type { GitClient } from "../workspaces/git-client.js";
@@ -34,12 +34,12 @@ export class IntegrationBranchPreparation {
     { readonly status: "paused"; readonly milestone: MilestoneRecord }> {
     const milestone = this.milestones.inspect(input.milestoneId);
     if (milestone === null || milestone.plan === null) throw new Error("integration branch preparation requires a durable milestone plan");
-    const stream = this.journal.readStream(input.milestoneId);
+    const stream = readStreamEvents(this.journal, input.milestoneId);
     let intentEvent = stream.find((event) => event.type === "milestone.integration_branch_preparation_intent");
     let intent: IntegrationBranchPreparationIntent;
     if (intentEvent === undefined) {
       intent = await this.createIntent(milestone, input.project, input.signal);
-      const current = this.journal.readStream(input.milestoneId);
+      const current = readStreamEvents(this.journal, input.milestoneId);
       const stored = this.journal.append(input.milestoneId, current.at(-1)!.streamVersion, [{
         streamId: input.milestoneId,
         type: "milestone.integration_branch_preparation_intent",
@@ -52,7 +52,7 @@ export class IntegrationBranchPreparation {
     } else {
       intent = IntegrationBranchPreparationIntentSchema.parse(intentEvent.payload);
     }
-    const observed = this.journal.readStream(input.milestoneId).find((event) =>
+    const observed = readStreamEvents(this.journal, input.milestoneId).find((event) =>
       event.type === "milestone.integration_branch_preparation_observed");
     if (observed !== undefined) {
       const payload = IntegrationBranchPreparationObservedSchema.parse(observed.payload);
@@ -105,7 +105,7 @@ export class IntegrationBranchPreparation {
     await input.hooks?.beforeObservedAppend?.();
     const observationIdentity = await this.verifyIdentity(intent, input.signal);
     if (observationIdentity !== null) return this.pause(input.milestoneId, intent, observationIdentity);
-    const current = this.journal.readStream(input.milestoneId);
+    const current = readStreamEvents(this.journal, input.milestoneId);
     this.journal.append(input.milestoneId, current.at(-1)!.streamVersion, [{
       streamId: input.milestoneId,
       type: "milestone.integration_branch_preparation_observed",

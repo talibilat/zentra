@@ -29,7 +29,7 @@ describe("secure Docker capsule acceptance", () => {
     const databasePath = path.join(root, "journal.sqlite");
     const tracePath = path.join(root, "agent-tail.jsonl");
     const sqlite = new SqliteEventJournal(databasePath);
-    const sink = AgentTailJsonlFileSink.open(root, tracePath);
+    const sink = AgentTailJsonlFileSink.open(root, tracePath, "docker-acceptance");
     const journal = new ProjectingEventJournal(sqlite, sink);
     let report;
     try {

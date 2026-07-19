@@ -3,7 +3,7 @@ import { z } from "zod";
 import { digestCanonical } from "./authority-attention.js";
 import { TerminalOutcomeSchema } from "./task.js";
 import type { StoredEvent } from "./event.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   RoleCapabilityBindingSchema,
   RoleCapabilityDecisionSchema,
@@ -175,7 +175,7 @@ export function createCapabilityBoundaryResolution(input: Omit<z.input<typeof Ca
 
 export function verifyCapabilityBoundaryOccurrence(journal: EventJournal, raw: CapabilityBoundaryOccurrence): CapabilityBoundaryOccurrence {
   const occurrence = CapabilityBoundaryOccurrenceSchema.parse(raw);
-  const stream = journal.readStream(occurrence.evaluation.streamId);
+  const stream = readStreamEvents(journal, occurrence.evaluation.streamId);
   const accepted = stream[0];
   const evaluationEvent = stream.find((event) => event.streamVersion === occurrence.evaluation.streamVersion);
   if (accepted?.type !== "capability_envelope.accepted" || evaluationEvent === undefined ||
@@ -198,7 +198,7 @@ export function verifyCapabilityBoundaryOccurrence(journal: EventJournal, raw: C
     decision.status !== occurrence.status || decision.reason !== occurrence.reason) {
     throw new Error("capability boundary decision occurrence is stale or forged");
   }
-  const workers = Object.values(projectWorkerLifecycle(journal.readStream(workerStreamId(occurrence.taskId))).workers);
+  const workers = Object.values(projectWorkerLifecycle(readStreamEvents(journal, workerStreamId(occurrence.taskId))).workers);
   if (workers.some((worker) => worker.status !== "terminal")) throw new Error("capability boundary requires settled workers");
   if (occurrence.workerSettlement !== null) {
     const worker = workers.find((candidate) => candidate.workerId === occurrence.workerSettlement!.workerId);
@@ -232,7 +232,7 @@ export function capabilityTaskHead(events: readonly StoredEvent[]): z.infer<type
 
 export function verifyCurrentCapabilityTaskHead(journal: EventJournal, occurrence: CapabilityBoundaryOccurrence): StoredEvent {
   verifyCapabilityBoundaryOccurrence(journal, occurrence);
-  const events = journal.readStream(occurrence.taskId);
+  const events = readStreamEvents(journal, occurrence.taskId);
   const head = events.at(-1);
   if (head === undefined || digestCanonical(capabilityTaskHead(events)) !== digestCanonical(occurrence.taskHead)) throw new Error("capability boundary task head is stale");
   return head;
@@ -240,7 +240,7 @@ export function verifyCurrentCapabilityTaskHead(journal: EventJournal, occurrenc
 
 export function verifyCapabilityPauseSource(journal: EventJournal, occurrence: CapabilityBoundaryOccurrence): StoredEvent {
   verifyCapabilityBoundaryOccurrence(journal, occurrence);
-  const milestoneEvents = journal.readStream(occurrence.milestoneId);
+  const milestoneEvents = readStreamEvents(journal, occurrence.milestoneId);
   if (milestoneEvents[0]?.type !== "milestone.created") throw new Error("task capability pause requires an authoritative milestone stream");
   const source = milestoneEvents.find((event) => {
     if (event.type !== "milestone.capability_boundary_paused") return false;
@@ -255,7 +255,7 @@ export function verifyCapabilityPauseSource(journal: EventJournal, occurrence: C
 
 export function verifyCapabilityResolutionSource(journal: EventJournal, resolution: CapabilityBoundaryResolution): StoredEvent {
   const parsed = CapabilityBoundaryResolutionSchema.parse(resolution);
-  const source = journal.readStream(parsed.milestoneId).find((event) => {
+  const source = readStreamEvents(journal, parsed.milestoneId).find((event) => {
     if (event.type !== "milestone.capability_boundary_resolved") return false;
     const payload = CapabilityBoundaryResolvedPayloadSchema.safeParse(event.payload);
     return payload.success && payload.data.resolution.resolutionId === parsed.resolutionId;
@@ -268,7 +268,7 @@ export function verifyCapabilityResolutionSource(journal: EventJournal, resoluti
 }
 
 function verifyTaskHeadReference(journal: EventJournal, head: z.infer<typeof CapabilityTaskHeadSchema>): StoredEvent {
-  const stream = journal.readStream(head.streamId);
+  const stream = readStreamEvents(journal, head.streamId);
   const prefix = stream.filter((candidate) => candidate.streamVersion <= head.streamVersion);
   const event = prefix.at(-1);
   if (event === undefined || !taskHeadEventMatches(head, event) || digestCanonical(capabilityTaskHead(prefix)) !== digestCanonical(head)) {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { StoredEvent } from "../contracts/event.js";
 import type { MilestoneRole } from "../contracts/milestone.js";
-import type { EventJournal } from "../journal/journal.js";
+import { assertBoundedProjectionEntries, findAllEvent, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   OutcomeHistoryRecordSchema,
   RoutingSelectionSchema,
@@ -44,12 +44,12 @@ export class JournalOutcomeHistoryStore {
     readonly terminalEvidence: OutcomeHistoryRecord["terminalEvidence"];
     readonly causationId: string;
   }): StoredEvent {
-    const events = this.journal.readStream(streamId(input.executionId));
+    const events = readStreamEvents(this.journal, streamId(input.executionId));
     if (events.length !== 1 || events[0]!.type !== "routing.model_selected") {
       throw new Error("routing outcome requires exactly one incomplete selection");
     }
     const selection = RoutingSelectionSchema.parse(events[0]!.payload);
-    assertTerminalEvidence(this.journal.readAll(), input.terminalEvidence, input.outcome, selection.taskId);
+    assertTerminalEvidence(this.journal, input.terminalEvidence, input.outcome, selection.taskId);
     const payload = OutcomeHistoryRecordSchema.parse({
       schemaVersion: 1,
       executionId: selection.executionId,
@@ -79,7 +79,7 @@ export class JournalOutcomeHistoryStore {
   }
 
   completeFromTask(executionId: string, taskEvents: readonly StoredEvent[]): StoredEvent {
-    const selectionEvents = this.journal.readStream(streamId(executionId));
+    const selectionEvents = readStreamEvents(this.journal, streamId(executionId));
     if (selectionEvents.length !== 1) throw new Error("routing selection is not incomplete");
     const selection = RoutingSelectionSchema.parse(selectionEvents[0]!.payload);
     const writer = taskEvents.find((event) => event.type === "task.writer_completed");
@@ -131,13 +131,14 @@ export class JournalOutcomeHistoryStore {
     readonly role: MilestoneRole;
     readonly harness: "opencode";
   }): readonly OutcomeHistoryRecord[] {
-    const all = this.journal.readAll();
-    const byEventId = new Map(all.map((event) => [event.eventId, event] as const));
     const routingStreams = new Map<string, StoredEvent[]>();
-    for (const event of all.filter((candidate) => candidate.streamId.startsWith("routing-execution/"))) {
+    for (const event of iterateAllEvents(this.journal)) {
+      if (!event.streamId.startsWith("routing-execution/")) continue;
       const list = routingStreams.get(event.streamId) ?? [];
+      if (list.length >= 2) throw new Error("routing execution stream is invalid");
       list.push(event);
       routingStreams.set(event.streamId, list);
+      assertBoundedProjectionEntries(routingStreams.size, "routing history");
     }
     const outcomes: OutcomeHistoryRecord[] = [];
     for (const [stream, events] of routingStreams) {
@@ -161,8 +162,9 @@ export class JournalOutcomeHistoryStore {
         !outcome.terminalEvidence.some((evidence) => evidence.eventId === outcomeEvent.causationId)) {
         throw new Error("routing outcome contradicts its selection or causation");
       }
-      assertTerminalEvidence([...byEventId.values()], outcome.terminalEvidence, outcome.outcome, outcome.taskId);
+      assertTerminalEvidence(this.journal, outcome.terminalEvidence, outcome.outcome, outcome.taskId);
       outcomes.push(outcome);
+      assertBoundedProjectionEntries(outcomes.length, "routing outcomes");
     }
     return Object.freeze(outcomes.filter((record) =>
       record.taskType === query.taskType &&
@@ -185,14 +187,13 @@ function matches(
 }
 
 function assertTerminalEvidence(
-  events: readonly StoredEvent[],
+  journal: EventJournal,
   evidence: OutcomeHistoryRecord["terminalEvidence"],
   outcome: OutcomeHistoryRecord["outcome"],
   taskId: string,
 ): void {
-  const byId = new Map(events.map((event) => [event.eventId, event] as const));
   for (const reference of evidence) {
-    const event = byId.get(reference.eventId);
+    const event = findAllEvent(journal, (candidate) => candidate.eventId === reference.eventId);
     const taskTerminal = event?.type === `task.${outcome}` && event.streamId === taskId;
     const milestoneTerminal = event?.type === "milestone.task_completed" &&
       typeof event.payload === "object" && event.payload !== null &&

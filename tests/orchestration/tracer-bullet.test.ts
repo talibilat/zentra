@@ -1278,7 +1278,11 @@ describe("TracerBulletOrchestrator", () => {
       const batches: string[][] = [];
       const traceRoot = realpathSync.native(fixture.baseDirectory);
       const tracePath = path.join(traceRoot, `validation-${outcome}.jsonl`);
-      const sink = AgentTailJsonlFileSink.open(traceRoot, tracePath);
+      const sink = AgentTailJsonlFileSink.open(
+        traceRoot,
+        tracePath,
+        `task-validation-${outcome}`,
+      );
       class RecordingTaskService extends TaskService {
         override appendBatch(
           ...args: Parameters<TaskService["appendBatch"]>

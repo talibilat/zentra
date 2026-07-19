@@ -8,7 +8,7 @@ import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import { z } from "zod";
 
 import { digestCanonical } from "../contracts/authority-attention.js";
-import type { EventJournal } from "../journal/journal.js";
+import { foldStreamEvents, type EventJournal } from "../journal/journal.js";
 import { isPublicAddress } from "../capsule/egress-policy.js";
 import { researchDestinationAllows } from "./destination-policy.js";
 
@@ -320,8 +320,22 @@ export class GovernedWebResearch {
       return WebResearchResultSchema.parse({ outcome: "denied", reason: "invalid_request", content: null, evidence: null, identity, usage: usage(0, 0, 0, Date.now() - started) });
     }
     const streamId = `web-research:${request.taskId}`;
-    const events = this.journal.readStream(streamId);
-    const prior = events.map((event) => parseJournalResult(event.payload));
+    const prior = foldStreamEvents(this.journal, streamId, {
+      version: 0,
+      duplicate: false,
+      usedRequests: 0,
+      usedBytes: 0,
+      usedTime: 0,
+    }, (state, event) => {
+      const entry = parseJournalResult(event.payload);
+      return {
+        version: event.streamVersion,
+        duplicate: state.duplicate || entry.requestId === request.requestId,
+        usedRequests: state.usedRequests + entry.usage.requests,
+        usedBytes: state.usedBytes + entry.usage.compressedBytes + entry.usage.decompressedBytes,
+        usedTime: state.usedTime + entry.usage.elapsedMs,
+      };
+    });
     const requestDigest = digestCanonical(request);
     let requests = 0;
     let compressedBytes = 0;
@@ -329,7 +343,7 @@ export class GovernedWebResearch {
     const append = (result: BareWebResearchResult, elapsedMs = Date.now() - started): WebResearchResult => {
       const safe = WebResearchResultSchema.parse({ ...result, identity, usage: usage(requests, compressedBytes, decompressedBytes, elapsedMs) });
       const { content: _content, ...journalResult } = safe;
-      this.journal.append(streamId, events.length, [{
+      this.journal.append(streamId, prior.version, [{
         streamId,
         type: "web_research.observed",
         payload: journalEvent({ ...journalResult, requestId: request.requestId, requestDigest, elapsedMs }),
@@ -343,10 +357,8 @@ export class GovernedWebResearch {
       (request.method !== policy.requiredRequest.method || request.url !== policy.requiredRequest.url)) {
       return append(denied("invalid_request"), 0);
     }
-    if (prior.some((entry) => entry.requestId === request.requestId)) return append(denied("invalid_request"), 0);
-    const usedRequests = prior.reduce((sum, entry) => sum + entry.usage.requests, 0);
-    const usedBytes = prior.reduce((sum, entry) => sum + entry.usage.compressedBytes + entry.usage.decompressedBytes, 0);
-    const usedTime = prior.reduce((sum, entry) => sum + entry.usage.elapsedMs, 0);
+    if (prior.duplicate) return append(denied("invalid_request"), 0);
+    const { usedRequests, usedBytes, usedTime } = prior;
     if (usedRequests >= policy.budget.maxRequests || usedBytes >= policy.budget.maxBytes || usedTime >= policy.budget.maxTimeMs) {
       return append(denied("budget_exhausted"), 0);
     }

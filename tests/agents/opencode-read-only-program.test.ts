@@ -45,7 +45,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"), "trace-model-boundary");
     const execute = vi.fn();
     const brokerExecute = vi.fn();
     const program = new OpenCodeReadOnlyProgram(
@@ -92,7 +92,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    const sink = AgentTailJsonlFileSink.open(requested, path.join(requested, "repository.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(requested, path.join(requested, "repository.jsonl"), "trace-repository");
     const execute = vi.fn();
     const brokerExecute = vi.fn();
     const program = new OpenCodeReadOnlyProgram(
@@ -122,7 +122,7 @@ describe("OpenCodeReadOnlyProgram", () => {
     rmSync(requested, { recursive: true, force: true });
   });
 
-  it.each([[false, "emitted"], [true, "emitted"]] as const)(
+  it.each([[false, "emitted"], [true, "failed"]] as const)(
     "purely rejects before every agent effect when the trace sink is closed=%s",
     async (sinkClosed, traceOutcome) => {
       const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-opencode-boundary-")));
@@ -143,7 +143,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         payload: { taskId: "task-boundary", admissionDigest: "a".repeat(64) },
         causationId: null, correlationId: "trace-boundary",
       }]);
-      const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"));
+      const sink = AgentTailJsonlFileSink.open(root, path.join(root, "boundary.jsonl"), "trace-boundary");
       if (sinkClosed) sink.close();
       const execute = vi.fn();
       const brokerExecute = vi.fn();
@@ -174,7 +174,11 @@ describe("OpenCodeReadOnlyProgram", () => {
       ]);
       if (!sinkClosed) {
         sink.close();
-        expect((await import("node:fs")).readFileSync(path.join(root, "boundary.jsonl"), "utf8")).toBe("");
+        const retained = (await import("node:fs")).readFileSync(
+          path.join(root, "boundary.jsonl"),
+          "utf8",
+        ).trim().split("\n");
+        expect(retained).toHaveLength(3);
       }
       journal.close();
       rmSync(root, { recursive: true, force: true });
@@ -200,7 +204,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"), "trace-program");
     if (sinkClosed) sink.close();
     const capsule: OpenCodeReadOnlyCapsule = { execute: async (request, broker, signal, observe) => {
       observe?.({ type: "resources_prepared", payload: {
@@ -308,7 +312,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"), "trace-reconcile");
     let reconciliations = 0;
     const capsule = {
       execute: async () => { throw new Error("must not execute"); },
@@ -362,7 +366,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 },
       }] },
     });
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"), "trace-uncertain");
     const execute = vi.fn(async (request, _broker, _signal, observe) => {
       observe?.({ type: "resources_prepared", payload: {
         capsuleId: request.capsuleId, resourceLabel: request.resources.resourceLabel,
@@ -447,7 +451,7 @@ describe("OpenCodeReadOnlyProgram", () => {
     first.close();
 
     const reopened = new SqliteEventJournal(database);
-    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"));
+    const sink = AgentTailJsonlFileSink.open(root, path.join(root, "trace.jsonl"), "trace-attention-restart");
     const execute = vi.fn(); const reconcile = vi.fn(async () => ({ outcome: "completed" as const, containerId: null, imageId: null, containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true }));
     const program = new OpenCodeReadOnlyProgram(reopened, sink, { execute: vi.fn() }, models, webSecurity, { execute, reconcile } as never);
     await expect(program.reconcile({ milestoneId: "milestone-attention-restart", taskId: "task-attention-restart" })).resolves.toEqual({ outcome: "completed", trace: "emitted" });

@@ -2,9 +2,7 @@ import type {
   NewEvent,
   StoredEvent,
 } from "../contracts/event.js";
-import type {
-  EventJournal,
-} from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   projectTask,
   type TaskView,
@@ -69,7 +67,7 @@ export class TaskService {
     }[],
   ): TaskView {
     if (inputs.length === 0) throw new Error("event batch must not be empty");
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     const current = projectTask(events);
     if (current === null) {
       throw new Error(`task ${taskId} not found`);
@@ -99,14 +97,14 @@ export class TaskService {
   }
 
   get(taskId: string): TaskView | null {
-    const events = this.journal.readStream(taskId);
+    const events = readStreamEvents(this.journal, taskId);
     const view = projectTask(events);
     this.verifyCapabilityBoundaries(events);
     return view;
   }
 
   readStream(taskId: string): readonly StoredEvent[] {
-    return this.journal.readStream(taskId);
+    return readStreamEvents(this.journal, taskId);
   }
 
   eventJournal(): EventJournal {

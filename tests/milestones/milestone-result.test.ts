@@ -5,7 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import type { NewEvent } from "../../src/contracts/event.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 
@@ -67,6 +67,8 @@ describe("evidence-backed milestone terminalization", () => {
     const racing: EventJournal = {
       readStream: (...args) => inner.readStream(...args),
       readAll: (...args) => inner.readAll(...args),
+      readStreamPage: (...args) => inner.readStreamPage(...args),
+      readAllPage: (...args) => inner.readAllPage(...args),
       append: (streamId, version, events) => {
         if (!injected && events[0]?.type === "milestone.completed") {
           injected = true;

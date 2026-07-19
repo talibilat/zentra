@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { projectMilestone } from "../../src/milestones/milestone-projection.js";
@@ -27,6 +27,8 @@ describe("IntegrationBranchPreparation", () => {
       },
       readStream: (streamId, after) => fixture.journal.readStream(streamId, after),
       readAll: (after) => fixture.journal.readAll(after),
+      readStreamPage: (streamId, after, limits) => fixture.journal.readStreamPage(streamId, after, limits),
+      readAllPage: (after, limits) => fixture.journal.readAllPage(after, limits),
     };
     await expect(new IntegrationBranchPreparation(failing, new MilestoneRegistry(failing), fixture.git).prepare({
       milestoneId: "milestone", project: fixture.project, signal: AbortSignal.timeout(10_000),

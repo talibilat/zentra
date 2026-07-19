@@ -159,6 +159,15 @@ describe("LocalReleaseCoordinator", () => {
           ? { ...event, payload: { ...event.payload, evidence: { ...event.payload.evidence, packetDigest: "0".repeat(64) } } }
           : event),
       readAll: (afterPosition?: number) => fixture.journal.readAll(afterPosition),
+      readStreamPage: (streamId: string, afterVersion?: number, limits?: Parameters<SqliteEventJournal["readStreamPage"]>[2]) => ({
+        ...fixture.journal.readStreamPage(streamId, afterVersion, limits),
+        events: fixture.journal.readStreamPage(streamId, afterVersion, limits).events.map((event: any) =>
+          event.type === "milestone.task_completed"
+            ? { ...event, payload: { ...event.payload, evidence: { ...event.payload.evidence, packetDigest: "0".repeat(64) } } }
+            : event),
+      }),
+      readAllPage: (afterPosition?: number, limits?: Parameters<SqliteEventJournal["readAllPage"]>[1]) =>
+        fixture.journal.readAllPage(afterPosition, limits),
       append: () => { throw new Error("forged replay must not append"); },
     };
     const replayRunner = { run: vi.fn() };

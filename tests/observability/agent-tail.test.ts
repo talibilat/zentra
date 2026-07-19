@@ -7,6 +7,8 @@ import { createAuthorityAttention, createOpenCodeAdmissionPacket, digestCanonica
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { capabilityEnvelope } from "../../src/workers/worker-lifecycle.js";
 import {
+  AGENT_TAIL_EVENT_TYPES,
+  AGENT_TAIL_PAYLOAD_SCHEMAS,
   agentTailEventToJsonLine,
   storedEventToAgentTailEvent,
   storedEventsToAgentTailEvents,
@@ -27,6 +29,135 @@ function storedEvent(input: Partial<StoredEvent> & Pick<StoredEvent, "type">): S
 }
 
 describe("Agent Tail event envelope export", () => {
+  it("keeps mandatory payload schemas in exact parity with the event allowlist", () => {
+    expect(Object.keys(AGENT_TAIL_PAYLOAD_SCHEMAS).sort()).toEqual(
+      [...AGENT_TAIL_EVENT_TYPES].sort(),
+    );
+  });
+
+  it.each(AGENT_TAIL_EVENT_TYPES)("rejects a null payload for %s", (type) => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({ type, payload: null }))).toThrow();
+  });
+
+  it.each(AGENT_TAIL_EVENT_TYPES)("rejects a scalar payload for %s", (type) => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({ type, payload: "malformed" }))).toThrow();
+  });
+
+  it.each(AGENT_TAIL_EVENT_TYPES)("rejects missing mandatory payload fields for %s", (type) => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({ type, payload: {} }))).toThrow();
+  });
+
+  it("fails closed for an unknown event family instead of releasing its payload", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "unknown.secret",
+      payload: { reusableSecret: "must-not-project" },
+    }))).toThrow(/projection policy does not recognize/i);
+  });
+
+  it("fails closed for an unknown task event carrying credentials", () => {
+    const secret = "ghp_must_not_leave_the_journal";
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "task.credentials_exported",
+      payload: { token: secret },
+    }))).toThrow(/projection policy does not recognize/i);
+  });
+
+  it("redacts validation output, argv, and paths from task validation events", () => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({
+      type: "task.validation_completed",
+      payload: { validation: {
+        name: "focused", outcome: "failed", exitCode: 1,
+        stdout: "SECRET_CANARY_STDOUT", stderr: "SECRET_CANARY_STDERR",
+        command: ["node", "--token=SECRET_ARG"],
+        argvSha256: "a".repeat(64), outputSha256: "b".repeat(64),
+        startedAt: "2026-07-01T00:00:00.000Z", finishedAt: "2026-07-01T00:00:01.000Z",
+        provenance: { invocationId: "invocation-1", canonicalCwd: "/secret/project/path", subjectSha256: "c".repeat(64) },
+      } },
+    })));
+    expect(line).not.toMatch(/SECRET_CANARY|SECRET_ARG|secret\/project|stdout|stderr|command/);
+    expect(line).toContain("a".repeat(64));
+    expect(line).toContain("b".repeat(64));
+  });
+
+  it("redacts patch bodies and artifact paths", () => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({
+      type: "artifact.patch_recorded",
+      payload: {
+        artifact: {
+          artifactId: "artifact-1", taskId: "task-1", kind: "patch",
+          path: "secret/artifact.patch", sha256: "a".repeat(64),
+          createdAt: "2026-07-01T00:00:00.000Z",
+        },
+        evidence: {
+          diff: "SECRET_CANARY_PATCH", diffSha256: "b".repeat(64),
+          changedPath: "src/secret.ts", changedContentSha256: "c".repeat(64),
+        },
+      },
+    })));
+    expect(line).not.toMatch(/SECRET_CANARY|secret\/artifact|src\/secret|diff\"/);
+    expect(line).toContain("b".repeat(64));
+  });
+
+  it.each([
+    ["task.review_requested", { reviewerId: "reviewer-1", validation: { name: "focused", outcome: "failed", stdout: "SECRET_CANARY_REVIEW", command: ["--secret-arg"], provenance: { canonicalCwd: "/secret/review" } } }],
+    ["task.failed", { stage: "validation", outcome: "failed", reason: "SECRET_CANARY_FAILURE", error: { message: "SECRET_CANARY_ERROR", path: "/secret/error" }, evidenceSha256: "d".repeat(64) }],
+    ["task.integration_observed", { outcome: "failed", reason: "integration uncertain", evidence: { receipt: { validation: { stderr: "SECRET_CANARY_RECEIPT" }, diff: "SECRET_DIFF", path: "/secret/path" } }, receiptSha256: "e".repeat(64) }],
+  ] as const)("conservatively redacts unrestricted payloads for %s", (type, payload) => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({ type, payload })));
+    expect(line).not.toMatch(/SECRET_CANARY|SECRET_DIFF|secret-arg|\/secret\//);
+    expect(line).not.toMatch(/stdout|stderr|command|validation|"receipt"|"diff"|"path"|reason|error/i);
+  });
+
+  it.each([
+    ["milestone.created", { projectId: "project-1", title: "SECRET_CANARY_TITLE" }],
+    ["milestone.plan_created", { plan: { milestoneId: "milestone-1", projectId: "project-1", tasks: [] } }],
+    ["task.started", { workerId: "worker-1" }],
+  ] as const)("drops arbitrary strings and nested objects from allowlisted %s", (type, required) => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({ type, payload: {
+      ...required, description: "SECRET_CANARY_DESCRIPTION",
+      url: "https://secret.example",
+      header: "Bearer SECRET_CANARY_HEADER", privateKey: "SECRET_CANARY_PRIVATE_KEY",
+      nested: { content: "SECRET_CANARY_NESTED" }, outcome: "failed",
+    } })));
+    expect(line).not.toMatch(/SECRET_CANARY|secret\.example|privateKey|header|description|title|nested/);
+  });
+
+  it("projects only safe writer network-boundary metadata", () => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({
+      type: "task.writer_completed",
+      payload: {
+        workerId: "writer-1", outcome: "completed", stdout: "SECRET_CANARY", command: ["--secret"],
+        networkBoundary: {
+          mode: "denied", networkDisabled: true, nativeWebToolsDenied: true,
+          mcpDenied: true, configurationDigest: "a".repeat(64),
+          privateNote: "SECRET_NETWORK_NOTE",
+        },
+      },
+    })));
+    expect(line).toContain('"networkBoundary"');
+    expect(line).toContain('"networkDisabled":true');
+    expect(line).not.toMatch(/SECRET_CANARY|SECRET_NETWORK_NOTE|privateNote|command|stdout/);
+  });
+
+  it("rejects malformed validation digests instead of projecting attacker text", () => {
+    expect(() => storedEventToAgentTailEvent(storedEvent({
+      type: "task.validation_completed",
+      payload: { validation: {
+        name: "focused", outcome: "failed", exitCode: 1,
+        argvSha256: "SECRET_CANARY_NOT_A_DIGEST", outputSha256: "b".repeat(64),
+        startedAt: "2026-07-01T00:00:00.000Z", finishedAt: "2026-07-01T00:00:01.000Z",
+      } },
+    }))).toThrow();
+  });
+
+  it("never releases credentialId or tokenId through generic projection", () => {
+    const line = JSON.stringify(storedEventToAgentTailEvent(storedEvent({
+      type: "task.started",
+      payload: { credentialId: "SECRET_CREDENTIAL", tokenId: "SECRET_TOKEN", workerId: "worker-1" },
+    })));
+    expect(line).not.toMatch(/credentialId|tokenId|SECRET_CREDENTIAL|SECRET_TOKEN/);
+  });
+
   it("strictly parses and redacts local release command output", () => {
     const mapped = storedEventToAgentTailEvent(storedEvent({
       type: "release.step_observed",
@@ -149,14 +280,14 @@ describe("Agent Tail event envelope export", () => {
           native_type: "task.created",
         },
       },
-      payload: { projectId: "zentra", title: "Create trace" },
+      payload: { projectId: "zentra" },
     });
   });
 
   it("uses journal globalPosition as sequence rather than streamVersion", () => {
     const exported = storedEventsToAgentTailEvents([
-      storedEvent({ type: "task.created", streamVersion: 1, globalPosition: 100 }),
-      storedEvent({ type: "task.started", streamVersion: 2, globalPosition: 250 }),
+      storedEvent({ type: "task.created", payload: { projectId: "zentra", title: "Trace" }, streamVersion: 1, globalPosition: 100 }),
+      storedEvent({ type: "task.started", payload: { workerId: "worker-1" }, streamVersion: 2, globalPosition: 250 }),
     ]);
 
     expect(exported.map((event) => event.sequence)).toEqual([100, 250]);
@@ -165,11 +296,11 @@ describe("Agent Tail event envelope export", () => {
   it("maps worker, validator, reviewer, integration, recovery, and terminal display actors", () => {
     const exported = storedEventsToAgentTailEvents([
       storedEvent({ type: "task.started", payload: { workerId: "opencode-worker-1" } }),
-      storedEvent({ type: "task.validation_started" }),
-      storedEvent({ type: "task.review_requested", payload: { reviewerId: "opencode-reviewer-1" } }),
-      storedEvent({ type: "task.integration_started" }),
-      storedEvent({ type: "task.cleanup_reconciled" }),
-      storedEvent({ type: "task.failed", payload: { reason: "validation failed" } }),
+      storedEvent({ type: "task.validation_started", payload: { patch: { type: "artifact.ready", path: "src/a.ts", sha256: "a".repeat(64) }, diffSha256: "b".repeat(64) } }),
+      storedEvent({ type: "task.review_requested", payload: { reviewerId: "opencode-reviewer-1", validation: { name: "focused", outcome: "completed" } } }),
+      storedEvent({ type: "task.integration_started", payload: { sourceCommit: "a".repeat(40), review: { reviewerId: "reviewer-1" } } }),
+      storedEvent({ type: "task.cleanup_reconciled", payload: { cleanup: { sourceCommit: "a".repeat(40) }, observation: { phase: "cleanup", uncertain: true } } }),
+      storedEvent({ type: "task.failed", payload: { stage: "validation", reason: "validation failed" } }),
     ]);
 
     expect(exported.map((event) => event.actor)).toEqual([
@@ -193,7 +324,7 @@ describe("Agent Tail event envelope export", () => {
   it("maps nested review evidence to the reviewer actor", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "task.review_approved",
-      payload: { review: { reviewerId: "opencode-reviewer-2" } },
+      payload: { review: { reviewerId: "opencode-reviewer-2", approved: true, diffSha256: "a".repeat(64), validationSha256: "b".repeat(64) } },
     }));
 
     expect(exported.actor).toEqual({ id: "opencode-reviewer-2", role: "reviewer" });
@@ -212,7 +343,9 @@ describe("Agent Tail event envelope export", () => {
       }),
       storedEvent({
         type: "task.validation_completed",
-        payload: { outcome: "timed_out" },
+        payload: { outcome: "timed_out", name: "focused", exitCode: null,
+          argvSha256: "a".repeat(64), outputSha256: "b".repeat(64),
+          startedAt: "2026-07-01T00:00:00.000Z", finishedAt: "2026-07-01T00:00:01.000Z" },
       }),
     ]);
 
@@ -231,7 +364,7 @@ describe("Agent Tail event envelope export", () => {
   it("maps review denial terminal events to the reviewer actor", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "task.denied",
-      payload: { review: { reviewerId: "opencode-reviewer-3" } },
+      payload: { stage: "review", reason: "review denied", review: { reviewerId: "opencode-reviewer-3" } },
     }));
 
     expect(exported.actor).toEqual({ id: "opencode-reviewer-3", role: "reviewer" });
@@ -241,7 +374,7 @@ describe("Agent Tail event envelope export", () => {
   it("maps ownership denial to the ownership operation", () => {
     const exported = storedEventToAgentTailEvent(storedEvent({
       type: "task.denied",
-      payload: { stage: "ownership" },
+      payload: { stage: "ownership", reason: "path not owned" },
     }));
 
     expect(exported.operation).toEqual({ name: "ownership", status: "denied" });
@@ -257,13 +390,13 @@ describe("Agent Tail event envelope export", () => {
     });
     const exported = storedEventsToAgentTailEvents([
       storedEvent({ type: "task.effect_uncertain", payload: uncertain }),
-      storedEvent({ type: "task.commit_observed" }),
-      storedEvent({ type: "task.integration_observed", payload: { reason: "CAS unreadable" } }),
-      storedEvent({ type: "task.cleanup_observed", payload: { uncertain: true } }),
-      storedEvent({ type: "task.cleanup_observed", payload: { uncertain: false } }),
+      storedEvent({ type: "task.commit_observed", payload: { stage: "commit", reason: "commit uncertain" } }),
+      storedEvent({ type: "task.integration_observed", payload: { reason: "CAS unreadable", evidence: {} } }),
+      storedEvent({ type: "task.cleanup_observed", payload: { phase: "cleanup", uncertain: true, evidence: {}, reason: "uncertain" } }),
+      storedEvent({ type: "task.cleanup_observed", payload: { phase: "cleanup", uncertain: false, evidence: {}, reason: "failed" } }),
       storedEvent({
         type: "task.integration_observed",
-        payload: { verification: "verified" },
+        payload: { verification: "verified", receipt: { taskId: "task-1", projectId: "project-1", outcome: "completed" } },
       }),
     ]);
 
@@ -371,7 +504,7 @@ describe("Agent Tail event envelope export", () => {
     expect(() => storedEventToAgentTailEvent(storedEvent({
       type: "milestone.task_running",
       payload: { harness: "opencode", actorId: "spoofed", role: "planner" },
-    }))).toThrow("invalid OpenCode milestone event payload");
+    }))).toThrow();
   });
 
   it("attributes read-only OpenCode reviewer activity to the reviewer actor", () => {
@@ -432,6 +565,19 @@ describe("Agent Tail event envelope export", () => {
       parent_span_id: "milestone:milestone-1",
       actor: { id: "reviewer-1", role: "reviewer" },
     });
+  });
+
+  it.each([
+    [{ taskId: "task-generic" }, { id: "zentra-scheduler", role: "scheduler" }],
+    [{ taskId: "task-rich", actorId: "writer-1", role: "implementer" }, { id: "writer-1", role: "implementer" }],
+  ] as const)("accepts authoritative milestone.task_running payload variant %#", (payload, actor) => {
+    const exported = storedEventToAgentTailEvent(storedEvent({
+      streamId: "milestone-1",
+      type: "milestone.task_running",
+      payload,
+    }));
+
+    expect(exported.actor).toEqual(actor);
   });
 
   it("projects generic nested workers as child spans with their own actors", () => {
@@ -576,7 +722,7 @@ describe("Agent Tail event envelope export", () => {
   });
 
   it("serializes one valid JSONL line without mutating native event payload", () => {
-    const payload = { terminalOutcome: "completed" };
+    const payload = { stage: "validation", validation: { name: "focused" }, diffSha256: "a".repeat(64), changedPath: "src/a.ts", workspace: "/tmp/work" };
     const event = storedEvent({ type: "task.completed", payload });
 
     const line = agentTailEventToJsonLine(storedEventToAgentTailEvent(event));
@@ -584,12 +730,19 @@ describe("Agent Tail event envelope export", () => {
     expect(line.endsWith("\n")).toBe(true);
     const parsed = JSON.parse(line) as Record<string, unknown>;
     expectValidAgentTailEnvelope(parsed);
-    expect(payload).toEqual({ terminalOutcome: "completed" });
+    expect(payload).toEqual({
+      stage: "validation",
+      validation: { name: "focused" },
+      diffSha256: "a".repeat(64),
+      changedPath: "src/a.ts",
+      workspace: "/tmp/work",
+    });
   });
 
   it("fails closed on timestamps Agent Tail cannot parse", () => {
     expect(() => storedEventToAgentTailEvent(storedEvent({
       type: "task.created",
+      payload: { projectId: "zentra", title: "Invalid timestamp" },
       recordedAt: "2026-07-14T12:00:00",
     }))).toThrow("Agent Tail timestamp must include a timezone");
   });

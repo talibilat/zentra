@@ -7,7 +7,7 @@ import {
   type MilestoneTerminalResult,
 } from "../contracts/milestone-result.js";
 import { UncertainEffectPayloadSchema } from "../contracts/uncertain-effect.js";
-import type { EventJournal } from "../journal/journal.js";
+import { assertBoundedProjectionEntries, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { projectTask } from "../tasks/task-projection.js";
 import type { MilestoneRecord } from "./milestone-registry.js";
 
@@ -21,7 +21,7 @@ export function buildMilestoneTerminalResult(input: {
     throw new Error("successful terminal milestone result requires an accepted plan");
   }
   const plannedTasks = milestone.plan?.tasks ?? [];
-  const milestoneEvents = journal.readStream(milestone.milestoneId);
+  const milestoneEvents = readStreamEvents(journal, milestone.milestoneId);
   const traceId = milestoneEvents[0]?.correlationId;
   if (traceId === undefined || traceId !== milestone.traceId) throw new Error("milestone trace identity is invalid");
   if (outcome !== "completed") assertNonSuccessOutcomeEvidence(milestone, outcome);
@@ -33,9 +33,13 @@ export function buildMilestoneTerminalResult(input: {
     .filter((task) => task.roleAssignment.role === "implementer" && plannedTasks.some((candidate) =>
       candidate.roleAssignment.role === "reviewer" && candidate.dependencies.includes(task.taskId)))
     .map((task) => task.taskId));
-  const correlatedTaskStreams = new Set(journal.readAll()
-    .filter((event) => event.correlationId === traceId && event.type.startsWith("task."))
-    .map((event) => event.streamId));
+  const correlatedTaskStreams = new Set<string>();
+  for (const event of iterateAllEvents(journal)) {
+    if (event.correlationId === traceId && event.type.startsWith("task.")) {
+      correlatedTaskStreams.add(event.streamId);
+      assertBoundedProjectionEntries(correlatedTaskStreams.size, "milestone task streams");
+    }
+  }
   for (const streamId of correlatedTaskStreams) {
     if (!implementerIds.has(streamId)) throw new Error(`unexpected task stream in milestone trace: ${streamId}`);
   }
@@ -46,7 +50,7 @@ export function buildMilestoneTerminalResult(input: {
   const uncertainties: MilestoneTerminalResult["uncertainties"][number][] = [];
 
   for (const task of plannedTasks.filter((candidate) => candidate.roleAssignment.role === "implementer")) {
-    const events = journal.readStream(task.taskId);
+    const events = readStreamEvents(journal, task.taskId);
     if (events.length === 0) continue;
     if (events.some((event) => event.streamId !== task.taskId || event.correlationId !== traceId)) {
       throw new Error(`task stream ${task.taskId} is not bound to the milestone trace`);

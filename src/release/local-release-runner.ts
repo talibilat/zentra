@@ -6,7 +6,7 @@ import path from "node:path";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import type { StoredEvent } from "../contracts/event.js";
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { assertApprovedValidationExecutableIdentity, type ProjectConfig } from "../projects/project-config.js";
 import { assertNoGitObjectSubstitution, GitClient, type CommandResult } from "../workspaces/git-client.js";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
@@ -48,7 +48,7 @@ export interface LocalReleaseResult {
 }
 
 export function inspectLocalReleaseResult(journal: EventJournal, packet: ReleasePacket): LocalReleaseResult | null {
-  const events = journal.readStream(`release:${packet.releaseId}`);
+  const events = readStreamEvents(journal, `release:${packet.releaseId}`);
   if (events.length === 0) return null;
   assertReleaseHistory(events, digestCanonical(packet));
   if (hasUnobservedStep(events)) return releaseResult("uncertain", packet.worktreePath, events);
@@ -122,7 +122,7 @@ export class LocalReleaseRunner {
     });
     if (digestCanonical(expected) !== packetDigest) throw new Error("release configuration does not match the immutable packet");
     const streamId = `release:${packet.releaseId}`;
-    let events = this.journal.readStream(streamId);
+    let events = readStreamEvents(this.journal, streamId);
     if (events.length > 0) {
       assertReleaseHistory(events, packetDigest);
       if (hasUnobservedStep(events)) return releaseResult("uncertain", packet.worktreePath, events);
@@ -250,9 +250,9 @@ export class LocalReleaseRunner {
 
   private append(streamId: string, correlationId: string, type: string, payload: unknown): readonly StoredEvent[] {
     parseReleaseEventPayload(type, payload);
-    const current = this.journal.readStream(streamId);
+    const current = readStreamEvents(this.journal, streamId);
     this.journal.append(streamId, current.length, [{ streamId, type, payload, causationId: current.at(-1)?.eventId ?? null, correlationId }]);
-    return this.journal.readStream(streamId);
+    return readStreamEvents(this.journal, streamId);
   }
 
   private async assertStageState(packet: ReleasePacket, baseline: RepositorySnapshot): Promise<void> {

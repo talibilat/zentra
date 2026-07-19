@@ -5,7 +5,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { EventJournal } from "../journal/journal.js";
+import { streamHasEvents, type EventJournal } from "../journal/journal.js";
 import { parseCapsuleEventPayload, type CapsuleEventType } from "./capsule-events.js";
 import {
   DockerClient,
@@ -64,7 +64,7 @@ export class DockerCapsuleConformance {
 
   async run(request: CapsuleConformanceRequest): Promise<CapsuleConformanceReport> {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(request.capsuleId)) throw new Error("invalid capsule identity");
-    if (this.journal.readStream(request.capsuleId).length !== 0) throw new Error("capsule stream already exists");
+    if (streamHasEvents(this.journal, request.capsuleId)) throw new Error("capsule stream already exists");
     const policy = loadCapsulePolicy(request.policyPath);
     const projectPath = canonicalDirectory(request.projectPath);
     const hostIdentity = dockerHostIdentity();

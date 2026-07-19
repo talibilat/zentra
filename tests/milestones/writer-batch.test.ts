@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { MilestonePlan } from "../../src/contracts/milestone.js";
 import type { NewEvent, StoredEvent } from "../../src/contracts/event.js";
-import type { EventJournal } from "../../src/journal/journal.js";
+import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { digestCanonical } from "../../src/contracts/authority-attention.js";
@@ -409,6 +409,14 @@ class TransitionConflictJournal implements EventJournal {
   readAll(afterPosition?: number): readonly StoredEvent[] {
     return this.inner.readAll(afterPosition);
   }
+
+  readStreamPage(...args: Parameters<SqliteEventJournal["readStreamPage"]>): ReturnType<SqliteEventJournal["readStreamPage"]> {
+    return this.inner.readStreamPage(...args);
+  }
+
+  readAllPage(...args: Parameters<SqliteEventJournal["readAllPage"]>): ReturnType<SqliteEventJournal["readAllPage"]> {
+    return this.inner.readAllPage(...args);
+  }
 }
 
 class ConflictOnceJournal implements EventJournal {
@@ -436,6 +444,14 @@ class ConflictOnceJournal implements EventJournal {
 
   readAll(afterPosition?: number): readonly StoredEvent[] {
     return this.inner.readAll(afterPosition);
+  }
+
+  readStreamPage(...args: Parameters<SqliteEventJournal["readStreamPage"]>): ReturnType<SqliteEventJournal["readStreamPage"]> {
+    return this.inner.readStreamPage(...args);
+  }
+
+  readAllPage(...args: Parameters<SqliteEventJournal["readAllPage"]>): ReturnType<SqliteEventJournal["readAllPage"]> {
+    return this.inner.readAllPage(...args);
   }
 }
 

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { readStreamEvents } from "../journal/journal.js";
 
 import {
   isVerifiedValidationReport,
@@ -176,7 +177,7 @@ export class OpenCodeSingleFileTracerBullet {
     assertWriterAdmission(request, changedPath);
     const parentMilestone = request.parentMilestoneId === undefined
       ? null
-      : projectMilestone(this.tasks.eventJournal().readStream(request.parentMilestoneId));
+      : projectMilestone(readStreamEvents(this.tasks.eventJournal(), request.parentMilestoneId));
     const admissionDigest = parentMilestone?.tasks[request.task.taskId]?.admissionDigest ??
       digestCanonical({ taskId: request.task.taskId, mode: "standalone" });
     const roleBinding = roleCapabilities.accept(buildRoleCapabilityBinding({

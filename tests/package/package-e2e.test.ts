@@ -235,7 +235,7 @@ describe("publishable CLI package", () => {
       `const tracePath = ${JSON.stringify(programmaticTrace)};`,
       `const securitySheetPath = ${JSON.stringify(project.securitySheet)};`,
       "const journal = new SqliteEventJournal(databasePath);",
-      "const sink = AgentTailJsonlFileSink.open(realpathSync(new URL('.', import.meta.url)), tracePath);",
+      "const sink = AgentTailJsonlFileSink.open(realpathSync(new URL('.', import.meta.url)), tracePath, 'package-trace');",
       "const security = loadSecuritySheet(securitySheetPath);",
       "const models = { models: [{ id: 'package-researcher', harness: 'opencode', model: 'fixture/model', roles: ['researcher'], specialties: [], costTier: 'low', contextTokens: 1000, maxConcurrency: 1, toolPermissions: ['read_repository'], network: 'denied', fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };",
       "new MilestoneRegistry(journal).register({ milestoneId: 'package-milestone', projectId: 'package-project', title: 'Safe composition', correlationId: 'package-trace', plan: { milestoneId: 'package-milestone', projectId: 'package-project', goal: 'Pause before effects', tasks: [{ taskId: 'package-research', title: 'Research', description: 'Research safely.', dependencies: [], ownedPaths: ['greeting.txt'], forbiddenPaths: ['.env'], acceptanceCriteria: ['No effect runs without approval.'], roleAssignment: { role: 'researcher', agentId: 'package-researcher', harness: 'opencode' }, risk: { level: 'low', authority: 'read_only', requiresReview: false, requiresApproval: true }, budget: { maxSeconds: 5, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 } }] } });",
@@ -249,7 +249,12 @@ describe("publishable CLI package", () => {
     expect(programmatic.stderr).toBe("");
     expect(JSON.parse(programmatic.stdout)).toEqual({ status: "paused", reason: "missing_authority" });
     expect(existsSync(programmaticDatabase)).toBe(true);
-    expect(readFileSync(programmaticTrace, "utf8")).toBe("");
+    const programmaticLines = readFileSync(programmaticTrace, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as { readonly trace_id: string; readonly kind: string });
+    expect(programmaticLines).toEqual([
+      expect.objectContaining({ trace_id: "package-trace", kind: "milestone.created" }),
+      expect.objectContaining({ trace_id: "package-trace", kind: "milestone.plan_created" }),
+    ]);
 
     const milestoneRoot = path.join(consumer, "installed-milestone");
     mkdirSync(milestoneRoot);
@@ -385,8 +390,9 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
       event.payload.role === "researcher");
     expect(installedResearch.payload.evidence[0]).toMatchObject({
       sourceEvidenceIds: [installedSourceEvent.payload.evidence.evidenceId],
-      summary: expect.stringContaining(`[source:${installedSourceEvent.payload.evidence.evidenceId}]`),
+      sourceEvidenceCount: 1,
     });
+    expect(installedResearch.payload.evidence[0]).not.toHaveProperty("summary");
     expect(installedTrace.map((event) => event.kind)).toEqual(expect.arrayContaining([
       "task.writer_completed", "task.validation_completed", "task.review_requested", "task.review_approved",
       "task.integration_started", "task.integration_prepared", "task.integration_observed", "task.cleanup_completed",

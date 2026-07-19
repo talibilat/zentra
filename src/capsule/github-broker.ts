@@ -5,7 +5,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { EventJournal } from "../journal/journal.js";
+import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import type { IntegrationLease, IntegrationLeaseKey } from "../integration/integration-lease.js";
 import { parseCapsuleEventPayload, type CapsuleEventType } from "./capsule-events.js";
 import { runBoundedProcess } from "./docker-client.js";
@@ -387,7 +387,7 @@ export class GitHubEffectBroker {
     assertRequestId(grantId);
     const requestId = grantId;
     const streamId = grantStreamId(grantId);
-    if (this.journal.readStream(streamId).length !== 0) {
+    if (readStreamEvents(this.journal, streamId).length !== 0) {
       return { allowed: false, actionDigest: sha256(JSON.stringify(action)), credential: null };
     }
     const actionDigest = sha256(JSON.stringify(action));
@@ -429,7 +429,7 @@ export class GitHubEffectBroker {
       prerequisite.action.targetRef !== `refs/heads/${action.headRef}` ||
       prerequisite.action.sourceCommit !== action.headCommit || prerequisite.action.expectedOldOid !== ZERO_OID
     ) return false;
-    const events = this.journal.readStream(grantStreamId(action.pushGrantId));
+    const events = readStreamEvents(this.journal, grantStreamId(action.pushGrantId));
     if (events.length < 4 || events[0]?.type !== "capsule.github_grant_consumed" || events[1]?.type !== "capsule.github_broker_accepted") return false;
     try {
       const consumption = parseCapsuleEventPayload(events[0].type, events[0].payload) as Record<string, unknown>;
@@ -465,7 +465,7 @@ export class GitHubEffectBroker {
   } {
     assertRequestId(requestId);
     const streamId = grantStreamId(requestId);
-    const events = this.journal.readStream(streamId);
+    const events = readStreamEvents(this.journal, streamId);
     if (events.length < 2 || events[0]?.type !== "capsule.github_grant_consumed" || events[1]?.type !== "capsule.github_broker_accepted") {
       throw new Error("GitHub effect is not awaiting reconciliation");
     }

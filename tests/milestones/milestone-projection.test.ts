@@ -365,16 +365,19 @@ describe("projectMilestone", () => {
 
     expect(storedEventToAgentTailEvent(event({
       type: "milestone.failed",
+      payload: { outcome: "failed", evidence: { stage: "test" } },
       streamVersion: 5,
       globalPosition: 45,
     })).operation.status).toBe("failed");
     expect(storedEventToAgentTailEvent(event({
       type: "milestone.cancelled",
+      payload: { outcome: "cancelled", evidence: { stage: "test" } },
       streamVersion: 6,
       globalPosition: 46,
     })).operation.status).toBe("cancelled");
     expect(storedEventToAgentTailEvent(event({
       type: "milestone.denied",
+      payload: { outcome: "denied", evidence: { stage: "test" } },
       streamVersion: 7,
       globalPosition: 47,
     })).operation.status).toBe("denied");
