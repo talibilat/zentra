@@ -533,3 +533,40 @@ export type {
   ServiceStartingEvidence,
   StaleRuntimeEvidence,
 } from "./runtime/repository-runtime.js";
+export { WorkflowSurface, WorkflowSurfaceError } from "./surfaces/workflow-surface.js";
+export type {
+  IntakeArtifactTextReader,
+  RunAdvanceRequest,
+  RunAdvancer,
+  RunSubmission,
+  RunSubmitter,
+  WorkflowAnalysisRound,
+  WorkflowAnalysisView,
+  WorkflowCallerContext,
+  WorkflowChannel,
+  WorkflowChange,
+  WorkflowChangePage,
+  WorkflowCommand,
+  WorkflowCommandEvidence,
+  WorkflowDecisionCommand,
+  WorkflowDecisionMutation,
+  WorkflowIntakeSource,
+  WorkflowIntakeView,
+  WorkflowPlanningView,
+  WorkflowRejectedIntakeSource,
+  WorkflowRunDetail,
+  WorkflowRunSummary,
+  WorkflowSourceText,
+  WorkflowSurfaceErrorCode,
+} from "./surfaces/workflow-surface.js";
+export { createLocalWorkflowSurface } from "./surfaces/local-workflow.js";
+export type { LocalWorkflowSurface, LocalWorkflowSurfaceOptions } from "./surfaces/local-workflow.js";
+export {
+  CLI_CONTROL_AUTHORIZATION_SCHEME,
+  CLI_CONTROL_TOKEN_FILENAME,
+  CLI_PENDING_SUBMISSION_PREFIX,
+  CliSubmissionCommandStore,
+  HttpWorkflowClient,
+  createHttpWorkflowClient,
+} from "./surfaces/http-workflow-client.js";
+export type { PendingSubmissionCommand } from "./surfaces/http-workflow-client.js";

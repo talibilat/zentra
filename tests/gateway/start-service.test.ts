@@ -14,6 +14,7 @@ import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-
 import { RuntimeStateManager } from "../../src/runtime/repository-runtime.js";
 import { LoopbackGateway } from "../../src/gateway/loopback-gateway.js";
 import { RunService } from "../../src/runs/run-service.js";
+import type { WorkflowRunDetail, WorkflowSurface } from "../../src/surfaces/workflow-surface.js";
 import {
   startZentraService,
   type AgentTrailService,
@@ -29,13 +30,80 @@ afterEach(() => {
 });
 
 describe("startZentraService", () => {
+  it("installs the production workflow exactly once after durable service readiness", async () => {
+    const root = repository();
+    let configuredSurface: WorkflowSurface | null = null;
+    let configuredAfterReady = false;
+    let configuredAgentTrailAddress: { readonly host: "127.0.0.1"; readonly port: number } | null = null;
+    let gatewayBecameReadyAfterAgentTrailConfiguration = false;
+    let configurationCount = 0;
+    const sidecar = new FakeAgentTrail();
+    const service = await startZentraService({ cwd: root }, {
+      createAgentTrail: (evidence) => sidecar.attach(evidence),
+      createGateway: (options) => workflowGateway(new LoopbackGateway(options), (surface) => {
+        const journal = openAuthoritativeJournal(path.join(root, ".zentra", "events.sqlite"), "read-only");
+        configuredAfterReady = journal.readAll().some(({ type }) => type === "service.ready");
+        journal.close();
+        configuredSurface = surface;
+        configurationCount += 1;
+      }, (address) => { configuredAgentTrailAddress = address; }, () => {
+        gatewayBecameReadyAfterAgentTrailConfiguration = configuredAgentTrailAddress !== null;
+      }, () => undefined),
+    });
+    try {
+      expect(configuredAfterReady).toBe(true);
+      expect(configurationCount).toBe(1);
+      expect(configuredAgentTrailAddress).toEqual({ host: "127.0.0.1", port: 4243 });
+      expect(gatewayBecameReadyAfterAgentTrailConfiguration).toBe(true);
+      const detail = await configuredSurface!.submitRun(
+        { kind: "inline_goal", commandId: "startup-composition-submit", goal: "Verify startup composition." },
+        { actorId: "operator", channel: "cli" },
+      ) as WorkflowRunDetail;
+      expect(detail).toMatchObject({ run: { lifecycle: "analyzing", authority: { executionAuthority: "none" } } });
+      const bootstrapToken = new URL(service.sessionUrl).hash.slice("#token=".length);
+      const handoff = await fetch(`${service.origin}/api/v1/session`, {
+        method: "POST",
+        headers: { origin: service.origin, "content-type": "application/json" },
+        body: JSON.stringify({ token: bootstrapToken }),
+      });
+      expect(handoff.status).toBe(201);
+      const auth = await handoff.json() as { bearerToken: string };
+      const response = await fetch(`${service.origin}/api/v1/zentra/runs`, {
+        headers: { authorization: `Bearer ${auth.bearerToken}` },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual([expect.objectContaining({ runId: detail.run.runId })]);
+    } finally {
+      await service.shutdown("test_requested");
+    }
+  });
+
+  it("fails startup when the gateway cannot accept a workflow surface", async () => {
+    const root = repository();
+    const sidecar = new FakeAgentTrail();
+    await expect(startZentraService({ cwd: root }, {
+      createAgentTrail: (evidence) => sidecar.attach(evidence),
+      createGateway: (options) => gatewayWithoutWorkflow(new LoopbackGateway(options)),
+    })).rejects.toThrow(/workflow surface/i);
+    expect(existsSync(path.join(root, ".zentra", "runtime", "state.json"))).toBe(false);
+    expect(existsSync(path.join(root, ".zentra", "runtime", "cli-control.token"))).toBe(false);
+  });
+
   it("discovers cwd, gates readiness on AgentTrail, publishes private state, degrades, recovers, and shuts down", async () => {
     const root = repository();
     const nested = path.join(root, "nested");
     execFileSync("/bin/mkdir", [nested], { env: {}, stdio: "ignore" });
     const sidecar = new FakeAgentTrail();
+    let replacementAddress: { readonly host: "127.0.0.1"; readonly port: number } | null = null;
+    let replacementHadDurableRecovery = false;
     const service = await startZentraService({ cwd: nested, tokenTtlMs: 60_000 }, {
       createAgentTrail: (evidence) => sidecar.attach(evidence),
+      createGateway: (options) => replacementGateway(new LoopbackGateway(options), (address) => {
+        const journal = openAuthoritativeJournal(path.join(root, ".zentra", "events.sqlite"), "read-only");
+        replacementHadDurableRecovery = journal.readAll().some(({ type }) => type === "gateway.recovered");
+        journal.close();
+        replacementAddress = address;
+      }),
       now: () => new Date("2026-07-19T12:00:00.000Z"),
     });
 
@@ -45,7 +113,13 @@ describe("startZentraService", () => {
     const state = readFileSync(service.layout.runtimeStatePath, "utf8");
     expect(state).toContain('"startupStatus":"ready"');
     expect(statSync(service.layout.runtimeStatePath).mode & 0o777).toBe(0o600);
-    expect(state).not.toContain(new URL(service.sessionUrl).searchParams.get("token")!);
+    const bootstrapToken = new URL(service.sessionUrl).hash.slice("#token=".length);
+    const cliTokenPath = path.join(service.layout.runtimeDirectory, "cli-control.token");
+    const cliToken = readFileSync(cliTokenPath, "utf8");
+    expect(cliToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(statSync(cliTokenPath).mode & 0o777).toBe(0o600);
+    expect(state).not.toContain(bootstrapToken);
+    expect(state).not.toContain(cliToken);
 
     await sidecar.crash();
     expect((await fetch(`${service.origin}/healthz`)).status).toBe(200);
@@ -53,6 +127,9 @@ describe("startZentraService", () => {
     expect((await fetch(service.sessionUrl, { redirect: "manual" })).status).toBe(503);
     await sidecar.recover();
     expect((await fetch(`${service.origin}/readyz`)).status).toBe(200);
+    expect(sidecar.replacementAddress).toEqual({ host: "127.0.0.1", port: 4245 });
+    expect(replacementAddress).toEqual({ host: "127.0.0.1", port: 4245 });
+    expect(replacementHadDurableRecovery).toBe(true);
     const bootstrap = await fetch(service.sessionUrl, { redirect: "manual" });
     expect(bootstrap.status).toBe(200);
     expect(bootstrap.headers.get("set-cookie")).toBeNull();
@@ -61,6 +138,7 @@ describe("startZentraService", () => {
     await service.closed;
     expect(sidecar.shutdownCount).toBe(1);
     expect(existsSync(service.layout.runtimeStatePath)).toBe(false);
+    expect(existsSync(cliTokenPath)).toBe(false);
 
     const journal = openAuthoritativeJournal(service.layout.databasePath, "read-only");
     const events = journal.readAll();
@@ -78,7 +156,8 @@ describe("startZentraService", () => {
       "service.stopping",
       "service.shutdown",
     ]));
-    expect(JSON.stringify(events)).not.toContain(new URL(service.sessionUrl).searchParams.get("token")!);
+    expect(JSON.stringify(events)).not.toContain(bootstrapToken);
+    expect(JSON.stringify(events)).not.toContain(cliToken);
     const targetEvent = events.find(({ type }) => type === "gateway.backfill_target")!;
     const restartedEvent = events.find(({ type }) => type === "agenttrail.restarted")!;
     expect(targetEvent.globalPosition).toBeLessThan(restartedEvent.globalPosition);
@@ -347,6 +426,7 @@ class FakeAgentTrail implements AgentTrailService {
   private incarnation = "agenttrail-v1:11111111-1111-4111-8111-111111111111";
   startRequest: AgentTrailStartRequest | null = null;
   shutdownCount = 0;
+  replacementAddress: { readonly host: "127.0.0.1"; readonly port: number } | null = null;
 
   constructor(
     private readonly beforeReady?: () => void,
@@ -381,6 +461,7 @@ class FakeAgentTrail implements AgentTrailService {
     await this.emit("agenttrail.restarted", { pid: 4244, previousIncarnation: failed, restartAttempt: 1, backoffMs: 1 });
     await afterTarget?.();
     await this.emit("agenttrail.ready", { pid: 4244, address: { host: "127.0.0.1", port: 4245 }, startupMs: 1 });
+    this.replacementAddress = { host: "127.0.0.1", port: 4245 };
   }
 
   async shutdown(): Promise<void> {
@@ -493,6 +574,11 @@ function repository(): string {
   const root = mkdtempSync(path.join(tmpdir(), "zentra-gateway-service-"));
   cleanup.push(root);
   execFileSync("/usr/bin/git", ["init", root], { env: { HOME: root }, stdio: "ignore" });
+  execFileSync("/usr/bin/git", ["config", "user.name", "Zentra Test"], { cwd: root, env: { HOME: root } });
+  execFileSync("/usr/bin/git", ["config", "user.email", "zentra@example.invalid"], { cwd: root, env: { HOME: root } });
+  execFileSync("/usr/bin/git", ["commit", "--allow-empty", "-m", "fixture"], {
+    cwd: root, env: { HOME: root }, stdio: "ignore",
+  });
   return realpathSync(root);
 }
 
@@ -540,9 +626,59 @@ function failingCleanupGateway(inner: LoopbackGateway): GatewayService {
     start: () => inner.start(),
     rotateSession: () => inner.rotateSession(),
     setReadiness: (readiness) => inner.setReadiness(readiness),
+    setAgentTrailAddress: (address) => inner.setAgentTrailAddress(address),
+    replaceAgentTrailAddress: (address) => inner.replaceAgentTrailAddress(address),
+    setWorkflowSurface: (workflow) => inner.setWorkflowSurface(workflow),
     close: async () => {
       await inner.close();
       throw new Error("controlled gateway cleanup failure");
     },
+  };
+}
+
+function workflowGateway(
+  inner: LoopbackGateway,
+  configured: (surface: WorkflowSurface) => void,
+  configuredAgentTrail: (address: { readonly host: "127.0.0.1"; readonly port: number }) => void,
+  becameReady: () => void,
+  replacedAgentTrail: (address: { readonly host: "127.0.0.1"; readonly port: number }) => void,
+): GatewayService {
+  return {
+    start: () => inner.start(),
+    rotateSession: () => inner.rotateSession(),
+    setReadiness: (readiness) => { if (readiness === "ready") becameReady(); inner.setReadiness(readiness); },
+    setAgentTrailAddress: (address) => { configuredAgentTrail(address); inner.setAgentTrailAddress(address); },
+    replaceAgentTrailAddress: (address) => { replacedAgentTrail(address); inner.replaceAgentTrailAddress(address); },
+    setWorkflowSurface: (surface) => {
+      configured(surface);
+      inner.setWorkflowSurface(surface);
+    },
+    close: () => inner.close(),
+  };
+}
+
+function replacementGateway(
+  inner: LoopbackGateway,
+  replaced: (address: { readonly host: "127.0.0.1"; readonly port: number }) => void,
+): GatewayService {
+  return {
+    start: () => inner.start(),
+    rotateSession: () => inner.rotateSession(),
+    setReadiness: (readiness) => inner.setReadiness(readiness),
+    setAgentTrailAddress: (address) => inner.setAgentTrailAddress(address),
+    replaceAgentTrailAddress: (address) => { replaced(address); inner.replaceAgentTrailAddress(address); },
+    setWorkflowSurface: (surface) => inner.setWorkflowSurface(surface),
+    close: () => inner.close(),
+  };
+}
+
+function gatewayWithoutWorkflow(inner: LoopbackGateway): GatewayService {
+  return {
+    start: () => inner.start(),
+    rotateSession: () => inner.rotateSession(),
+    setReadiness: (readiness) => inner.setReadiness(readiness),
+    setAgentTrailAddress: (address) => inner.setAgentTrailAddress(address),
+    replaceAgentTrailAddress: (address) => inner.replaceAgentTrailAddress(address),
+    close: () => inner.close(),
   };
 }

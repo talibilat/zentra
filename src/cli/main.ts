@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,7 @@ import {
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { IntegrationLeaseStore } from "../integration/integration-lease.js";
-import type { DurablePagedEventJournal, EventJournal } from "../journal/journal.js";
+import { type DurablePagedEventJournal, type EventJournal } from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import {
   ArchivedEventJournal,
@@ -84,11 +84,17 @@ import {
 } from "../providers/provider-config.js";
 import { openSessionInBrowser } from "../service/browser.js";
 import { startZentraService } from "../service/start-service.js";
+import { createHttpWorkflowClient } from "../surfaces/http-workflow-client.js";
+import {
+  WorkflowSurfaceError,
+  type WorkflowSurface,
+} from "../surfaces/workflow-surface.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
 const REVIEWER_ID = "zentra-deterministic-reviewer";
 const WORKER_TIMEOUT_MS = 120_000;
-const MAX_OPERATIONAL_JSON_BYTES = 16_384;
+const MAX_OPERATIONAL_JSON_BYTES = 16 * 1024;
+const MAX_WORKFLOW_DETAIL_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_PENDING_LIVE_OUTPUT_BYTES = 8 * 1_048_576;
 const LIVE_OUTPUT_FLUSH_TIMEOUT_MS = 5_000;
 const LIVE_OUTPUT_DESTROY_TIMEOUT_MS = 1_000;
@@ -154,6 +160,15 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   OPERATION_FAILED: "Operation failed.",
   OUTPUT_TOO_LARGE: "Operational output exceeded the limit.",
   TASK_NOT_FOUND: "Task was not found.",
+  not_found: "Workflow resource was not found.",
+  stale: "Workflow state changed before the command was recorded.",
+  consumed: "Workflow command was already consumed.",
+  expired: "Workflow decision has expired.",
+  digest_mismatch: "Workflow digest does not match.",
+  invalid_transition: "Workflow transition is invalid.",
+  uncertain: "Workflow submission outcome is uncertain; retry the exact command to reconcile it.",
+  unavailable: "Workflow service is unavailable.",
+  internal: "Workflow operation failed.",
 });
 
 type PublicErrorCode = keyof typeof PUBLIC_ERROR_MESSAGES;
@@ -161,6 +176,7 @@ type PublicErrorCode = keyof typeof PUBLIC_ERROR_MESSAGES;
 type WriteOutput = (value: string) => void;
 
 export interface CliRuntime {
+  readonly cwd?: string;
   readonly stdout?: WriteOutput;
   readonly stderr?: WriteOutput;
   readonly signalSource?: SignalSource;
@@ -168,6 +184,7 @@ export interface CliRuntime {
   readonly interactive?: boolean;
   readonly openBrowser?: typeof openSessionInBrowser;
   readonly startService?: typeof startZentraService;
+  readonly workflowSurface?: WorkflowSurface;
 }
 
 export interface SignalSource {
@@ -203,6 +220,26 @@ interface StartOptions {
   readonly tokenTtlSeconds: number;
   readonly agenttrailTimeoutMs: number;
 }
+
+interface WorkflowRunOptions {
+  readonly tickets?: string;
+  readonly actor: string;
+}
+
+interface WorkflowMutationOptions {
+  readonly runId: string;
+  readonly expectedVersion: number;
+  readonly actor: string;
+  readonly commandId: string;
+}
+
+interface WorkflowQuestionAnswerOptions extends WorkflowMutationOptions { readonly optionId: string }
+interface WorkflowRejectionOptions extends WorkflowMutationOptions { readonly reason: string }
+interface WorkflowPlanApprovalOptions extends WorkflowMutationOptions {
+  readonly planDigest: string;
+  readonly envelopeDigest: string;
+}
+interface WorkflowCancelOptions extends Omit<WorkflowMutationOptions, "runId"> {}
 
 interface JournalBoundaryOptions {
   readonly database: string;
@@ -297,15 +334,19 @@ export async function runCli(
   signalSource.on("SIGTERM", abort);
 
   const commandResults: CommandResult[] = [];
-  const program = createProgram(stdout, liveStdout, (result) => {
-    commandResults.push(result);
-  }, controller.signal, runtime.fixtureAnchor, {
-    interactive: runtime.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
-    openBrowser: runtime.openBrowser ?? openSessionInBrowser,
-    startService: runtime.startService ?? startZentraService,
-  });
-
   try {
+    let workflowSurface = runtime.workflowSurface;
+    if (workflowSurface === undefined && isWorkflowCommand(userArgv)) {
+      workflowSurface = await createHttpWorkflowClient(runtime.cwd ?? process.cwd());
+    }
+    const program = createProgram(stdout, liveStdout, (result) => {
+      commandResults.push(result);
+    }, controller.signal, runtime.fixtureAnchor, {
+      interactive: runtime.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
+      openBrowser: runtime.openBrowser ?? openSessionInBrowser,
+      startService: runtime.startService ?? startZentraService,
+      ...(workflowSurface === undefined ? {} : { workflowSurface }),
+    });
     await program.parseAsync([...userArgv], { from: "user" });
     let commandResult = commandResults[0];
     if (commandResult === undefined) {
@@ -323,7 +364,7 @@ export async function runCli(
       };
     }
     const serialized = serializeJson(commandResult.value);
-    if (Buffer.byteLength(serialized) > MAX_OPERATIONAL_JSON_BYTES) {
+    if (Buffer.byteLength(serialized) > operationalJsonLimit(userArgv)) {
       writeFixedError(stderr, commandLabel(userArgv), "OUTPUT_TOO_LARGE");
       return 1;
     }
@@ -333,7 +374,7 @@ export async function runCli(
     if (error instanceof CommanderError && error.code === "commander.helpDisplayed") {
       return 0;
     }
-    const failure = toFailure(error);
+    const failure = toFailure(error, isWorkflowCommand(userArgv));
     writeFixedError(stderr, commandLabel(userArgv), failure.code);
     return 1;
   } finally {
@@ -353,6 +394,7 @@ function createProgram(
     readonly interactive: boolean;
     readonly openBrowser: typeof openSessionInBrowser;
     readonly startService: typeof startZentraService;
+    readonly workflowSurface?: WorkflowSurface;
   },
 ): Command {
   const program = new Command()
@@ -390,6 +432,123 @@ function createProgram(
           projectRoot: service.layout.projectRoot,
         },
       });
+    });
+
+  program
+    .command("run")
+    .description("Submit one workflow from an inline goal or ticket directory.")
+    .argument("[goal]", "inline workflow goal")
+    .option("--tickets <folder>", "directory containing bounded ticket inputs")
+    .option("--actor <id>", "operator identity", "zentra-local-operator")
+    .action(async (goal: string | undefined, options: WorkflowRunOptions) => {
+      assertCliIdentity(options.actor);
+      if ((goal === undefined) === (options.tickets === undefined)) throw new CliFailure("INVALID_COMMAND");
+      const submission = goal === undefined
+        ? { kind: "ticket_directory" as const, commandId: randomUUID(), directoryPath: canonicalTicketDirectory(options.tickets!) }
+        : (assertSafeTitle(goal), { kind: "inline_goal" as const, commandId: randomUUID(), goal });
+      const result = await requireWorkflowSurface(startRuntime).submitRun(
+        submission,
+        { actorId: options.actor, channel: "cli" },
+      );
+      setResult({ exitCode: 0, value: { command: "run", result } });
+    });
+
+  program.command("list").description("List durable workflow runs.").action(async () => {
+    const runs = await requireWorkflowSurface(startRuntime).listRuns();
+    setResult({ exitCode: 0, value: { command: "list", runs } });
+  });
+
+  program.command("status").description("Inspect one durable workflow run.")
+    .argument("<run-id>", "run identity")
+    .action(async (runId: string) => {
+      assertCliIdentity(runId);
+      const run = await requireWorkflowSurface(startRuntime).getRun(runId);
+      if (run === null) throw new CliFailure("not_found");
+      setResult({ exitCode: 0, value: { command: "status", run } });
+    });
+
+  program.command("cancel").description("Record cancellation of one workflow run.")
+    .argument("<run-id>", "run identity")
+    .requiredOption("--expected-version <version>", "exact current run stream version", nonnegativeInteger)
+    .requiredOption("--actor <id>", "operator identity")
+    .requiredOption("--command-id <id>", "single-use command identity")
+    .action(async (runId: string, options: WorkflowCancelOptions) => {
+      assertWorkflowMutationIdentities(runId, options.actor, options.commandId);
+      const result = await requireWorkflowSurface(startRuntime).cancelRun({
+        runId, expectedVersion: options.expectedVersion, commandId: options.commandId,
+        cancellationId: options.commandId,
+      }, { actorId: options.actor, channel: "cli" });
+      setResult({ exitCode: 0, value: { command: "cancel", result } });
+    });
+
+  const question = program.command("question").description("Answer or reject durable workflow questions.");
+  question.command("answer").description("Answer one pending question with an exact option.")
+    .argument("<decision-id>", "question decision identity")
+    .requiredOption("--run-id <id>", "owning run identity")
+    .requiredOption("--expected-version <version>", "exact current decision stream version", nonnegativeInteger)
+    .requiredOption("--actor <id>", "operator identity")
+    .requiredOption("--command-id <id>", "single-use command identity")
+    .requiredOption("--option-id <id>", "exact offered option identity")
+    .action(async (decisionId: string, options: WorkflowQuestionAnswerOptions) => {
+      assertWorkflowDecisionIdentities(decisionId, options);
+      assertCliIdentity(options.optionId);
+      const result = await requireWorkflowSurface(startRuntime).answerQuestion({
+        runId: options.runId, decisionId, expectedVersion: options.expectedVersion,
+        commandId: options.commandId, optionId: options.optionId,
+      }, { actorId: options.actor, channel: "cli" });
+      setResult({ exitCode: 0, value: { command: "question.answer", result } });
+    });
+  question.command("reject").description("Reject one pending question.")
+    .argument("<decision-id>", "question decision identity")
+    .requiredOption("--run-id <id>", "owning run identity")
+    .requiredOption("--expected-version <version>", "exact current decision stream version", nonnegativeInteger)
+    .requiredOption("--actor <id>", "operator identity")
+    .requiredOption("--command-id <id>", "single-use command identity")
+    .requiredOption("--reason <text>", "bounded rejection reason")
+    .action(async (decisionId: string, options: WorkflowRejectionOptions) => {
+      assertWorkflowDecisionIdentities(decisionId, options);
+      assertCliText(options.reason);
+      const result = await requireWorkflowSurface(startRuntime).rejectQuestion({
+        runId: options.runId, decisionId, expectedVersion: options.expectedVersion,
+        commandId: options.commandId, reason: options.reason,
+      }, { actorId: options.actor, channel: "cli" });
+      setResult({ exitCode: 0, value: { command: "question.reject", result } });
+    });
+
+  const plan = program.command("plan").description("Approve or reject durable workflow plans.");
+  plan.command("approve").description("Approve one exact plan and authority envelope.")
+    .argument("<decision-id>", "plan approval decision identity")
+    .requiredOption("--run-id <id>", "owning run identity")
+    .requiredOption("--expected-version <version>", "exact current decision stream version", nonnegativeInteger)
+    .requiredOption("--actor <id>", "operator identity")
+    .requiredOption("--command-id <id>", "single-use command identity")
+    .requiredOption("--plan-digest <sha256>", "exact lowercase plan SHA-256")
+    .requiredOption("--envelope-digest <sha256>", "exact lowercase authority-envelope SHA-256")
+    .action(async (decisionId: string, options: WorkflowPlanApprovalOptions) => {
+      assertWorkflowDecisionIdentities(decisionId, options);
+      assertSha256(options.planDigest);
+      assertSha256(options.envelopeDigest);
+      const result = await requireWorkflowSurface(startRuntime).approvePlan({
+        runId: options.runId, decisionId, expectedVersion: options.expectedVersion,
+        commandId: options.commandId, planDigest: options.planDigest, envelopeDigest: options.envelopeDigest,
+      }, { actorId: options.actor, channel: "cli" });
+      setResult({ exitCode: 0, value: { command: "plan.approve", result } });
+    });
+  plan.command("reject").description("Reject one pending plan approval.")
+    .argument("<decision-id>", "plan approval decision identity")
+    .requiredOption("--run-id <id>", "owning run identity")
+    .requiredOption("--expected-version <version>", "exact current decision stream version", nonnegativeInteger)
+    .requiredOption("--actor <id>", "operator identity")
+    .requiredOption("--command-id <id>", "single-use command identity")
+    .requiredOption("--reason <text>", "bounded rejection reason")
+    .action(async (decisionId: string, options: WorkflowRejectionOptions) => {
+      assertWorkflowDecisionIdentities(decisionId, options);
+      assertCliText(options.reason);
+      const result = await requireWorkflowSurface(startRuntime).rejectPlan({
+        runId: options.runId, decisionId, expectedVersion: options.expectedVersion,
+        commandId: options.commandId, reason: options.reason,
+      }, { actorId: options.actor, channel: "cli" });
+      setResult({ exitCode: 0, value: { command: "plan.reject", result } });
     });
 
   const project = program.command("project").description("Manage project configuration.");
@@ -1518,6 +1677,63 @@ function positiveInteger(value: string): number {
   return parsed;
 }
 
+function nonnegativeInteger(value: string): number {
+  if (!/^(0|[1-9]\d{0,15})$/.test(value)) throw new CliFailure("INVALID_COMMAND");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new CliFailure("INVALID_COMMAND");
+  return parsed;
+}
+
+function requireWorkflowSurface(runtime: { readonly workflowSurface?: WorkflowSurface }): WorkflowSurface {
+  if (runtime.workflowSurface === undefined) throw new CliFailure("unavailable");
+  return runtime.workflowSurface;
+}
+
+function canonicalTicketDirectory(candidate: string): string {
+  try {
+    if (candidate.length === 0 || Buffer.byteLength(candidate, "utf8") > 4_096 || /[\u0000-\u001f\u007f]/.test(candidate)) {
+      throw new Error("invalid ticket directory");
+    }
+    const canonical = realpathSync.native(path.resolve(candidate));
+    if (!path.isAbsolute(canonical) || path.normalize(canonical) !== canonical || !statSync(canonical).isDirectory()) {
+      throw new Error("invalid ticket directory");
+    }
+    return canonical;
+  } catch {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
+function assertWorkflowDecisionIdentities(
+  decisionId: string,
+  options: Pick<WorkflowMutationOptions, "runId" | "actor" | "commandId">,
+): void {
+  assertWorkflowMutationIdentities(options.runId, options.actor, options.commandId);
+  assertCliIdentity(decisionId);
+}
+
+function assertWorkflowMutationIdentities(runId: string, actor: string, commandId: string): void {
+  assertCliIdentity(runId);
+  assertCliIdentity(actor);
+  assertCliIdentity(commandId);
+}
+
+function assertCliIdentity(value: string): void {
+  if (value.trim() === "" || Buffer.byteLength(value, "utf8") > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
+function assertCliText(value: string): void {
+  if (value.trim() === "" || Buffer.byteLength(value, "utf8") > 4_096 || /[\u0000\u007f]/.test(value)) {
+    throw new CliFailure("INVALID_COMMAND");
+  }
+}
+
+function assertSha256(value: string): void {
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new CliFailure("INVALID_COMMAND");
+}
+
 function boundedVacuumPages(value: string): number {
   const parsed = positiveInteger(value);
   if (parsed > 1_000) throw new CliFailure("INVALID_COMMAND");
@@ -1588,12 +1804,23 @@ function assertSafeTaskId(taskId: string): void {
   }
 }
 
-function toFailure(error: unknown): CliFailure {
+function toFailure(error: unknown, workflowCommand = false): CliFailure {
   if (error instanceof CliFailure) return error;
+  if (error instanceof WorkflowSurfaceError) return new CliFailure(error.code);
   if (error instanceof CommanderError) {
     return new CliFailure("INVALID_COMMAND");
   }
+  if (workflowCommand) return new CliFailure("internal");
   return new CliFailure("OPERATION_FAILED");
+}
+
+function isWorkflowCommand(argv: readonly string[]): boolean {
+  return argv[0] === "run" || argv[0] === "list" || argv[0] === "status" || argv[0] === "cancel" ||
+    argv[0] === "question" || argv[0] === "plan";
+}
+
+function operationalJsonLimit(argv: readonly string[]): number {
+  return argv[0] === "status" ? MAX_WORKFLOW_DETAIL_JSON_BYTES : MAX_OPERATIONAL_JSON_BYTES;
 }
 
 function assertRepresentableTaskRun(input: {
@@ -1654,6 +1881,12 @@ function publicMilestoneStatus(milestone: NonNullable<ReturnType<MilestoneRegist
 
 function commandLabel(argv: readonly string[]): string {
   if (argv[0] === "start") return "start";
+  if (argv[0] === "run") return "run";
+  if (argv[0] === "list") return "list";
+  if (argv[0] === "status") return "status";
+  if (argv[0] === "cancel") return "cancel";
+  if (argv[0] === "question") return `question.${argv[1] ?? "unknown"}`;
+  if (argv[0] === "plan") return `plan.${argv[1] ?? "unknown"}`;
   if (argv[0] === "milestone" && argv[1] === "run") return "milestone.run";
   if (argv[0] === "milestone" && argv[1] === "preview") return "milestone.preview";
   if (argv[0] === "milestone" && argv[1] === "list") return "milestone.list";

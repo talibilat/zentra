@@ -8,7 +8,7 @@ describe("zentra start CLI", () => {
   it("prints one session URL and opens it only for an interactive TTY", async () => {
     const output: string[] = [];
     const opened: string[] = [];
-    const sessionUrl = `http://127.0.0.1:43210/?token=${"a".repeat(43)}`;
+    const sessionUrl = `http://127.0.0.1:43210/#token=${"a".repeat(43)}`;
     const code = await runCli(["start"], runtime({
       interactive: true,
       stdout: (value) => output.push(value),
@@ -27,7 +27,7 @@ describe("zentra start CLI", () => {
 
   it("never opens a browser in noninteractive mode and accepts bounded startup options", async () => {
     const opened: string[] = [];
-    const sessionUrl = `http://127.0.0.1:43211/?token=${"b".repeat(43)}`;
+    const sessionUrl = `http://127.0.0.1:43211/#token=${"b".repeat(43)}`;
     const code = await runCli([
       "start", "--project", "/tmp/project", "--token-ttl-seconds", "30", "--agenttrail-timeout-ms", "5000",
     ], runtime({

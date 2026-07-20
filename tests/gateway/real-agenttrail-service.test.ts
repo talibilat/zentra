@@ -24,6 +24,15 @@ describe("real AgentTrail service composition", () => {
       observeAgentTrailEvidence: (event) => { evidence.push(event); },
     });
     runningServices.push(service);
+    const bootstrapToken = new URL(service.sessionUrl).hash.slice("#token=".length);
+    const handoff = await fetch(`${service.origin}/api/v1/session`, {
+      method: "POST",
+      headers: { origin: service.origin, "content-type": "application/json" },
+      body: JSON.stringify({ token: bootstrapToken }),
+    });
+    expect(handoff.status).toBe(201);
+    const agentTrailCookie = handoff.headers.get("set-cookie")!.split(";", 1)[0]!;
+    expect((await fetch(`${service.origin}/agenttrail/`, { headers: { cookie: agentTrailCookie } })).status).toBe(200);
     const initial = evidence.find((event): event is Extract<AgentTrailEvidence, { type: "agenttrail.ready" }> =>
       event.type === "agenttrail.ready")!;
 
@@ -32,6 +41,7 @@ describe("real AgentTrail service composition", () => {
     expect((await fetch(`${service.origin}/healthz`)).status).toBe(200);
     await waitFor(() => evidence.some((event) => event.type === "agenttrail.ready" && event.incarnation !== initial.incarnation), 120_000);
     expect((await fetch(`${service.origin}/readyz`)).status).toBe(200);
+    expect((await fetch(`${service.origin}/agenttrail/`, { headers: { cookie: agentTrailCookie } })).status).toBe(200);
 
     const journal = openAuthoritativeJournal(service.layout.databasePath, "read-only");
     const types = journal.readAll().map(({ type }) => type);
@@ -66,6 +76,13 @@ function repository(): string {
   const root = mkdtempSync(path.join(tmpdir(), "zentra-real-service-"));
   temporaryDirectories.push(root);
   execFileSync("/usr/bin/git", ["init", root], { env: { HOME: root }, stdio: "ignore" });
+  execFileSync("/usr/bin/git", ["config", "user.name", "Zentra Test"], { cwd: root, env: { HOME: root } });
+  execFileSync("/usr/bin/git", ["config", "user.email", "zentra@example.invalid"], { cwd: root, env: { HOME: root } });
+  execFileSync("/usr/bin/git", ["commit", "--allow-empty", "-m", "fixture"], {
+    cwd: root,
+    env: { HOME: root },
+    stdio: "ignore",
+  });
   return realpathSync(root);
 }
 

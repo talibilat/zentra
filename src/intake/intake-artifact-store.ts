@@ -161,6 +161,10 @@ export class IntakeArtifactStore {
     ]);
   }
 
+  readRetainedText(artifact: IntakeArtifactReference): string {
+    return this[synchronousArtifactVerifier](artifact);
+  }
+
   private async reconcile(artifact: IntakeArtifactReference): Promise<void> {
     const destination = this.artifactPath(artifact.sha256);
     let destinationStat: BigIntStats | null = null;
@@ -308,6 +312,7 @@ export class IntakeArtifactStore {
     }
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("intake artifact is symbolic or special");
     if ((stat.mode & 0o777n) !== 0o600n || stat.nlink !== 1n) throw new Error("intake artifact permissions or link count are invalid");
+    if (stat.size > BigInt(artifact.sizeBytes) * 6n + 4096n) throw new Error("intake artifact envelope exceeds its bound");
     const canonical = realpathSync.native(filename);
     if (!isContained(this.intakeRoot, canonical)) throw new Error("intake artifact escaped its fixed layout");
     const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

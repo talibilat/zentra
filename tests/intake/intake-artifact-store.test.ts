@@ -92,6 +92,29 @@ describe("IntakeArtifactStore", () => {
       quotedText: "durable text",
       artifact: prepared.artifact,
     });
+    expect(reopened.readRetainedText(prepared.artifact)).toBe("durable text");
+  });
+
+  it("synchronously reads retained text only through verified artifact evidence", async () => {
+    const root = projectRoot();
+    const store = await IntakeArtifactStore.openProject(root);
+    const artifact = await store.publish(await store.stage("<script>ticketAttack()</script>"));
+
+    expect(store.readRetainedText(artifact)).toBe("<script>ticketAttack()</script>");
+
+    const storedPath = path.join(root, ".zentra", "intake", "artifacts", `${artifact.sha256}.json`);
+    writeFileSync(storedPath, JSON.stringify({
+      schemaVersion: 1,
+      mediaType: "text/plain; charset=utf-8",
+      trust: "untrusted_planning_data",
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+      quotedText: "changed",
+    }), { mode: 0o600 });
+    expect(() => store.readRetainedText(artifact)).toThrow(/digest|size|identity/i);
+
+    writeFileSync(storedPath, "x".repeat(artifact.sizeBytes * 6 + 4097), { mode: 0o600 });
+    expect(() => store.readRetainedText(artifact)).toThrow(/exceeds its bound/i);
   });
 
   it("consumes internal artifact verification capabilities exactly once", async () => {

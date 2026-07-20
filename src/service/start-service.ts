@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, constants, existsSync } from "node:fs";
+import { lstat, open, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -14,7 +15,7 @@ import {
 } from "../agenttrail/agenttrail-supervisor.js";
 import { GatewayLifecycleService } from "../gateway/gateway-events.js";
 import { LoopbackGateway } from "../gateway/loopback-gateway.js";
-import type { GatewaySession, LoopbackGatewayOptions } from "../gateway/loopback-gateway.js";
+import type { AgentTrailAddress, GatewaySession, LoopbackGatewayOptions } from "../gateway/loopback-gateway.js";
 import { ProjectingEventJournal, type StoredEventSink } from "../journal/projecting-journal.js";
 import { openAuthoritativeJournal, type ArchivedEventJournal } from "../journal/retention.js";
 import { SQLITE_JOURNAL_SCHEMA_VERSION, SqliteEventJournal } from "../journal/sqlite-journal.js";
@@ -28,6 +29,13 @@ import {
   type RuntimeClaim,
 } from "../runtime/repository-runtime.js";
 import { ServiceLifecycleService } from "../runs/service-lifecycle.js";
+import { resolveProjectRevision } from "../runs/project-revision.js";
+import {
+  createLocalWorkflowSurface,
+  type LocalWorkflowSurfaceOptions,
+} from "../surfaces/local-workflow.js";
+import type { RunAdvancer, WorkflowSurface } from "../surfaces/workflow-surface.js";
+import { CLI_CONTROL_TOKEN_FILENAME } from "../surfaces/http-workflow-client.js";
 
 const DEFAULT_AGENTTRAIL_STARTUP_TIMEOUT_MS = 60_000;
 
@@ -51,6 +59,10 @@ export interface StartZentraServiceDependencies {
   readonly createRuntime?: (layout: ProjectRuntimeLayout, now: () => Date) => RuntimeStateService;
   readonly createTraceSink?: (traceDirectory: string, tracePath: string, serviceId: string) => ServiceTraceSink;
   readonly createGateway?: (options: LoopbackGatewayOptions) => GatewayService;
+  readonly createWorkflowSurface?: (
+    options: LocalWorkflowSurfaceOptions,
+  ) => WorkflowSurface | Promise<WorkflowSurface>;
+  readonly runAdvancer?: RunAdvancer;
   readonly observeAgentTrailEvidence?: (evidence: AgentTrailEvidence) => void | Promise<void>;
 }
 
@@ -58,6 +70,9 @@ export interface GatewayService {
   start(): Promise<GatewaySession>;
   rotateSession(): GatewaySession;
   setReadiness(readiness: "starting" | "ready" | "degraded" | "stopping"): void;
+  setAgentTrailAddress(address: AgentTrailAddress): void;
+  replaceAgentTrailAddress(address: AgentTrailAddress): void;
+  setWorkflowSurface?(workflow: WorkflowSurface): void;
   close(): Promise<void>;
 }
 
@@ -98,18 +113,27 @@ export async function startZentraService(
   const startupTimeoutMs = boundedTimeout(
     options.agentTrailStartupTimeoutMs ?? DEFAULT_AGENTTRAIL_STARTUP_TIMEOUT_MS,
   );
-  const gatewayOptions = {
-    now,
-    ...(options.tokenTtlMs === undefined ? {} : { tokenTtlMs: options.tokenTtlMs }),
-  } satisfies LoopbackGatewayOptions;
-  const defaultGateway = new LoopbackGateway(gatewayOptions);
-  const gateway = dependencies.createGateway?.(gatewayOptions) ?? defaultGateway;
   const discovery = await discoverProject(options.cwd ?? process.cwd());
   const layout = await initializeProjectRuntime(discovery);
+  const cliControlToken = randomBytes(32).toString("base64url");
+  const cliControlTokenPath = path.join(layout.runtimeDirectory, CLI_CONTROL_TOKEN_FILENAME);
+  const gatewayOptions = {
+    now,
+    cliControlTokenDigest: createHash("sha256").update(cliControlToken, "utf8").digest(),
+    ...(options.tokenTtlMs === undefined ? {} : { tokenTtlMs: options.tokenTtlMs }),
+  } satisfies LoopbackGatewayOptions;
+  let gateway: GatewayService;
+  let rawJournal: ArchivedEventJournal;
+  try {
+    const defaultGateway = new LoopbackGateway(gatewayOptions);
+    gateway = dependencies.createGateway?.(gatewayOptions) ?? defaultGateway;
+    rawJournal = openServiceJournal(layout.databasePath);
+  } catch (error) {
+    throw error;
+  }
   const runtime = dependencies.createRuntime?.(layout, now) ?? new RuntimeStateManager(layout, { now });
   const serviceId = `zentra-local-${randomUUID()}`;
   const tracePath = path.join(layout.traceDirectory, `agenttrail-${serviceId}.jsonl`);
-  const rawJournal = openServiceJournal(layout.databasePath);
   let sink: ServiceTraceSink | undefined;
   let journal: ProjectingEventJournal;
   try {
@@ -139,6 +163,7 @@ export async function startZentraService(
   let journalClosed = false;
   let sinkClosed = false;
   let removeAbortListener: (() => void) | null = null;
+  let cliControlTokenPublished = false;
 
   const closeJournal = (): void => {
     if (journalClosed) return;
@@ -193,6 +218,10 @@ export async function startZentraService(
         }
       }
       await attemptCleanup(() => gateway.close());
+      if (cliControlTokenPublished) {
+        await attemptCleanup(() => removeCliControlToken(cliControlTokenPath));
+        cliControlTokenPublished = false;
+      }
       await attemptCleanup(() => sidecar?.shutdown());
       if (claim !== null && session !== null) {
         await attemptCleanup(() => runtime.publish(claim!, {
@@ -238,6 +267,8 @@ export async function startZentraService(
       startupStatus: "starting",
     });
     claim = ownership.claim;
+    await publishCliControlToken(layout.runtimeDirectory, cliControlTokenPath, cliControlToken);
+    cliControlTokenPublished = true;
     processIncarnation = claim.processIncarnation;
     lifecycle = new ServiceLifecycleService(journal);
     if (ownership.staleEvidence !== null) {
@@ -284,9 +315,6 @@ export async function startZentraService(
     } | null = null;
     let initialReadyEvent: { readonly eventId: string; readonly incarnation: string } | null = null;
     const recordEvidence = async (evidence: AgentTrailEvidence): Promise<void> => {
-      if (evidence.type === "agenttrail.failed" && evidence.phase === "runtime") {
-        gateway.setReadiness("degraded");
-      }
       agentTrailEvidence.record(evidence);
       assertProjectionHealthy();
       const stored = journal.readStream(agentTrailStream).at(-1)!;
@@ -302,6 +330,7 @@ export async function startZentraService(
           occurredAt: evidence.occurredAt,
         });
         assertProjectionHealthy();
+        gateway.setReadiness("degraded");
         degraded = { incarnation: evidence.incarnation };
         target = null;
       } else if (evidence.type === "agenttrail.starting" && degraded !== null &&
@@ -339,6 +368,7 @@ export async function startZentraService(
           occurredAt: evidence.occurredAt,
         });
         assertProjectionHealthy();
+        gateway.replaceAgentTrailAddress(evidence.address);
         degraded = null;
         target = null;
         gateway.setReadiness("ready");
@@ -359,6 +389,7 @@ export async function startZentraService(
     if (durableInitialReady === null || durableInitialReady.incarnation !== initialAgentTrailReady.incarnation) {
       throw new Error("AgentTrail returned readiness that contradicts its durable ready event");
     }
+    gateway.setAgentTrailAddress(initialAgentTrailReady.address);
     session = gateway.rotateSession();
     // service.ready means both mandatory AgentTrail readiness and runtime-ready publication succeeded.
     await runtime.publish(claim, {
@@ -382,6 +413,21 @@ export async function startZentraService(
     });
     assertProjectionHealthy();
     if (ready.type !== "service.ready") throw new Error("Service readiness publication failed");
+    if (gateway.setWorkflowSurface === undefined) {
+      throw new Error("Gateway cannot accept a workflow surface");
+    }
+    const workflowOptions: LocalWorkflowSurfaceOptions = {
+      journal,
+      process: claim,
+      serviceReadyEventId: ready.eventId,
+      projectRoot: layout.projectRoot,
+      projectRevision: await resolveProjectRevision(layout.projectRoot),
+      traceProjectionFailed: () => journal.projectionFailed || sink!.streamFailed === true,
+      ...(dependencies.runAdvancer === undefined ? {} : { runAdvancer: dependencies.runAdvancer }),
+    };
+    const workflow = await (dependencies.createWorkflowSurface?.(workflowOptions) ??
+      createLocalWorkflowSurface(workflowOptions));
+    gateway.setWorkflowSurface(workflow);
     gateway.setReadiness("ready");
 
     return {
@@ -433,4 +479,40 @@ function boundedTimeout(value: number): number {
     throw new RangeError("AgentTrail startup timeout must be a positive bounded integer");
   }
   return value;
+}
+
+async function publishCliControlToken(runtimeDirectory: string, tokenPath: string, token: string): Promise<void> {
+  const temporaryPath = path.join(runtimeDirectory, `.cli-control.${randomUUID()}.tmp`);
+  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
+  let published = false;
+  try {
+    descriptor = await open(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await descriptor.writeFile(token, "utf8");
+    await descriptor.sync();
+    await descriptor.close();
+    descriptor = undefined;
+    await rename(temporaryPath, tokenPath);
+    published = true;
+    const metadata = await lstat(tokenPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
+      (metadata.mode & 0o777) !== 0o600 || metadata.size !== 43) {
+      throw new Error("CLI control token file is not private");
+    }
+    const directory = await open(runtimeDirectory, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
+  } catch (error) {
+    await descriptor?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    if (published) await unlink(tokenPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function removeCliControlToken(tokenPath: string): Promise<void> {
+  try { await unlink(tokenPath); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
