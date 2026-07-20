@@ -5,6 +5,7 @@ export interface WorkerRequest {
   readonly cwd: string;
   readonly timeoutMs: number;
   readonly environment?: Readonly<Record<string, string>>;
+  readonly input?: string;
 }
 
 export interface WorkerResult {

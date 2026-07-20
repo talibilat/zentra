@@ -172,6 +172,10 @@ export const RunIntakeCompletedPayloadSchema = RunPhasePayloadSchema.extend({
 
 export const RunAnalysisCompletedPayloadSchema = RunPhasePayloadSchema.extend({
   intake: IntakeClosureReferenceSchema,
+  analysisStreamId: IdSchema,
+  analysisCompletionEventId: IdSchema,
+  analysisEvidenceSha256: DigestSchema,
+  sourceEvidenceSha256: DigestSchema,
 });
 
 export const RunApprovalRequestedPayloadSchema = RunPhasePayloadSchema.extend({

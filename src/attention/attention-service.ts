@@ -74,6 +74,7 @@ export interface RequestQuestionInput {
   readonly evidenceSha256: string;
   readonly commandId: string;
   readonly expiryPolicy?: ExpiryPolicy;
+  readonly questions?: QuestionPacket["questions"];
 }
 
 export interface RequestApprovalInput {

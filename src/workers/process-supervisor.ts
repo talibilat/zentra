@@ -95,7 +95,7 @@ export class ProcessSupervisor implements WorkerAdapter {
         shell: false,
         detached: true,
         env,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       });
 
       const stdoutChunks: Buffer[] = [];
@@ -251,12 +251,16 @@ export class ProcessSupervisor implements WorkerAdapter {
         }
       };
 
-      child.stdout.on("data", (chunk: Buffer) => {
+      child.stdout!.on("data", (chunk: Buffer) => {
         capture(stdoutChunks, chunk);
       });
-      child.stderr.on("data", (chunk: Buffer) => {
+      child.stderr!.on("data", (chunk: Buffer) => {
         capture(stderrChunks, chunk);
       });
+      if (request.input !== undefined) {
+        child.stdin?.on("error", (error) => decide({ kind: "spawn_error", message: `stdin failed: ${error.message}` }));
+        child.stdin?.end(request.input, "utf8");
+      }
 
       child.on("error", (error) => {
         decide({ kind: "spawn_error", message: error.message });

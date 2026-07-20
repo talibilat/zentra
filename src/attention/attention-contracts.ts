@@ -30,6 +30,16 @@ export const DecisionOptionSchema = z.strictObject({
   impacts: z.array(TextSchema).max(64),
 });
 
+export const QuestionnaireItemSchema = z.strictObject({
+  uncertaintyId: IdSchema,
+  question: TextSchema,
+  material: z.boolean(),
+  affectedScopes: CanonicalScopesSchema,
+  dependentScopes: CanonicalScopesSchema,
+  options: z.array(DecisionOptionSchema).min(1).max(64),
+  recommendation: z.strictObject({ optionId: IdSchema, rationale: TextSchema }),
+});
+
 export const QuestionPacketSchema = z.strictObject({
   schemaVersion: z.literal(ATTENTION_SCHEMA_VERSION),
   decisionId: IdSchema,
@@ -46,6 +56,7 @@ export const QuestionPacketSchema = z.strictObject({
   evidenceSha256: DigestSchema,
   commandId: IdSchema,
   authority: z.literal("none"),
+  questions: z.array(QuestionnaireItemSchema).min(1).max(64).optional(),
 }).superRefine((packet, context) => {
   const optionIds = packet.options.map((option) => option.optionId);
   if (new Set(optionIds).size !== optionIds.length) {
@@ -53,6 +64,11 @@ export const QuestionPacketSchema = z.strictObject({
   }
   if (packet.recommendation !== null && !optionIds.includes(packet.recommendation.optionId)) {
     context.addIssue({ code: "custom", message: "recommendation must reference an immutable option" });
+  }
+  for (const question of packet.questions ?? []) {
+    if (!question.options.some((option) => option.optionId === question.recommendation.optionId)) {
+      context.addIssue({ code: "custom", message: "question recommendation must reference its immutable option" });
+    }
   }
 });
 
@@ -242,6 +258,7 @@ export const AttentionIdentityReservationPayloadSchema = z.strictObject({
 export type DecisionActor = z.infer<typeof DecisionActorSchema>;
 export type ExpiryPolicy = z.infer<typeof ExpiryPolicySchema>;
 export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
+export type QuestionnaireItem = z.infer<typeof QuestionnaireItemSchema>;
 export type QuestionPacket = z.infer<typeof QuestionPacketSchema>;
 export type ApprovalPacket = z.infer<typeof ApprovalPacketSchema>;
 export type DecisionRequestedPayload = z.infer<typeof DecisionRequestedPayloadSchema>;

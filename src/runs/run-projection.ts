@@ -175,7 +175,7 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
         if (state.intakeClosure === null || JSON.stringify(payload.intake) !== JSON.stringify(state.intakeClosure)) {
           throw new Error("run analysis does not match the durable intake closure");
         }
-        if (event.causationId !== state.intakeCompletionEventId) throw new Error("run analysis is not caused by intake completion");
+        if (event.causationId !== payload.analysisCompletionEventId) throw new Error("run analysis is not caused by analysis completion");
         state.lifecycle = "planning";
         break;
       }

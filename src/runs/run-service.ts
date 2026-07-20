@@ -31,8 +31,8 @@ import {
 } from "../intake/intake-contracts.js";
 import {
   consumeAndVerifyIntakeArtifacts,
-  type IntakeArtifactVerificationCapability,
 } from "../intake/intake-artifact-store.js";
+import { consumeAnalysisCompletion, type AnalysisCompletionCapability } from "../analysis/analysis-completion.js";
 import { projectRun, type RunView } from "./run-projection.js";
 import { verifyAgentTrailReady } from "./service-lifecycle.js";
 
@@ -162,7 +162,7 @@ export class RunService {
     runId: string,
     expectedVersion: number,
     commandId: string,
-    artifactVerificationCapability: IntakeArtifactVerificationCapability,
+    analysisCompletionCapability: AnalysisCompletionCapability,
   ): RunView {
     const current = this.require(runId);
     if (current.lifecycle !== "analyzing") throw new Error(`invalid run transition ${current.lifecycle} -> run.analysis_completed`);
@@ -174,23 +174,33 @@ export class RunService {
       (intakeEvent.payload as Readonly<Record<string, unknown>>)["intake"],
     );
     const verified = this.verifyIntakeClosure(current, intake);
-    const artifactVerification = consumeAndVerifyIntakeArtifacts(artifactVerificationCapability);
+    const analysisVerification = consumeAnalysisCompletion(analysisCompletionCapability);
+    if (analysisVerification.runId !== runId) throw new Error("analysis completion evidence belongs to a different run");
+    const completionEvent = findAllEvent(this.journal, (event) => event.eventId === analysisVerification.completionEventId);
+    if (completionEvent?.streamId !== analysisVerification.analysisStreamId || completionEvent.type !== "analysis.completed" ||
+      completionEvent.correlationId !== runId) throw new Error("analysis completion event is missing or incorrectly bound");
+    const artifactVerification = consumeAndVerifyIntakeArtifacts(analysisVerification.intakeArtifactVerification);
     if (artifactVerification.runId !== runId
       || artifactVerification.snapshotSha256 !== verified.snapshotSha256
       || artifactVerification.sourceStreamId !== verified.sourceStreamId
       || artifactVerification.closureEventId !== verified.closureEventId
-      || artifactVerification.artifactAggregateSha256 !== this.intakeArtifactAggregate(verified.sourceStreamId)) {
+      || artifactVerification.artifactAggregateSha256 !== this.intakeArtifactAggregate(verified.sourceStreamId)
+      || artifactVerification.retainedSourceAggregateSha256 !== analysisVerification.sourceEvidenceSha256) {
       throw new Error("verified intake artifact evidence does not match the durable closure");
     }
     return this.append(runId, {
       expectedVersion,
       commandId,
-      causationId: intakeEvent.eventId,
+      causationId: completionEvent.eventId,
       process: current.activeProcess,
     }, "run.analysis_completed", {
       schemaVersion: RUN_SCHEMA_VERSION,
       commandId,
       intake: verified,
+      analysisStreamId: analysisVerification.analysisStreamId,
+      analysisCompletionEventId: completionEvent.eventId,
+      analysisEvidenceSha256: analysisVerification.evidenceSha256,
+      sourceEvidenceSha256: analysisVerification.sourceEvidenceSha256,
       executionAuthority: "none",
     });
   }

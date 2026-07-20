@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -16,6 +16,9 @@ import { IntakeService } from "../../src/intake/intake-service.js";
 import { IntakeArtifactStore } from "../../src/intake/intake-artifact-store.js";
 import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
 import { BoundedTicketIntake } from "../../src/intake/ticket-intake.js";
+import { AnalysisCoordinator } from "../../src/analysis/analysis-coordinator.js";
+import { SupervisedAnalysisAdapter } from "../../src/analysis/supervised-analysis-adapter.js";
+import { AttentionService } from "../../src/attention/attention-service.js";
 
 const cleanup: string[] = [];
 
@@ -269,7 +272,7 @@ describe("RunService", () => {
     run = result.run;
     expect(() => service.completeAnalysis("run-89", run.streamVersion, "analysis-1", undefined as never))
       .toThrow(/capability|verified intake artifact/i);
-    run = (await intake.completeAnalysis("run-89", run.streamVersion, "analysis-1")).run;
+    run = await completeAnalysis(journal, service, intake, "run-89");
     run = service.requestApproval("run-89", run.streamVersion, "approval-request-1", {
       planDigest: "d".repeat(64),
       envelopeDigest: "e".repeat(64),
@@ -474,7 +477,7 @@ describe("RunService", () => {
       limits: intakeLimits,
       commandId: "revise-intake",
     })).run;
-    run = (await intake.completeAnalysis(input.runId, run.streamVersion, "revise-analysis")).run;
+    run = await completeAnalysis(journal, service, intake, input.runId);
     run = service.requestApproval(input.runId, run.streamVersion, "revise-approval-1", {
       planDigest: "d".repeat(64), envelopeDigest: "e".repeat(64),
     });
@@ -491,6 +494,38 @@ describe("RunService", () => {
     journal.close();
   });
 });
+
+async function completeAnalysis(
+  journal: SqliteEventJournal,
+  runs: RunService,
+  intake: IntakeService,
+  runId: string,
+) {
+  const repositoryRoot = realpathSync.native(path.resolve(import.meta.dirname, "../.."));
+  const program = realpathSync.native(path.join(repositoryRoot, "fixtures/deterministic-analyzer.mjs"));
+  const executable = realpathSync.native(process.execPath);
+  const fileDigest = (filename: string) => createHash("sha256").update(readFileSync(filename)).digest("hex");
+  const attention = new AttentionService(journal);
+  const coordinator = new AnalysisCoordinator(journal, runs, attention, intake, new SupervisedAnalysisAdapter({
+    executable, executableSha256: fileDigest(executable), program, programSha256: fileDigest(program),
+    cwd: realpathSync.native("/tmp"), timeoutMs: 2_000, maxInputBytes: 128 * 1024, maxOutputBytes: 128 * 1024,
+  }));
+  const budget = {
+    maxRounds: 2, maxObservations: 8, maxQuestions: 8, maxOptionsPerQuestion: 4,
+    maxQuestionnaireOptions: 16, maxOutputBytes: 128 * 1024, maxDurationMs: 10_000,
+    maxInputTokens: 1_000, maxOutputTokens: 1_000, maxCostUsdNano: 0,
+  };
+  const first = await coordinator.advance({ runId, budget, signal: new AbortController().signal });
+  if (first.status !== "waiting") throw new Error("analysis fixture did not request its material decision");
+  const question = attention.getDecision(first.decisionId)!;
+  attention.answer(question.decisionId, {
+    runId, expectedVersion: question.streamVersion, optionId: question.recommendation!.optionId,
+    actor: { actorId: "operator", kind: "operator", channel: "api" },
+    commandId: `answer-${runId}`, evidenceSha256: "9".repeat(64),
+  });
+  await coordinator.advance({ runId, budget, signal: new AbortController().signal });
+  return runs.get(runId)!;
+}
 
 function seedIntakeClosure(
   journal: SqliteEventJournal,

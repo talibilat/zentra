@@ -86,6 +86,16 @@ import {
   QuestionPacketSchema,
   ScopeAdmissionPayloadSchema,
 } from "../attention/attention-contracts.js";
+import {
+  AnalysisBudgetExhaustedPayloadSchema,
+  AnalysisBudgetRevisedPayloadSchema,
+  AnalysisCancelledPayloadSchema,
+  AnalysisCompletedPayloadSchema,
+  AnalysisInvocationReservedPayloadSchema,
+  AnalysisObservedPayloadSchema,
+  AnalysisRevisedPayloadSchema,
+  AnalysisStartedPayloadSchema,
+} from "../analysis/analysis-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -139,6 +149,8 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "run.plan_revised",
   "run.completed", "run.cancelled", "run.denied", "run.timed_out", "run.failed",
   "source.discovered", "source.rejected", "intake.snapshot_closed",
+  "analysis.started", "analysis.invocation_reserved", "analysis.observed", "analysis.revised",
+  "analysis.budget_exhausted", "analysis.budget_revised", "analysis.completed", "analysis.cancelled",
   "questionnaire.proposed", "decision.requested", "decision.accepted", "decision.rejected",
   "decision.expired", "decision.stale_attempted", "decision.duplicate_attempted",
   "approval.requested", "approval.accepted", "approval.rejected", "approval.expired",
@@ -310,6 +322,14 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "source.discovered": SourceDiscoveredPayloadSchema,
   "source.rejected": SourceRejectedPayloadSchema,
   "intake.snapshot_closed": IntakeSnapshotClosedPayloadSchema,
+  "analysis.started": AnalysisStartedPayloadSchema,
+  "analysis.invocation_reserved": AnalysisInvocationReservedPayloadSchema,
+  "analysis.observed": AnalysisObservedPayloadSchema,
+  "analysis.revised": AnalysisRevisedPayloadSchema,
+  "analysis.budget_exhausted": AnalysisBudgetExhaustedPayloadSchema,
+  "analysis.budget_revised": AnalysisBudgetRevisedPayloadSchema,
+  "analysis.completed": AnalysisCompletedPayloadSchema,
+  "analysis.cancelled": AnalysisCancelledPayloadSchema,
   "service.starting": ServiceStartingPayloadSchema,
   "service.ready": ServiceReadyPayloadSchema,
   "service.stopping": ServiceStoppingPayloadSchema,

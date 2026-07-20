@@ -128,9 +128,13 @@ function seedRun(journal: EventJournal, runId: string): void {
       schemaVersion: 1,
       commandId: `analysis-${runId}`,
       intake: (intake.payload as { intake: unknown }).intake,
+      analysisStreamId: `analysis:${runId}`,
+      analysisCompletionEventId: `analysis-completion-${runId}`,
+      analysisEvidenceSha256: "3".repeat(64),
+      sourceEvidenceSha256: "4".repeat(64),
       executionAuthority: "none",
     },
-    causationId: intake.eventId,
+    causationId: `analysis-completion-${runId}`,
     correlationId: runId,
   }]);
   run = runs.get(runId)!;

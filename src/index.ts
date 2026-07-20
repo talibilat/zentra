@@ -44,6 +44,37 @@ export type {
 export { ProjectingEventJournal } from "./journal/projecting-journal.js";
 export type { StoredEventSink } from "./journal/projecting-journal.js";
 export {
+  ANALYSIS_SCHEMA_VERSION,
+  AnalysisBudgetExhaustedPayloadSchema,
+  AnalysisBudgetRevisedPayloadSchema,
+  AnalysisBudgetSchema,
+  AnalysisCancelledPayloadSchema,
+  AnalysisCompletedPayloadSchema,
+  AnalysisObservedPayloadSchema,
+  AnalysisInvocationReservedPayloadSchema,
+  AnalysisRevisedPayloadSchema,
+  AnalysisRoundResultSchema,
+  AnalysisStartedPayloadSchema,
+  AnalysisUncertaintySchema,
+  RetainedAnalysisSourceSchema,
+  analysisStreamId,
+} from "./analysis/analysis-contracts.js";
+export type {
+  AnalysisAdapterRequest,
+  AnalysisAnswer,
+  AnalysisBudget,
+  AnalysisObservation,
+  AnalysisRoundResult,
+  AnalysisUncertainty,
+  RetainedAnalysisSource,
+} from "./analysis/analysis-contracts.js";
+export { AnalysisCoordinator } from "./analysis/analysis-coordinator.js";
+export type {
+  AnalysisCoordinatorResult,
+} from "./analysis/analysis-coordinator.js";
+export { AnalysisExecutionError, SupervisedAnalysisAdapter } from "./analysis/supervised-analysis-adapter.js";
+export type { SupervisedAnalysisAdapterOptions } from "./analysis/supervised-analysis-adapter.js";
+export {
   ATTENTION_SCHEMA_VERSION,
   ApprovalAcceptedPayloadSchema,
   ApprovalPacketSchema,
