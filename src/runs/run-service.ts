@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
-import { findAllEvent, isAtomicEventJournal, readStreamEvents, type AtomicAppend, type EventJournal } from "../journal/journal.js";
+import { findAllEvent, isAtomicEventJournal, iterateAllEvents, readStreamEvents, type AtomicAppend, type EventJournal } from "../journal/journal.js";
 import {
   RUN_SCHEMA_VERSION,
   IntakeClosureReferenceSchema,
@@ -217,12 +217,79 @@ export class RunService {
     if (priorApproval?.type !== "run.approval_requested") {
       throw new Error("run plan revision requires the current approval request event");
     }
+    let decisionRequest: StoredEvent | undefined;
+    for (const event of iterateAllEvents(this.journal)) {
+      if (event.correlationId !== runId || event.type !== "approval.requested" ||
+        typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload) ||
+        (event.payload as Readonly<Record<string, unknown>>)["approvalRequestEventId"] !== priorApproval.eventId) continue;
+      if (decisionRequest !== undefined) throw new Error("run approval request has contradictory decision reservations");
+      decisionRequest = event;
+    }
+    if (decisionRequest !== undefined) {
+      const decisionStream = readStreamEvents(this.journal, decisionRequest.streamId);
+      if (decisionStream.some((event) => event.type === "approval.accepted" || event.type === "approval.rejected" ||
+        event.type === "approval.expired" || event.type === "approval.stale")) {
+        throw new Error("run approval decision is already resolved");
+      }
+      return this.revisePlanGuarded(runId, expectedVersion, commandId, {
+        streamId: decisionRequest.streamId,
+        expectedVersion: decisionStream.at(-1)?.streamVersion ?? 0,
+      });
+    }
     return this.append(runId, {
       expectedVersion, commandId, causationId: priorApproval.eventId, process: this.require(runId).acceptedBy,
     }, "run.plan_revised", {
       schemaVersion: RUN_SCHEMA_VERSION,
       commandId,
       priorApprovalRequestEventId: priorApproval.eventId,
+      executionAuthority: "none",
+    });
+  }
+
+  revisePlanGuarded(runId: string, expectedVersion: number, commandId: string, guard: {
+    readonly streamId: string;
+    readonly expectedVersion: number;
+  }): RunView {
+    const events = this.readStream(runId);
+    const priorApproval = events.at(-1);
+    if (priorApproval?.type !== "run.approval_requested") {
+      throw new Error("run plan revision requires the current approval request event");
+    }
+    return this.appendGuarded(runId, {
+      expectedVersion, commandId, causationId: priorApproval.eventId, process: this.require(runId).acceptedBy,
+    }, "run.plan_revised", {
+      schemaVersion: RUN_SCHEMA_VERSION,
+      commandId,
+      priorApprovalRequestEventId: priorApproval.eventId,
+      executionAuthority: "none",
+    }, guard);
+  }
+
+  rejectApproval(runId: string, expectedVersion: number, commandId: string, input: {
+    readonly approvalDecisionId: string;
+    readonly approvalDecisionEventId: string;
+    readonly reasonEvidenceSha256: string;
+  }): RunView {
+    const events = this.readStream(runId);
+    const priorApproval = events.at(-1);
+    if (priorApproval?.type !== "run.approval_requested") {
+      throw new Error("run approval rejection requires the current approval request event");
+    }
+    const current = this.require(runId);
+    return this.append(runId, {
+      expectedVersion,
+      commandId,
+      causationId: input.approvalDecisionEventId,
+      process: current.acceptedBy,
+    }, "run.approval_rejected", {
+      schemaVersion: RUN_SCHEMA_VERSION,
+      commandId,
+      planDigest: current.authority.planDigest,
+      envelopeDigest: current.authority.envelopeDigest,
+      approvalDecisionId: input.approvalDecisionId,
+      approvalDecisionEventId: input.approvalDecisionEventId,
+      approvalRequestEventId: priorApproval.eventId,
+      reasonEvidenceSha256: input.reasonEvidenceSha256,
       executionAuthority: "none",
     });
   }
@@ -359,6 +426,36 @@ export class RunService {
     projectRun([...events, prospective(event, current.streamVersion + 1)]);
     const stored = this.journal.append(runStreamId(runId), context.expectedVersion, [event]);
     return requiredProjection([...events, ...stored]);
+  }
+
+  private appendGuarded(
+    runId: string,
+    context: RunCommandContext,
+    type: string,
+    payload: unknown,
+    guard: { readonly streamId: string; readonly expectedVersion: number },
+  ): RunView {
+    if (!isAtomicEventJournal(this.journal)) throw new Error("guarded run revision requires an atomic journal");
+    const events = this.readStream(runId);
+    const current = requiredProjection(events);
+    const canonicalPayload = canonical(payload);
+    const priorCommand = events.find((event) => commandId(event.payload) === context.commandId);
+    if (priorCommand !== undefined) {
+      if (priorCommand.type === type && priorCommand.causationId === context.causationId &&
+        JSON.stringify(priorCommand.payload) === JSON.stringify(canonicalPayload)) return current;
+      throw new Error("run command identity was reused with different input");
+    }
+    if (current.lifecycle === "terminal") throw new Error("run is already terminal");
+    if (context.expectedVersion !== current.streamVersion) {
+      throw new Error(`expected version ${context.expectedVersion}, actual ${current.streamVersion}`);
+    }
+    const event = this.event(runStreamId(runId), type, canonicalPayload, context.causationId, runId);
+    projectRun([...events, prospective(event, current.streamVersion + 1)]);
+    this.journal.appendAtomically([
+      { streamId: runStreamId(runId), expectedVersion: current.streamVersion, events: [event] },
+      { streamId: guard.streamId, expectedVersion: guard.expectedVersion, events: [] },
+    ]);
+    return this.require(runId);
   }
 
   private require(runId: string): RunView {

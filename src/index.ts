@@ -211,6 +211,7 @@ export {
   MilestoneSchema,
   PlannedTaskSchema,
   RoleAssignmentSchema,
+  SafeLogicalPathSchema,
 } from "./contracts/milestone.js";
 export { MilestoneTerminalResultSchema, MilestoneTerminalPayloadSchema } from "./contracts/milestone-result.js";
 export type { MilestoneTerminalResult, MilestoneEvidenceReference } from "./contracts/milestone-result.js";
@@ -312,7 +313,7 @@ export type {
 } from "./workers/role-capability-envelope.js";
 export { LocalReleaseCoordinator } from "./release/local-release-coordinator.js";
 export type { LocalReleaseCoordinatorResult } from "./release/local-release-coordinator.js";
-export { ReleasePreparationConfigSchema } from "./projects/project-config.js";
+export { ReleasePreparationConfigSchema, createValidationIdentitySnapshot } from "./projects/project-config.js";
 export type { ReleasePreparationConfig } from "./projects/project-config.js";
 export {
   modelSheetSha256,
@@ -387,6 +388,7 @@ export {
   ProjectRevisionSchema,
   RunAcceptedPayloadSchema,
   RunAnalysisCompletedPayloadSchema,
+  RunApprovalRejectedPayloadSchema,
   RunActorSchema,
   RunAuthoritySchema,
   RunBudgetSchema,
@@ -436,6 +438,36 @@ export { projectRun } from "./runs/run-projection.js";
 export type { RunView } from "./runs/run-projection.js";
 export { RunService } from "./runs/run-service.js";
 export type { AcceptRunInput, RunCommandContext } from "./runs/run-service.js";
+export {
+  PLANNING_SCHEMA_VERSION,
+  CorrectionProposedPayloadSchema,
+  PlanProposedPayloadSchema,
+  PlanRejectedPayloadSchema,
+  PlanRevisedPayloadSchema as PlanningPlanRevisedPayloadSchema,
+  PlanningAnalysisEvidenceSchema,
+  PlanningArtifactSchema,
+  PlanningAuthorityEnvelopeSchema,
+  PlanningCapabilityIdentitySchema,
+  PlanningEvidenceRequirementSchema,
+  PlanningProposalSchema,
+  PlanningTaskSpecificationSchema,
+  ValidationIdentitySchema,
+  assertCorrectionWithinBounds,
+  buildPlanningArtifact,
+  planningStreamId,
+} from "./planning/planning-contracts.js";
+export type {
+  PlanningArtifact,
+  PlanningAuthorityEnvelope,
+  PlanningCapabilityIdentity,
+  PlanningProposal,
+  PlanningProposalInput,
+  ValidationIdentity,
+} from "./planning/planning-contracts.js";
+export { projectPlanning } from "./planning/planning-projection.js";
+export type { PlanningView } from "./planning/planning-projection.js";
+export { PlanningCoordinator } from "./planning/planning-coordinator.js";
+export type { PlanningRequestInput, PlanningRequestResult } from "./planning/planning-coordinator.js";
 export { RunPreflightCoordinator } from "./runs/run-preflight.js";
 export { ServiceLifecycleService } from "./runs/service-lifecycle.js";
 export { LoopbackGateway } from "./gateway/loopback-gateway.js";

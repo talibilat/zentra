@@ -194,6 +194,13 @@ export const RunPlanRevisedPayloadSchema = RunPhasePayloadSchema.extend({
   priorApprovalRequestEventId: IdSchema,
 });
 
+export const RunApprovalRejectedPayloadSchema = RunApprovalRequestedPayloadSchema.extend({
+  approvalDecisionId: IdSchema,
+  approvalDecisionEventId: IdSchema,
+  approvalRequestEventId: IdSchema,
+  reasonEvidenceSha256: DigestSchema,
+});
+
 export const RunSuspendedPayloadSchema = RunPhasePayloadSchema.extend({
   reasonCode: IdSchema,
   resumeTo: RunLifecycleSchema.exclude(["waiting", "blocked", "terminal"]),

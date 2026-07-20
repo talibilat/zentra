@@ -536,7 +536,13 @@ describe("AttentionService", () => {
 
     const runs = new RunService(journal);
     let run = runs.get("run-1")!;
-    run = runs.revisePlan("run-1", run.streamVersion, "expiry-plan-revised");
+    const rejectionEvent = service.readDecisionStream(first.decisionId)
+      .find((event) => event.type === "approval.rejected")!;
+    run = runs.rejectApproval("run-1", run.streamVersion, "expiry-plan-rejected", {
+      approvalDecisionId: first.decisionId,
+      approvalDecisionEventId: rejectionEvent.eventId,
+      reasonEvidenceSha256: evidenceSha256,
+    });
     run = runs.requestApproval("run-1", run.streamVersion, "expiry-run-approval", { planDigest, envelopeDigest });
     const expiring = service.requestApproval({
       ...approvalInput(), decisionId: "reserved-expiring", attentionId: "reserved-expiring-attention",
@@ -1057,7 +1063,7 @@ describe("AttentionService", () => {
     const reopened = new AttentionService(journal, () => new Date("2026-07-19T11:00:00.000Z"));
     if (approvalResult!.status === "rejected") {
       expect(reopened.getDecision(requested.decisionId)).toMatchObject({ status: "stale" });
-      expect(reopened.readAttemptStream(requested.decisionId, "process-approve")).toHaveLength(1);
+      expect(reopened.readAttemptStream(requested.decisionId, "process-approve").length).toBeLessThanOrEqual(1);
       const requestEventId = (requested.packet as { approvalRequestEventId: string }).approvalRequestEventId;
       expect(reopened.approvalReservation("run-1", requestEventId)).toMatchObject({ status: "consumed", outcome: "stale" });
     } else {

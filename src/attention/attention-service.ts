@@ -298,20 +298,24 @@ export class AttentionService {
       }
     }
     this.validateSubmission(current, input);
+    const payload = {
+      schemaVersion: ATTENTION_SCHEMA_VERSION,
+      decisionId,
+      runId: input.runId,
+      reason: input.reason,
+      actor: DecisionActorSchema.parse(input.actor),
+      commandId: input.commandId,
+      evidenceSha256: input.evidenceSha256,
+      authority: "none" as const,
+    };
+    if (current.kind === "approval") {
+      return this.consumeApprovalRejection(current, input, payload);
+    }
     return this.consume(
       current,
       input,
-      current.kind === "approval" ? "approval.rejected" : "decision.rejected",
-      {
-        schemaVersion: ATTENTION_SCHEMA_VERSION,
-        decisionId,
-        runId: input.runId,
-        reason: input.reason,
-        actor: DecisionActorSchema.parse(input.actor),
-        commandId: input.commandId,
-        evidenceSha256: input.evidenceSha256,
-        authority: "none",
-      },
+      "decision.rejected",
+      payload,
       "rejected",
     );
   }
@@ -408,7 +412,10 @@ export class AttentionService {
   }
 
   getDecision(decisionId: string): AttentionView | null {
-    return projectAttention(this.readDecisionStream(decisionId));
+    const current = this.projectDecision(decisionId);
+    return current?.kind === "approval" && current.status === "pending"
+      ? this.reconcileApproval(current)
+      : current;
   }
 
   getAdvisory(attentionId: string): AttentionView | null {
@@ -685,6 +692,38 @@ export class AttentionService {
       }
     }
     throw new Error("approval optimistic retry exhausted");
+  }
+
+  private consumeApprovalRejection(
+    current: AttentionView,
+    input: DecisionSubmission,
+    payload: unknown,
+  ): AttentionView {
+    const packet = current.packet as ApprovalPacket;
+    const events = [
+      this.event(decisionStreamId(current.decisionId), "approval.rejected", payload, current.runId),
+      this.resolvedEvent(current, input.commandId, input.evidenceSha256, input.actor, "rejected"),
+    ];
+    try {
+      return this.appendResolution(current, events, "rejected", [{
+        streamId: runStreamId(packet.runId),
+        expectedVersion: packet.runStreamVersion,
+        events: [],
+      }]);
+    } catch (error) {
+      if (!isOptimisticConflict(error)) throw error;
+      const latest = this.requireDecision(current.decisionId);
+      if (latest.status !== "pending") {
+        this.appendAttempt(latest, input, "approval.duplicate_attempted", "already_consumed");
+        throw new Error("decision is already consumed");
+      }
+      const reconciled = this.reconcileApproval(latest);
+      if (reconciled.status === "stale") {
+        this.appendAttempt(latest, input, "approval.stale_attempted", "run_revision");
+        throw new Error("approval packet is stale after run revision");
+      }
+      throw error;
+    }
   }
 
   private validateSubmission(current: AttentionView, input: DecisionSubmission): void {
@@ -1121,9 +1160,13 @@ export class AttentionService {
   }
 
   private requireDecision(decisionId: string): AttentionView {
-    const attention = this.getDecision(decisionId);
+    const attention = this.projectDecision(decisionId);
     if (attention === null) throw new Error(`decision ${decisionId} not found`);
     return attention;
+  }
+
+  private projectDecision(decisionId: string): AttentionView | null {
+    return projectAttention(this.readDecisionStream(decisionId));
   }
 
   private requireAdvisory(attentionId: string): AttentionView {

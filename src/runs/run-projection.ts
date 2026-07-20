@@ -6,6 +6,7 @@ import {
   RunAcceptedPayloadSchema,
   RunAnalysisCompletedPayloadSchema,
   RunApprovalRequestedPayloadSchema,
+  RunApprovalRejectedPayloadSchema,
   RunCancelledPayloadSchema,
   RunPhasePayloadSchema,
   RunIntakeCompletedPayloadSchema,
@@ -220,6 +221,26 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
           envelopeDigest: null,
           approvalDecisionId: null,
           executionAuthority: "none",
+        };
+        break;
+      }
+      case "run.approval_rejected": {
+        const payload = RunApprovalRejectedPayloadSchema.parse(event.payload);
+        bindCommand(commandBindings, payload.commandId, event.payload);
+        requireTransition(state.lifecycle, "awaiting_approval", event.type);
+        const priorApproval = events[index - 1]!;
+        if (priorApproval.type !== "run.approval_requested" ||
+          payload.approvalRequestEventId !== priorApproval.eventId ||
+          payload.approvalDecisionEventId !== event.causationId ||
+          payload.planDigest !== state.authority.planDigest ||
+          payload.envelopeDigest !== state.authority.envelopeDigest) {
+          throw new Error("run approval rejection does not bind the current request and decision");
+        }
+        state.lifecycle = "planning";
+        state.authority = {
+          ...state.authority,
+          approvalState: "rejected",
+          approvalDecisionId: payload.approvalDecisionId,
         };
         break;
       }

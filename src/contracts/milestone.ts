@@ -10,7 +10,7 @@ const MAX_PATH_LENGTH = 4_096;
 
 const IdentitySchema = z.string().min(1).max(MAX_ID_LENGTH);
 const BoundedTextSchema = z.string().min(1).max(MAX_TEXT_LENGTH);
-const SafeLogicalPathSchema = z.string().min(1).max(MAX_PATH_LENGTH).refine(isSafeLogicalPath, {
+export const SafeLogicalPathSchema = z.string().min(1).max(MAX_PATH_LENGTH).refine(isSafeLogicalPath, {
   message: "path must be a safe logical relative path",
 });
 

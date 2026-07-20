@@ -35,6 +35,7 @@ import {
   PreflightPayloadSchema,
   RunAcceptedPayloadSchema,
   RunAnalysisCompletedPayloadSchema,
+  RunApprovalRejectedPayloadSchema,
   RunApprovalRequestedPayloadSchema,
   RunCancelledPayloadSchema,
   RunIntakeCompletedPayloadSchema,
@@ -101,6 +102,12 @@ import {
   AnalysisStartedPayloadSchema,
   AnalysisTerminalPayloadSchema,
 } from "../analysis/analysis-contracts.js";
+import {
+  CorrectionProposedPayloadSchema,
+  PlanProposedPayloadSchema,
+  PlanRejectedPayloadSchema,
+  PlanRevisedPayloadSchema as PlanningPlanRevisedPayloadSchema,
+} from "../planning/planning-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -151,12 +158,13 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "run.accepted", "preflight.started", "preflight.completed", "preflight.failed",
   "run.waiting", "run.blocked", "run.resumed", "run.reopened", "run.intake_completed",
   "run.analysis_completed", "run.approval_requested", "run.ready_for_execution",
-  "run.plan_revised",
+  "run.plan_revised", "run.approval_rejected",
   "run.completed", "run.cancelled", "run.denied", "run.timed_out", "run.failed",
   "source.discovered", "source.rejected", "intake.snapshot_closed",
   "analysis.started", "analysis.invocation_reserved", "analysis.observed", "analysis.revised",
   "analysis.budget_reserved", "analysis.budget_charged", "analysis.budget_exhausted", "analysis.budget_revised",
   "analysis.reconciliation_required", "analysis.reconciliation_resolved", "analysis.completed", "analysis.cancelled", "analysis.timed_out", "analysis.failed",
+  "plan.proposed", "plan.revised", "plan.rejected", "correction.proposed",
   "questionnaire.proposed", "decision.requested", "decision.accepted", "decision.rejected",
   "decision.expired", "decision.stale_attempted", "decision.duplicate_attempted",
   "approval.requested", "approval.accepted", "approval.rejected", "approval.expired",
@@ -367,11 +375,16 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "run.approval_requested": RunApprovalRequestedPayloadSchema,
   "run.ready_for_execution": RunReadyPayloadSchema,
   "run.plan_revised": RunPlanRevisedPayloadSchema,
+  "run.approval_rejected": RunApprovalRejectedPayloadSchema,
   "run.completed": RunTerminalPayloadSchema,
   "run.cancelled": RunCancelledPayloadSchema,
   "run.denied": RunTerminalPayloadSchema,
   "run.timed_out": RunTerminalPayloadSchema,
   "run.failed": RunTerminalPayloadSchema,
+  "plan.proposed": PlanProposedPayloadSchema,
+  "plan.revised": PlanningPlanRevisedPayloadSchema,
+  "plan.rejected": PlanRejectedPayloadSchema,
+  "correction.proposed": CorrectionProposedPayloadSchema,
   "questionnaire.proposed": QuestionPacketSchema,
   "decision.requested": DecisionRequestedPayloadSchema,
   "decision.accepted": DecisionAcceptedPayloadSchema,

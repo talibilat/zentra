@@ -4,6 +4,9 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
+import { digestCanonical } from "../contracts/authority-attention.js";
+import { ValidationIdentitySchema, type ValidationIdentity } from "../planning/planning-contracts.js";
+
 export const APPROVED_VALIDATION_EXECUTABLE = realpathSync(process.execPath);
 export const MIN_VALIDATION_TIMEOUT_MS = 100;
 export const MAX_VALIDATION_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -245,3 +248,36 @@ export const ProjectConfigSchema = z.object({
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ReleasePreparationConfig = z.infer<typeof ReleasePreparationConfigSchema>;
+
+export function createValidationIdentitySnapshot(
+  project: ProjectConfig,
+  validationId: "focused" | "full",
+): ValidationIdentity {
+  const command = project.validations[validationId];
+  const executable = command[0];
+  assertApprovedValidationExecutable(executable);
+  const identity = executableIdentitySync(executable);
+  if (!sameExecutableIdentity(identity, approvedValidationExecutableIdentity)) {
+    throw new Error("Validation executable identity changed after approval");
+  }
+  const args = command.slice(1);
+  return ValidationIdentitySchema.parse({
+    validationId,
+    executable,
+    executableDevice: identity.device,
+    executableInode: identity.inode,
+    executableSize: identity.size,
+    executableSha256: identity.sha256,
+    args,
+    argvSha256: digestCanonical(command),
+    timeoutMs: validationId === "focused"
+      ? project.validations.focusedTimeoutMs
+      : project.validations.fullTimeoutMs,
+    projectConfigSha256: digestCanonical({
+      projectId: project.projectId,
+      repositoryPath: project.repositoryPath,
+      integrationBranch: project.integrationBranch,
+      validations: project.validations,
+    }),
+  });
+}
