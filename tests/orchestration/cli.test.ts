@@ -30,6 +30,13 @@ import { TaskService } from "../../src/tasks/task-service.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 import { RoleCapabilityEnvelopeService, buildRoleCapabilityBinding, roleToolPermissions } from "../../src/workers/role-capability-envelope.js";
 import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../../src/contracts/capability-boundary.js";
+import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js";
+import {
+  cleanupFailureDatabasePath,
+  cleanupFailureStoreReference,
+  CleanupFailureStore,
+  type CleanupFailureRecord,
+} from "../../src/integration/cleanup-failure-store.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -1174,6 +1181,149 @@ local_preparation_only
       kind: "task.failed",
       operation: { status: "failed" },
     });
+
+    const diagnostic = await invoke([
+      "task", "diagnose",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-cli",
+    ]);
+    expect(diagnostic).toMatchObject({
+      code: 0,
+      stderr: "",
+      json: {
+        command: "task.diagnose",
+        diagnostic: {
+          taskId: "task-cli",
+          stage: "validation",
+          reasonCode: "validation_failed",
+          message: "The task failed during validation execution.",
+          validation: {
+            name: "focused",
+            outcome: "failed",
+            artifactId: expect.any(String),
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          recoveryAction: "await_reconciliation",
+          artifacts: expect.arrayContaining([
+            {
+              kind: "validation_report",
+              artifactId: expect.any(String),
+              sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+          ]),
+          worktree: {
+            branch: "ticket/task-cli",
+            path: path.join(testFixture.baseDirectory, "worktrees", "task-cli"),
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(diagnostic.json)).not.toContain("wrong greeting");
+  });
+
+  it("diagnoses production-order candidate cleanup evidence and reconciles acknowledgement after restart", async () => {
+    const testFixture = await fixture();
+    const { record, storePath } = seedCleanupDiagnostic(testFixture, "recorded");
+
+    const current = await invoke([
+      "task", "diagnose",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-cleanup-diagnostic",
+    ]);
+    expect(current).toMatchObject({
+      code: 0,
+      json: { command: "task.diagnose", diagnostic: {
+        stage: "cleanup",
+        reasonCode: "candidate_cleanup_unacknowledged",
+        recoveryAction: "await_reconciliation",
+        cleanup: { recordCount: 1, unacknowledgedCount: 1, acknowledgedCount: 0 },
+      } },
+    });
+
+    const store = new CleanupFailureStore(storePath);
+    store.acknowledge({
+      recordId: record.recordId,
+      actor: "operator",
+      acknowledgedAt: "2026-07-20T12:00:00.000Z",
+      dispositionEvidence: "candidate absence verified; sk-live-ACK-SECRET must stay private\n/Users/private/path",
+    });
+    store.close();
+
+    const restarted = await invoke([
+      "task", "diagnose",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-cleanup-diagnostic",
+    ]);
+    expect(restarted).toMatchObject({
+      code: 0,
+      json: { command: "task.diagnose", diagnostic: {
+        stage: "cleanup",
+        reasonCode: "candidate_cleanup_acknowledged",
+        recoveryAction: "await_reconciliation",
+        cleanup: {
+          recordCount: 1,
+          unacknowledgedCount: 0,
+          acknowledgedCount: 1,
+          dispositions: [{
+            recordId: record.recordId,
+            acknowledgedAt: "2026-07-20T12:00:00.000Z",
+            dispositionEvidenceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          }],
+        },
+      } },
+    });
+    expect(Buffer.byteLength(JSON.stringify(restarted.json), "utf8")).toBeLessThan(16 * 1024);
+    expect(JSON.stringify(restarted.json)).not.toContain("sk-live-ACK-SECRET");
+    expect(JSON.stringify(restarted.json)).not.toContain("/Users/private/path");
+  });
+
+  it("fails closed when a cleanup reference names no exact durable store record", async () => {
+    const testFixture = await fixture();
+    seedCleanupDiagnostic(testFixture, "missing");
+
+    const result = await invoke([
+      "task", "diagnose",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-cleanup-diagnostic",
+    ]);
+    expect(result).toMatchObject({
+      code: 1,
+      json: { command: "task.diagnose", error: { code: "OPERATION_FAILED" } },
+    });
+  });
+
+  it("fails closed when retained cleanup reference metadata contradicts its records", async () => {
+    const testFixture = await fixture();
+    seedCleanupDiagnostic(testFixture, "recorded");
+    const database = new Database(testFixture.databasePath);
+    const row = database.prepare(
+      "SELECT event_id, payload FROM events WHERE stream_id = ? AND type = ?",
+    ).get("task-cleanup-diagnostic", "task.integration_observed") as {
+      event_id: string;
+      payload: string;
+    };
+    const payload = JSON.parse(row.payload) as {
+      cleanupFailureStore: { recordsSha256: string };
+    };
+    payload.cleanupFailureStore.recordsSha256 = "f".repeat(64);
+    database.prepare("UPDATE events SET payload = ? WHERE event_id = ?")
+      .run(JSON.stringify(payload), row.event_id);
+    database.close();
+
+    const result = await invoke([
+      "task", "diagnose",
+      "--config", testFixture.configPath,
+      "--database", testFixture.databasePath,
+      "--task-id", "task-cleanup-diagnostic",
+    ]);
+    expect(result).toMatchObject({
+      code: 1,
+      json: { command: "task.diagnose", error: { code: "OPERATION_FAILED" } },
+    });
   });
 
   it.each([
@@ -1912,6 +2062,65 @@ local_preparation_only
     },
   );
 });
+
+function seedCleanupDiagnostic(
+  testFixture: Fixture,
+  mode: "recorded" | "missing",
+): { readonly record: CleanupFailureRecord; readonly storePath: string } {
+  const commonDirectory = realpathSync.native(path.join(testFixture.repositoryPath, ".git"));
+  const storePath = cleanupFailureDatabasePath(commonDirectory);
+  const store = new CleanupFailureStore(storePath);
+  const input = {
+    projectId: "cli-project",
+    taskId: "task-cleanup-diagnostic",
+    commonDirectory,
+    repositoryIdentitySha256: createHash("sha256").update(commonDirectory).digest("hex"),
+    integrationRef: "refs/heads/zentra/integration",
+    candidateId: "candidate-diagnostic",
+    candidatePath: path.join(testFixture.baseDirectory, "worktrees", ".zentra-candidate", "candidate-diagnostic"),
+    reason: "candidate cleanup failed with sk-live-RETAINED-SECRET",
+    recordedAt: "2026-07-20T10:00:00.000Z",
+    lease: null,
+  } as const;
+  const record: CleanupFailureRecord = mode === "recorded"
+    ? store.record(input)
+    : {
+        ...input,
+        recordId: "9ca3d4e9-5413-4a0b-bf77-791bd8f7847d",
+        acknowledgement: null,
+      };
+  store.close();
+
+  mkdirSync(path.join(testFixture.baseDirectory, "worktrees"), { recursive: true });
+  const workspace = path.join(testFixture.baseDirectory, "worktrees", "task-cleanup-diagnostic");
+  const journal = new SqliteEventJournal(testFixture.databasePath);
+  const tasks = new TaskService(journal);
+  tasks.create({
+    taskId: "task-cleanup-diagnostic",
+    projectId: "cli-project",
+    title: "Diagnose cleanup",
+    correlationId: "task-cleanup-diagnostic",
+  });
+  tasks.append("task-cleanup-diagnostic", "task.leased", { leaseOwner: "worker", workspace }, null);
+  tasks.append("task-cleanup-diagnostic", "task.started", { workerId: "worker" }, null);
+  tasks.append("task-cleanup-diagnostic", "task.validation_started", {}, null);
+  tasks.append("task-cleanup-diagnostic", "task.review_requested", {}, null);
+  tasks.append("task-cleanup-diagnostic", "task.review_approved", {}, null);
+  tasks.append("task-cleanup-diagnostic", "task.integration_started", {}, null);
+  tasks.append("task-cleanup-diagnostic", "task.integration_observed", {
+    cleanupFailures: [record],
+    cleanupFailureStore: cleanupFailureStoreReference([record]),
+  }, null);
+  tasks.pauseForUncertainEffect("task-cleanup-diagnostic", uncertainEffectPayload({
+    boundary: "cleanup",
+    operation: "integration candidate cleanup",
+    reason: "integration candidate cleanup was not proven complete",
+    requestedBy: "zentra-integration-controller",
+    workspace: { path: workspace, branch: "ticket/task-cleanup-diagnostic" },
+  }));
+  journal.close();
+  return { record, storePath };
+}
 
 describe("built CLI help", () => {
   beforeAll(async () => {

@@ -36,6 +36,10 @@ import {
 } from "../surfaces/local-workflow.js";
 import type { RunAdvancer, WorkflowSurface } from "../surfaces/workflow-surface.js";
 import { CLI_CONTROL_TOKEN_FILENAME } from "../surfaces/http-workflow-client.js";
+import {
+  ProductionRunAdvancer,
+  type FirstDeliveryConfiguration,
+} from "../first-delivery/production-run-advancer.js";
 
 const DEFAULT_AGENTTRAIL_STARTUP_TIMEOUT_MS = 60_000;
 
@@ -63,6 +67,7 @@ export interface StartZentraServiceDependencies {
     options: LocalWorkflowSurfaceOptions,
   ) => WorkflowSurface | Promise<WorkflowSurface>;
   readonly runAdvancer?: RunAdvancer;
+  readonly firstDelivery?: FirstDeliveryConfiguration;
   readonly observeAgentTrailEvidence?: (evidence: AgentTrailEvidence) => void | Promise<void>;
 }
 
@@ -138,7 +143,7 @@ export async function startZentraService(
   let journal: ProjectingEventJournal;
   try {
     sink = dependencies.createTraceSink?.(layout.traceDirectory, tracePath, serviceId) ??
-      AgentTailJsonlFileSink.open(layout.traceDirectory, tracePath, serviceId);
+      AgentTailJsonlFileSink.openAll(layout.traceDirectory, tracePath);
     journal = new ProjectingEventJournal(rawJournal, sink);
     if (journal.projectionFailed || sink.streamFailed === true) {
       throw new Error("Service AgentTrail projection initialization failed");
@@ -154,6 +159,7 @@ export async function startZentraService(
   let processIncarnation: string | null = null;
   let session: GatewaySession | null = null;
   let shutdownPromise: Promise<void> | null = null;
+  let runAdvancer: RunAdvancer | null = null;
   let resolveClosed!: () => void;
   let rejectClosed!: (error: unknown) => void;
   const closed = new Promise<void>((resolve, reject) => {
@@ -202,6 +208,7 @@ export async function startZentraService(
       await attemptCleanup(() => {
         if (session !== null) gateway.setReadiness("stopping");
       });
+      await attemptCleanup(() => runAdvancer?.shutdown?.());
       if (lifecycle !== null && claim !== null) {
         try {
           lifecycle.beginShutdown({
@@ -416,18 +423,28 @@ export async function startZentraService(
     if (gateway.setWorkflowSurface === undefined) {
       throw new Error("Gateway cannot accept a workflow surface");
     }
+    const projectRevision = await resolveProjectRevision(layout.projectRoot);
+    runAdvancer = dependencies.runAdvancer ?? await ProductionRunAdvancer.create({
+      journal,
+      process: claim,
+      serviceReadyEventId: ready.eventId,
+      projectRoot: layout.projectRoot,
+      ...(dependencies.firstDelivery === undefined ? {} : { configuration: dependencies.firstDelivery }),
+    });
     const workflowOptions: LocalWorkflowSurfaceOptions = {
       journal,
       process: claim,
       serviceReadyEventId: ready.eventId,
       projectRoot: layout.projectRoot,
-      projectRevision: await resolveProjectRevision(layout.projectRoot),
+      projectRevision,
       traceProjectionFailed: () => journal.projectionFailed || sink!.streamFailed === true,
-      ...(dependencies.runAdvancer === undefined ? {} : { runAdvancer: dependencies.runAdvancer }),
+      runAdvancer,
     };
     const workflow = await (dependencies.createWorkflowSurface?.(workflowOptions) ??
       createLocalWorkflowSurface(workflowOptions));
     gateway.setWorkflowSurface(workflow);
+    await runAdvancer.resumeNonterminalRuns?.();
+    assertProjectionHealthy();
     gateway.setReadiness("ready");
 
     return {

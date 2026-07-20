@@ -17,6 +17,7 @@ import type { StoredEvent } from "../contracts/event.js";
 import { isDurablePagedEventJournal, type DurablePagedEventJournal } from "../journal/journal.js";
 import {
   agentTailEventToJsonLine,
+  isAgentTailProjectableEventType,
   storedEventToAgentTailEvent,
 } from "./agent-tail.js";
 
@@ -81,8 +82,35 @@ export class AgentTailJsonlFileSink {
         tracePath,
         expectedTraceId,
         explicitlyScoped,
+        false,
         liveWriter,
       );
+      if (resume) sink.readRetainedPosition();
+      return sink;
+    } catch (error) {
+      closeSync(descriptor);
+      throw error;
+    }
+  }
+
+  static openAll(
+    trustedRoot: string,
+    tracePath: string,
+    resume = false,
+  ): AgentTailJsonlFileSink {
+    assertSafeAgentTailJsonlPath(trustedRoot, tracePath, resume);
+    const descriptor = openSync(
+      tracePath,
+      (resume ? constants.O_RDWR : constants.O_CREAT | constants.O_EXCL | constants.O_RDWR) |
+        constants.O_APPEND |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      if (!fstatSync(descriptor).isFile()) {
+        throw new Error("Agent Tail trace destination must be a regular file");
+      }
+      const sink = new AgentTailJsonlFileSink(descriptor, tracePath, null, true, true);
       if (resume) sink.readRetainedPosition();
       return sink;
     } catch (error) {
@@ -96,6 +124,7 @@ export class AgentTailJsonlFileSink {
     private readonly tracePath: string,
     private expectedTraceId: string | null,
     private readonly explicitlyScoped: boolean,
+    private readonly allEvents: boolean,
     private readonly liveWriter?: (line: string) => void,
   ) {}
 
@@ -116,7 +145,9 @@ export class AgentTailJsonlFileSink {
 
   select(events: readonly StoredEvent[]): readonly StoredEvent[] {
     this.assertExplicitScope();
-    return events.filter((event) => event.correlationId === this.expectedTraceId);
+    return this.allEvents
+      ? events.filter((event) => isAgentTailProjectableEventType(event.type))
+      : events.filter((event) => event.correlationId === this.expectedTraceId);
   }
 
   reconcile(events: readonly StoredEvent[]): void {
@@ -228,7 +259,9 @@ export class AgentTailJsonlFileSink {
       this.expectedTraceId === null && candidateEvents.length > 0
       ? candidateEvents[0]!.correlationId
       : null;
-    const events = this.explicitlyScoped
+    const events = this.allEvents
+      ? this.select(candidateEvents)
+      : this.explicitlyScoped
       ? this.select(candidateEvents)
       : this.bindLegacyTrace(candidateEvents);
     let pendingPosition = this.lastGlobalPosition;
@@ -334,7 +367,7 @@ export class AgentTailJsonlFileSink {
         if (
           typeof parsed.event_id !== "string" || parsed.event_id.length === 0 ||
           !Number.isSafeInteger(parsed.sequence) ||
-          parsed.trace_id !== this.expectedTraceId ||
+          (!this.allEvents && parsed.trace_id !== this.expectedTraceId) ||
           (parsed.sequence as number) <= lastGlobalPosition
         ) {
           throw new Error("Agent Tail retained trace is corrupt");
@@ -355,7 +388,8 @@ export class AgentTailJsonlFileSink {
 
   private *selectedIterator(events: Iterable<StoredEvent>): Generator<StoredEvent> {
     for (const event of events) {
-      if (event.correlationId === this.expectedTraceId) yield event;
+      if ((this.allEvents && isAgentTailProjectableEventType(event.type)) ||
+        (!this.allEvents && event.correlationId === this.expectedTraceId)) yield event;
     }
   }
 

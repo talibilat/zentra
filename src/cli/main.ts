@@ -31,6 +31,11 @@ import {
 } from "../fixtures/bundled-fixtures.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { IntegrationLeaseStore } from "../integration/integration-lease.js";
+import {
+  cleanupFailureDatabasePath,
+  CleanupFailureStore,
+  type CleanupFailureStoreReference,
+} from "../integration/cleanup-failure-store.js";
 import { type DurablePagedEventJournal, type EventJournal } from "../journal/journal.js";
 import { ProjectingEventJournal } from "../journal/projecting-journal.js";
 import {
@@ -75,6 +80,10 @@ import {
 } from "../reviews/reviewer-adapter.js";
 import { TaskService } from "../tasks/task-service.js";
 import type { TaskView } from "../tasks/task-projection.js";
+import {
+  projectTaskDiagnostic,
+  taskCleanupFailureStoreReference,
+} from "../tasks/task-diagnostics.js";
 import { ProcessSupervisor } from "../workers/process-supervisor.js";
 import { GitClient } from "../workspaces/git-client.js";
 import { WorktreeManager } from "../workspaces/worktree-manager.js";
@@ -159,6 +168,7 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   INVALID_TITLE: "Task title is invalid.",
   OPERATION_FAILED: "Operation failed.",
   OUTPUT_TOO_LARGE: "Operational output exceeded the limit.",
+  RECOVERY_NOT_AUTHORIZED: "Recovery completion is not authorized.",
   TASK_NOT_FOUND: "Task was not found.",
   not_found: "Workflow resource was not found.",
   stale: "Workflow state changed before the command was recorded.",
@@ -1196,6 +1206,35 @@ function createProgram(
       setResult({ exitCode: 0, value: { command: "task.status", task: taskView } });
     });
 
+  task
+    .command("diagnose")
+    .description("Replay one bounded operator diagnostic without applying recovery effects.")
+    .requiredOption("--config <path>", "project configuration file")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--task-id <id>", "safe task identity")
+    .action(async (options: RecoverOptions) => {
+      assertSafeTaskId(options.taskId);
+      const configs = loadProjects(options.config);
+      const diagnostic = await withSystem(options.database, configs, "read-only", async (system) => {
+        const taskView = system.tasks.get(options.taskId);
+        if (taskView === null) throw new CliFailure("TASK_NOT_FOUND");
+        const project = configs.find((candidate) => candidate.projectId === taskView.projectId);
+        if (project === undefined) throw new CliFailure("INVALID_CONFIG");
+        const recovery = await system.recovery().inspect(options.taskId);
+        const events = system.tasks.readStream(options.taskId);
+        const reference = taskCleanupFailureStoreReference(events);
+        const cleanupFailureHistory = reference === null
+          ? undefined
+          : await system.cleanupFailureHistory(project, options.taskId, reference);
+        return projectTaskDiagnostic(events, {
+          recoveryAction: recovery.action,
+          worktreeRoot: project.worktreeRoot,
+          ...(cleanupFailureHistory === undefined ? {} : { cleanupFailureHistory }),
+        });
+      });
+      setResult({ exitCode: 0, value: { command: "task.diagnose", diagnostic } });
+    });
+
   program
     .command("recover")
     .description("Inspect one task and return its safe recovery classification.")
@@ -1214,6 +1253,31 @@ function createProgram(
       setResult({
         exitCode: decision.action === "record_failure" ? 1 : 0,
         value: { command: "recover", decision: publicRecoveryDecision(decision) },
+      });
+    });
+
+  program
+    .command("recover-apply")
+    .description("Explicitly apply a freshly authorized recovery completion.")
+    .requiredOption("--config <path>", "project configuration file")
+    .requiredOption("--database <path>", "SQLite event journal")
+    .requiredOption("--task-id <id>", "safe task identity")
+    .action(async (options: RecoverOptions) => {
+      assertSafeTaskId(options.taskId);
+      const configs = loadProjects(options.config);
+      let taskView: TaskView;
+      try {
+        taskView = await withSystem(options.database, configs, "read-write", async (system) => {
+          if (system.tasks.get(options.taskId) === null) throw new CliFailure("TASK_NOT_FOUND");
+          return system.recovery().recordCompletion(options.taskId);
+        });
+      } catch (error) {
+        if (error instanceof CliFailure) throw error;
+        throw new CliFailure("RECOVERY_NOT_AUTHORIZED");
+      }
+      setResult({
+        exitCode: 0,
+        value: { command: "recover-apply", task: taskView },
       });
     });
 
@@ -1361,6 +1425,40 @@ function composeSystem(
     recovery(): RecoveryService {
       const { projects, git, worktrees } = developmentDependencies();
       return new RecoveryService(journal, tasks, projects, worktrees, git);
+    },
+    async cleanupFailureHistory(
+      project: ProjectConfig,
+      taskId: string,
+      reference: CleanupFailureStoreReference,
+    ) {
+      const { git } = developmentDependencies();
+      const result = await git.run(project.repositoryPath, [
+        "--no-optional-locks",
+        "--no-replace-objects",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ], { timeoutMs: 30_000 });
+      const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+      if (
+        result.exitCode !== 0 || result.termination !== null || result.truncated ||
+        lines.length !== 1 || !path.isAbsolute(lines[0]!)
+      ) throw new Error("cleanup failure repository identity is unavailable");
+      const commonDirectory = realpathSync.native(lines[0]!);
+      const store = CleanupFailureStore.openReadOnly(cleanupFailureDatabasePath(commonDirectory));
+      try {
+        return store.readReferenced({
+          projectId: project.projectId,
+          commonDirectory,
+          repositoryIdentitySha256: createHash("sha256").update(commonDirectory, "utf8").digest("hex"),
+          integrationRef: `refs/heads/${project.integrationBranch}`,
+          taskId,
+        }, reference);
+      } finally {
+        store.close();
+      }
     },
     execution(workerFixture: string, reviewer: ReviewerAdapter) {
       const { projects, git, worktrees } = developmentDependencies();
@@ -1897,7 +1995,9 @@ function commandLabel(argv: readonly string[]): string {
   if (argv[0] === "project" && argv[1] === "validate") return "project.validate";
   if (argv[0] === "task" && argv[1] === "run") return "task.run";
   if (argv[0] === "task" && argv[1] === "status") return "task.status";
+  if (argv[0] === "task" && argv[1] === "diagnose") return "task.diagnose";
   if (argv[0] === "recover") return "recover";
+  if (argv[0] === "recover-apply") return "recover-apply";
   return "unknown";
 }
 

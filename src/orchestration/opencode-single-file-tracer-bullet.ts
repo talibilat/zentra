@@ -33,6 +33,7 @@ import {
   type IntegrationReceipt,
   IntegrationUncertainError,
 } from "../integration/integration-queue.js";
+import { cleanupFailureStoreReference } from "../integration/cleanup-failure-store.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectConfig } from "../projects/project-config.js";
@@ -755,13 +756,13 @@ export class OpenCodeSingleFileTracerBullet {
         });
       } catch (error) {
         if (error instanceof IntegrationUncertainError) {
-          return this.observeIntegration(request.task.taskId, {
+          return this.observeIntegration(request.project, request.task.taskId, {
             reason: error.message,
             evidence: error.evidence,
           }, true, lease);
         }
         if (error instanceof IntegrationExecutionError) throw error;
-        return this.observeIntegration(request.task.taskId, {
+        return this.observeIntegration(request.project, request.task.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         }, true, lease);
       }
@@ -769,6 +770,10 @@ export class OpenCodeSingleFileTracerBullet {
         const finalReceipt = prepared.receipt === null
           ? receipt
           : { ...prepared.receipt, outcome: receipt.outcome };
+        const cleanupEvidence = await this.integrationCleanupEvidence(
+          request.project,
+          request.task.taskId,
+        );
         this.recordArtifact(
           request.task.taskId,
           "integration_receipt",
@@ -779,7 +784,8 @@ export class OpenCodeSingleFileTracerBullet {
               stage: "integration",
               reason: "integration did not complete successfully",
               receipt: finalReceipt,
-              candidateCleanupFailures: this.integrationCleanupFailures(request.task.taskId),
+              candidateCleanupFailures: cleanupEvidence.cleanupFailures,
+              candidateCleanupFailureStore: cleanupEvidence.cleanupFailureStore,
             },
           },
           "final",
@@ -796,17 +802,21 @@ export class OpenCodeSingleFileTracerBullet {
           git: dependencies.git,
         });
       } catch (error) {
-        return this.observeIntegration(request.task.taskId, {
+        return this.observeIntegration(request.project, request.task.taskId, {
           receipt,
           verification: "failed",
           reason: errorMessage(error),
         }, true, lease);
       }
-      const cleanupFailures = this.integrationCleanupFailures(request.task.taskId);
+      const cleanupEvidence = await this.integrationCleanupEvidence(
+        request.project,
+        request.task.taskId,
+      );
+      const { cleanupFailures } = cleanupEvidence;
       const integrationObserved = {
         receipt,
         verification: "verified",
-        cleanupFailures,
+        ...cleanupEvidence,
       };
       if (cleanupFailures.length > 0) {
         return this.tasks.appendBatch(request.task.taskId, [
@@ -912,7 +922,7 @@ export class OpenCodeSingleFileTracerBullet {
         : signalOutcome(request.signal) ?? "failed";
       const current = this.current(request.task.taskId);
       if (current.lifecycle === "integrating" && !(error instanceof IntegrationExecutionError)) {
-        return this.observeIntegration(request.task.taskId, {
+        return this.observeIntegration(request.project, request.task.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         }, true, lease);
       }
@@ -980,15 +990,17 @@ export class OpenCodeSingleFileTracerBullet {
     return current;
   }
 
-  private observeIntegration(
+  private async observeIntegration(
+    project: ProjectConfig,
     taskId: string,
     payload: unknown,
     uncertain = false,
     lease?: WorkspaceLease,
-  ): TaskView {
+  ): Promise<TaskView> {
+    const cleanupEvidence = await this.integrationCleanupEvidence(project, taskId);
     const durable = typeof payload === "object" && payload !== null
-      ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
-      : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
+      ? { ...payload, ...cleanupEvidence }
+      : { evidence: payload, ...cleanupEvidence };
     if (!uncertain) return this.tasks.append(taskId, "task.integration_observed", durable, null);
     return this.tasks.appendBatch(taskId, [
       { type: "task.integration_observed", payload: durable, causationId: null },
@@ -1006,9 +1018,15 @@ export class OpenCodeSingleFileTracerBullet {
     ]);
   }
 
-  private integrationCleanupFailures(taskId: string): readonly unknown[] {
-    return this.integration?.integrations.getCleanupFailures()
-      .filter((failure) => failure.taskId === taskId) ?? [];
+  private async integrationCleanupEvidence(project: ProjectConfig, taskId: string) {
+    if (this.integration !== undefined) {
+      return this.integration.integrations.getCleanupFailureEvidenceFor({ project, taskId });
+    }
+    const cleanupFailures = [] as const;
+    return {
+      cleanupFailures,
+      cleanupFailureStore: cleanupFailureStoreReference(cleanupFailures),
+    };
   }
 
   private pauseForUncertainty(

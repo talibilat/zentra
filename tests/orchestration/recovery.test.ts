@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  copyFileSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -14,15 +15,22 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { runCli } from "../../src/cli/main.js";
 import {
   ValidationRunner,
   type ValidationReport,
 } from "../../src/capabilities/validation-runner.js";
 import type { StoredEvent } from "../../src/contracts/event.js";
 import { IntegrationQueue } from "../../src/integration/integration-queue.js";
+import {
+  cleanupFailureDatabasePath,
+  CleanupFailureStore,
+} from "../../src/integration/cleanup-failure-store.js";
+import { IntegrationLeaseStore } from "../../src/integration/integration-lease.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import {
   RecoveryService,
+  type RecoveryServiceOptions,
   type RecoveryDecision,
 } from "../../src/orchestration/recovery.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
@@ -98,6 +106,61 @@ class FaultingReadGitClient extends GitClient {
   }
 }
 
+class DelayedGitClient extends GitClient {
+  signalObserved = false;
+  private delayed = false;
+
+  constructor(
+    private readonly shouldDelay: (args: readonly string[]) => boolean,
+    private readonly delayMs: number,
+    private readonly onDelay: () => void,
+  ) {
+    super();
+  }
+
+  override async run(
+    cwd: string,
+    args: readonly string[],
+    options: GitRunOptions = {},
+  ): Promise<CommandResult> {
+    if (!this.delayed && this.shouldDelay(args)) {
+      this.delayed = true;
+      this.signalObserved = options.signal !== undefined;
+      this.onDelay();
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.delayMs);
+        const onAbort = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+    return super.run(cwd, args, options);
+  }
+}
+
+class InjectedRenewFailureStore extends IntegrationLeaseStore {
+  constructor(databasePath: string, private readonly shouldThrow: () => boolean) {
+    super(databasePath);
+  }
+
+  override renew(...args: Parameters<IntegrationLeaseStore["renew"]>): ReturnType<IntegrationLeaseStore["renew"]> {
+    if (this.shouldThrow()) throw new Error("injected recovery lease renewal failure");
+    return super.renew(...args);
+  }
+}
+
+class InjectedReleaseFailureStore extends IntegrationLeaseStore {
+  override release(): never {
+    throw new Error("injected recovery lease release failure");
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface Fixture {
   readonly baseDirectory: string;
   readonly databasePath: string;
@@ -145,7 +208,11 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
-function openSystem(testFixture: Fixture, git: GitClient = new GitClient()) {
+function openSystem(
+  testFixture: Fixture,
+  git: GitClient = new GitClient(),
+  options: RecoveryServiceOptions = {},
+) {
   const journal = new SqliteEventJournal(testFixture.databasePath);
   openJournals.push(journal);
   const tasks = new TaskService(journal);
@@ -155,6 +222,7 @@ function openSystem(testFixture: Fixture, git: GitClient = new GitClient()) {
     testFixture.registry,
     testFixture.worktrees,
     git,
+    options,
   );
   return { journal, tasks, recovery };
 }
@@ -162,6 +230,30 @@ function openSystem(testFixture: Fixture, git: GitClient = new GitClient()) {
 function closeJournal(journal: SqliteEventJournal): void {
   journal.close();
   openJournals.splice(openJournals.indexOf(journal), 1);
+}
+
+function writeRecoveryConfig(testFixture: Fixture): string {
+  const configPath = path.join(testFixture.baseDirectory, "project.json");
+  writeFileSync(configPath, `${JSON.stringify(testFixture.project, null, 2)}\n`, "utf8");
+  return configPath;
+}
+
+async function invokeRecoveryCli(
+  testFixture: Fixture,
+  command: "recover" | "recover-apply",
+): Promise<{ readonly code: number; readonly json: Record<string, unknown> }> {
+  let stdout = "";
+  let stderr = "";
+  const code = await runCli([
+    command,
+    "--config", writeRecoveryConfig(testFixture),
+    "--database", testFixture.databasePath,
+    "--task-id", "task-9",
+  ], {
+    stdout: (value) => { stdout += value; },
+    stderr: (value) => { stderr += value; },
+  });
+  return { code, json: JSON.parse(`${stdout}${stderr}`) as Record<string, unknown> };
 }
 
 function createTask(tasks: TaskService): void {
@@ -299,6 +391,7 @@ async function appendThroughIntegrationStarted(
 async function appendThroughIntegrationObserved(
   testFixture: Fixture,
   tasks: TaskService,
+  includeObserved = true,
 ): Promise<IntegratedEvidence> {
   const { lease, sourceCommit, review } = await appendThroughIntegrationStarted(
     testFixture,
@@ -345,13 +438,60 @@ async function appendThroughIntegrationObserved(
     { receipt },
     null,
   );
-  tasks.append(
-    "task-9",
-    "task.integration_observed",
-    { receipt, verification: "verified" },
-    null,
-  );
+  if (includeObserved) {
+    tasks.append(
+      "task-9",
+      "task.integration_observed",
+      { receipt, verification: "verified" },
+      null,
+    );
+  }
   return { lease, sourceCommit, resultCommit, receipt };
+}
+
+async function appendAtCompletionPath(
+  testFixture: Fixture,
+  tasks: TaskService,
+  completionPath: "integration_prepared" | "integration_observed" | "cleanup_started" |
+    "cleanup_observed" | "cleanup_reconciled" | "cleanup_completed",
+): Promise<IntegratedEvidence> {
+  const evidence = await appendThroughIntegrationObserved(
+    testFixture,
+    tasks,
+    completionPath !== "integration_prepared",
+  );
+  if (completionPath === "integration_prepared" || completionPath === "integration_observed") {
+    return evidence;
+  }
+  const cleanup = {
+    sourceCommit: evidence.sourceCommit,
+    resultCommit: evidence.resultCommit,
+    workspace: evidence.lease.path,
+    branch: evidence.lease.branch,
+  };
+  tasks.append("task-9", "task.cleanup_started", cleanup, null);
+  await testFixture.worktrees.cleanupCompleted(
+    testFixture.project,
+    evidence.lease,
+    evidence.sourceCommit,
+    { timeoutMs: 10_000 },
+  );
+  if (completionPath === "cleanup_started") return evidence;
+  if (completionPath === "cleanup_completed") {
+    tasks.append("task-9", "task.cleanup_completed", cleanup, null);
+    return evidence;
+  }
+  const observation = {
+    phase: "ref_deletion",
+    uncertain: true,
+    evidence: { taskId: "task-9" },
+    reason: "cleanup acknowledgement was lost",
+  };
+  tasks.append("task-9", "task.cleanup_observed", observation, null);
+  if (completionPath === "cleanup_reconciled") {
+    tasks.append("task-9", "task.cleanup_reconciled", { cleanup, observation }, null);
+  }
+  return evidence;
 }
 
 function databaseFor(journal: SqliteEventJournal): {
@@ -1139,6 +1279,69 @@ describe("RecoveryService", () => {
     expect(decision.reason).toMatch(/identity|worker|lease/i);
   });
 
+  it("blocks prepared-only synthesis on durable cleanup evidence until acknowledgement", async () => {
+    const testFixture = await fixture();
+    const system = openSystem(testFixture);
+    createTask(system.tasks);
+    const evidence = await appendAtCompletionPath(
+      testFixture,
+      system.tasks,
+      "integration_prepared",
+    );
+    const commonDirectory = realpathSync(path.join(testFixture.project.repositoryPath, ".git"));
+    const candidatePath = (evidence.receipt.validation as ValidationReport)
+      .provenance.canonicalCwd;
+    const store = new CleanupFailureStore(cleanupFailureDatabasePath(commonDirectory));
+    const failure = store.record({
+      projectId: testFixture.project.projectId,
+      taskId: "task-9",
+      commonDirectory,
+      repositoryIdentitySha256: sha256(commonDirectory),
+      integrationRef: `refs/heads/${testFixture.project.integrationBranch}`,
+      candidateId: path.basename(candidatePath),
+      candidatePath,
+      reason: "candidate cleanup result is unacknowledged",
+      recordedAt: "2026-07-20T12:00:00.000Z",
+      lease: null,
+    });
+    store.close();
+
+    await expect(system.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/durable unacknowledged.*cleanup|cleanup.*durable unacknowledged/i),
+    });
+
+    const acknowledgementStore = new CleanupFailureStore(
+      cleanupFailureDatabasePath(commonDirectory),
+    );
+    acknowledgementStore.acknowledge({
+      recordId: failure.recordId,
+      actor: "operator:test",
+      acknowledgedAt: "2026-07-20T12:05:00.000Z",
+      dispositionEvidence: "candidate absence verified",
+    });
+    acknowledgementStore.close();
+    await expect(system.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "record_completion",
+    });
+  });
+
+  it("diagnoses malformed cleanup evidence instead of a generic invalid chain", async () => {
+    const testFixture = await fixture();
+    const system = openSystem(testFixture);
+    createTask(system.tasks);
+    await appendThroughIntegrationObserved(testFixture, system.tasks);
+    replaceEventPayload(system.journal, "task.integration_observed", (payload) => ({
+      ...(payload as Record<string, unknown>),
+      cleanupFailures: [{ taskId: "task-9", candidatePath: "relative" }],
+    }));
+
+    await expect(system.recovery.inspect("task-9")).resolves.toMatchObject({
+      action: "await_reconciliation",
+      reason: expect.stringMatching(/cleanup failure evidence is invalid/i),
+    });
+  });
+
   it("records failure for an invalid identity chain before commit effects", async () => {
     const testFixture = await fixture();
     const { journal, tasks, recovery } = openSystem(testFixture);
@@ -1673,15 +1876,117 @@ describe("RecoveryService", () => {
     await appendThroughIntegrationObserved(testFixture, tasks);
     expect((await recovery.inspect("task-9")).action).toBe("record_completion");
 
-    await expect(recovery.recordCompletion("task-9")).resolves.toMatchObject({
+    const completed = await recovery.recordCompletion("task-9");
+    expect(completed).toMatchObject({
       lifecycle: "terminal",
       terminalOutcome: "completed",
     });
+    await expect(recovery.recordCompletion("task-9")).resolves.toEqual(completed);
 
     await expect(recovery.inspect("task-9")).resolves.toMatchObject({
       action: "await_reconciliation",
       reason: expect.stringMatching(/already.*completed.*no-op|terminal.*no-op/i),
     });
+  });
+
+  it.each([
+    "integration_prepared",
+    "integration_observed",
+    "cleanup_started",
+    "cleanup_observed",
+    "cleanup_reconciled",
+    "cleanup_completed",
+  ] as const)("applies authorized %s completion through the effectful CLI exactly once", async (completionPath) => {
+    const testFixture = await fixture();
+    const first = openSystem(testFixture);
+    createTask(first.tasks);
+    await appendAtCompletionPath(testFixture, first.tasks, completionPath);
+    closeJournal(first.journal);
+
+    const inspection = await invokeRecoveryCli(testFixture, "recover");
+    expect(inspection).toMatchObject({
+      code: 0,
+      json: { command: "recover", decision: { action: "record_completion" } },
+    });
+    const beforeApply = new SqliteEventJournal(testFixture.databasePath, { readOnly: true });
+    expect(beforeApply.readStream("task-9").some((event) => event.type === "task.completed")).toBe(false);
+    beforeApply.close();
+
+    const applied = await invokeRecoveryCli(testFixture, "recover-apply");
+    expect(applied).toMatchObject({
+      code: 0,
+      json: {
+        command: "recover-apply",
+        task: { taskId: "task-9", lifecycle: "terminal", terminalOutcome: "completed" },
+      },
+    });
+    const repeated = await invokeRecoveryCli(testFixture, "recover-apply");
+    expect(repeated).toEqual(applied);
+
+    const replay = new SqliteEventJournal(testFixture.databasePath, { readOnly: true });
+    expect(replay.readStream("task-9").filter((event) => event.type === "task.completed")).toHaveLength(1);
+    replay.close();
+  });
+
+  it("fails closed through the recovery CLI for unknown and non-completion tasks", async () => {
+    const testFixture = await fixture();
+    const first = openSystem(testFixture);
+    createTask(first.tasks);
+    const before = first.journal.readStream("task-9");
+    closeJournal(first.journal);
+
+    const unsupported = await invokeRecoveryCli(testFixture, "recover-apply");
+    expect(unsupported).toMatchObject({
+      code: 1,
+      json: {
+        command: "recover-apply",
+        error: {
+          code: "RECOVERY_NOT_AUTHORIZED",
+          message: "Recovery completion is not authorized.",
+        },
+      },
+    });
+    const replay = new SqliteEventJournal(testFixture.databasePath, { readOnly: true });
+    expect(replay.readStream("task-9")).toEqual(before);
+    replay.close();
+
+    let stdout = "";
+    let stderr = "";
+    const code = await runCli([
+      "recover-apply",
+      "--config", writeRecoveryConfig(testFixture),
+      "--database", testFixture.databasePath,
+      "--task-id", "missing",
+    ], {
+      stdout: (value) => { stdout += value; },
+      stderr: (value) => { stderr += value; },
+    });
+    expect(code).toBe(1);
+    expect(JSON.parse(`${stdout}${stderr}`)).toMatchObject({
+      command: "recover-apply",
+      error: { code: "TASK_NOT_FOUND" },
+    });
+  });
+
+  it("allows only one concurrent CLI applicator to append terminal completion", async () => {
+    const testFixture = await fixture();
+    const first = openSystem(testFixture);
+    createTask(first.tasks);
+    await appendThroughIntegrationObserved(testFixture, first.tasks);
+    closeJournal(first.journal);
+
+    const results = await Promise.all([
+      invokeRecoveryCli(testFixture, "recover-apply"),
+      invokeRecoveryCli(testFixture, "recover-apply"),
+    ]);
+    expect(results.filter((result) => result.code === 0)).toHaveLength(1);
+    expect(results.filter((result) => result.code === 1)).toHaveLength(1);
+    expect(results.find((result) => result.code === 1)?.json).toMatchObject({
+      error: { code: "RECOVERY_NOT_AUTHORIZED" },
+    });
+    const replay = new SqliteEventJournal(testFixture.databasePath, { readOnly: true });
+    expect(replay.readStream("task-9").filter((event) => event.type === "task.completed")).toHaveLength(1);
+    replay.close();
   });
 
   it("rejects a task.completed receipt that contradicts the verified observation", async () => {
@@ -1774,7 +2079,7 @@ describe("RecoveryService", () => {
     ]);
   });
 
-  it("does not complete from stale authorization while another applicator cleanup is blocked", async () => {
+  it("excludes another completion applicator while an authorized caller holds the durable lease", async () => {
     const baseFixture = await fixture();
     let releaseCleanup!: () => void;
     let reportCleanupStarted!: () => void;
@@ -1817,18 +2122,15 @@ describe("RecoveryService", () => {
 
     const staleApplication = callerB.recordCompletion("task-9");
     await authorized;
-    const activeApplication = callerA.recordCompletion("task-9");
-    await cleanupStarted;
+    const competingApplication = callerA.recordCompletion("task-9");
+    await expect(competingApplication).rejects.toThrow(/lease is held by another owner/i);
     releaseAuthorization();
     try {
-      await expect(staleApplication).rejects.toThrow(/not authorized|reconciliation/i);
-      expect(journal.readStream("task-9").some((event) =>
-        event.type === "task.cleanup_completed" || event.type === "task.completed"),
-      ).toBe(false);
+      await cleanupStarted;
     } finally {
       releaseCleanup();
     }
-    await expect(activeApplication).resolves.toMatchObject({
+    await expect(staleApplication).resolves.toMatchObject({
       lifecycle: "terminal",
       terminalOutcome: "completed",
     });
@@ -1929,6 +2231,372 @@ describe("RecoveryService", () => {
       event.type === "task.cleanup_reconciled")).toHaveLength(1);
     expect(journal.readStream("task-9").filter((event) =>
       event.type === "task.completed")).toHaveLength(1);
+  });
+
+  it.each([
+    "integration_prepared",
+    "integration_observed",
+    "cleanup_started",
+    "cleanup_observed",
+    "cleanup_reconciled",
+    "cleanup_completed",
+  ] as const)("pauses deterministically after fresh %s authorization", async (completionPath) => {
+    const testFixture = await fixture();
+    const first = openSystem(testFixture);
+    createTask(first.tasks);
+    await appendAtCompletionPath(testFixture, first.tasks, completionPath);
+    let releases = 0;
+    let observed = false;
+    const recovery = new RecoveryService(
+      first.journal,
+      first.tasks,
+      testFixture.registry,
+      testFixture.worktrees,
+      new GitClient(),
+      {
+        completionHooks: {
+          async afterAuthorization(path) {
+            if (path !== completionPath || observed) return;
+            observed = true;
+            await new Promise<void>((resolve) => {
+              releases += 1;
+              resolve();
+            });
+          },
+        },
+      },
+    );
+
+    await expect(recovery.recordCompletion("task-9")).resolves.toMatchObject({
+      lifecycle: "terminal",
+      terminalOutcome: "completed",
+    });
+    expect(observed).toBe(true);
+    expect(releases).toBe(1);
+  });
+
+  it("rejects an integration ref race after authorization with no completion append", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    const before = journal.readStream("task-9").length;
+    const recovery = new RecoveryService(journal, tasks, testFixture.registry, testFixture.worktrees,
+      new GitClient(), { completionHooks: { async afterAuthorization(pathName) {
+        if (pathName === "integration_observed") {
+          await gitOk(testFixture.project.repositoryPath, [
+            "update-ref", `refs/heads/${testFixture.project.integrationBranch}`,
+            evidence.receipt.originalIntegrationCommit as string,
+          ]);
+        }
+      } } });
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(/evidence changed/i);
+    expect(journal.readStream("task-9")).toHaveLength(before);
+  });
+
+  it("rejects a worktree race after authorization with no completion append", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    const before = journal.readStream("task-9").length;
+    const recovery = new RecoveryService(journal, tasks, testFixture.registry, testFixture.worktrees,
+      new GitClient(), { completionHooks: { afterAuthorization(pathName) {
+        if (pathName === "integration_observed") {
+          writeFileSync(path.join(evidence.lease.path, "greeting.txt"), "raced\n", "utf8");
+        }
+      } } });
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(/evidence changed/i);
+    expect(journal.readStream("task-9")).toHaveLength(before);
+  });
+
+  it("rejects a journal race after authorization with no recovery completion append", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    const recovery = new RecoveryService(journal, tasks, testFixture.registry, testFixture.worktrees,
+      new GitClient(), { completionHooks: { afterAuthorization(pathName) {
+        if (pathName === "integration_observed") {
+          const events = journal.readStream("task-9");
+          journal.append("task-9", events.at(-1)!.streamVersion, [{
+            streamId: "task-9",
+            type: "task.recovery_race",
+            payload: { reason: "independent writer" },
+            causationId: null,
+            correlationId: events[0]!.correlationId,
+          }]);
+        }
+      } } });
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(/evidence changed/i);
+    expect(journal.readStream("task-9").filter((event) =>
+      event.type.startsWith("task.cleanup_") || event.type === "task.completed")).toHaveLength(0);
+  });
+
+  it("rejects lease replacement after authorization with no completion append", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    const before = journal.readStream("task-9").length;
+    const recovery = new RecoveryService(journal, tasks, testFixture.registry, testFixture.worktrees,
+      new GitClient(), { completionHooks: { afterAuthorization(pathName, authorization) {
+        if (pathName !== "integration_observed") return;
+        const store = new IntegrationLeaseStore(path.join(
+          authorization.commonDirectory,
+          ".zentra-integration-leases.sqlite",
+        ));
+        expect(store.release(authorization.lease)).toBe(true);
+        expect(store.acquire(authorization.lease, 10_000, authorization.issuedAt)).not.toBeNull();
+        store.close();
+      } } });
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(/lease changed or expired/i);
+    expect(journal.readStream("task-9")).toHaveLength(before);
+  });
+
+  it("rejects an expired short-lived authorization with no completion append", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    const before = journal.readStream("task-9").length;
+    let now = Date.now();
+    const recovery = new RecoveryService(journal, tasks, testFixture.registry, testFixture.worktrees,
+      new GitClient(), {
+        now: () => now,
+        authorizationTtlMs: 10,
+        completionHooks: { afterAuthorization(pathName) {
+          if (pathName === "integration_observed") now += 10;
+        } },
+      });
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow(/authorization expired/i);
+    expect(journal.readStream("task-9")).toHaveLength(before);
+  });
+
+  it("serializes independent journals through the shared repository lease", async () => {
+    const testFixture = await fixture();
+    const setup = openSystem(testFixture);
+    createTask(setup.tasks);
+    await appendThroughIntegrationObserved(testFixture, setup.tasks);
+    closeJournal(setup.journal);
+    const secondDatabase = path.join(testFixture.baseDirectory, "independent.sqlite");
+    copyFileSync(testFixture.databasePath, secondDatabase);
+    const independentFixture = { ...testFixture, databasePath: secondDatabase };
+    let release!: () => void;
+    let authorized!: () => void;
+    const authorizationReached = new Promise<void>((resolve) => { authorized = resolve; });
+    const authorizationRelease = new Promise<void>((resolve) => { release = resolve; });
+    const first = openSystem(testFixture, new GitClient(), { completionHooks: {
+      async afterAuthorization(pathName) {
+        if (pathName !== "integration_observed") return;
+        authorized();
+        await authorizationRelease;
+      },
+    } });
+    const second = openSystem(independentFixture);
+
+    const active = first.recovery.recordCompletion("task-9");
+    await authorizationReached;
+    await expect(second.recovery.recordCompletion("task-9")).rejects.toThrow(/lease is held/i);
+    expect(second.journal.readStream("task-9").some((event) => event.type === "task.completed")).toBe(false);
+    release();
+    await expect(active).resolves.toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed" });
+  });
+
+  it("renews a short durable lease throughout delayed recovery inspection", async () => {
+    const testFixture = await fixture();
+    const setup = openSystem(testFixture);
+    createTask(setup.tasks);
+    await appendThroughIntegrationObserved(testFixture, setup.tasks);
+    let inspectionStarted!: () => void;
+    const started = new Promise<void>((resolve) => { inspectionStarted = resolve; });
+    const delayedGit = new DelayedGitClient(
+      (args) => args.includes("worktree") && args.includes("list"),
+      700,
+      inspectionStarted,
+    );
+    const recovery = new RecoveryService(
+      setup.journal,
+      setup.tasks,
+      testFixture.registry,
+      testFixture.worktrees,
+      delayedGit,
+      { integrationLeaseMs: 300, integrationLeaseRenewalMs: 50 },
+    );
+
+    const application = recovery.recordCompletion("task-9");
+    await started;
+    await delay(450);
+    const commonDirectory = realpathSync(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ]));
+    const competitor = new IntegrationLeaseStore(path.join(commonDirectory, ".zentra-integration-leases.sqlite"));
+    expect(competitor.acquire({
+      commonDirectory,
+      integrationRef: `refs/heads/${testFixture.project.integrationBranch}`,
+    }, 300)).toBeNull();
+    competitor.close();
+
+    await expect(application).resolves.toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed" });
+  });
+
+  it("renews a short durable lease while effectful cleanup is delayed", async () => {
+    const baseFixture = await fixture();
+    let cleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+    const delayedGit = new DelayedGitClient(
+      (args) => args.includes("worktree") && args.includes("remove"),
+      700,
+      cleanupStarted,
+    );
+    const testFixture: Fixture = { ...baseFixture, worktrees: new WorktreeManager(delayedGit) };
+    const { tasks, recovery } = openSystem(testFixture, new GitClient(), {
+      integrationLeaseMs: 300,
+      integrationLeaseRenewalMs: 50,
+    });
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+
+    const application = recovery.recordCompletion("task-9");
+    await started;
+    await delay(450);
+    const commonDirectory = realpathSync(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ]));
+    const competitor = new IntegrationLeaseStore(path.join(commonDirectory, ".zentra-integration-leases.sqlite"));
+    expect(competitor.acquire({
+      commonDirectory,
+      integrationRef: `refs/heads/${testFixture.project.integrationBranch}`,
+    }, 300)).toBeNull();
+    competitor.close();
+
+    await expect(application).resolves.toMatchObject({ lifecycle: "terminal", terminalOutcome: "completed" });
+    expect(delayedGit.signalObserved).toBe(true);
+  });
+
+  it("aborts delayed cleanup after lease loss without further Git mutation or completion append", async () => {
+    const baseFixture = await fixture();
+    let cleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+    const delayedGit = new DelayedGitClient(
+      (args) => args.includes("worktree") && args.includes("remove"),
+      5_000,
+      cleanupStarted,
+    );
+    const testFixture: Fixture = { ...baseFixture, worktrees: new WorktreeManager(delayedGit) };
+    const { journal, tasks, recovery } = openSystem(testFixture, new GitClient(), {
+      integrationLeaseMs: 300,
+      integrationLeaseRenewalMs: 50,
+    });
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+    const integrationBefore = await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", `refs/heads/${testFixture.project.integrationBranch}`,
+    ]);
+
+    const application = recovery.recordCompletion("task-9");
+    await started;
+    const commonDirectory = realpathSync(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ]));
+    const key = {
+      commonDirectory,
+      integrationRef: `refs/heads/${testFixture.project.integrationBranch}`,
+    };
+    const thief = new IntegrationLeaseStore(path.join(commonDirectory, ".zentra-integration-leases.sqlite"));
+    const held = thief.read(key)!;
+    expect(thief.release(held)).toBe(true);
+    expect(thief.acquire(key, 1_000)).not.toBeNull();
+
+    await expect(application).rejects.toThrow(/lease authority was lost|lease changed or expired/i);
+    expect(delayedGit.signalObserved).toBe(true);
+    expect(existsSync(evidence.lease.path)).toBe(true);
+    expect(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", `refs/heads/${evidence.lease.branch}`,
+    ])).toBe(evidence.sourceCommit);
+    expect(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", `refs/heads/${testFixture.project.integrationBranch}`,
+    ])).toBe(integrationBefore);
+    expect(journal.readStream("task-9").filter((event) => [
+      "task.cleanup_observed",
+      "task.cleanup_completed",
+      "task.completed",
+    ].includes(event.type))).toHaveLength(0);
+    thief.close();
+  });
+
+  it("contains a thrown renewal callback, aborts cleanup, and appends no completion result", async () => {
+    const baseFixture = await fixture();
+    let cleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+    let throwRenew = false;
+    const delayedGit = new DelayedGitClient(
+      (args) => args.includes("worktree") && args.includes("remove"),
+      5_000,
+      () => {
+        throwRenew = true;
+        cleanupStarted();
+      },
+    );
+    const testFixture: Fixture = { ...baseFixture, worktrees: new WorktreeManager(delayedGit) };
+    const { journal, tasks, recovery } = openSystem(testFixture, new GitClient(), {
+      integrationLeaseMs: 300,
+      integrationLeaseRenewalMs: 50,
+      integrationLeaseStoreFactory: (commonDirectory) => new InjectedRenewFailureStore(
+        path.join(commonDirectory, ".zentra-integration-leases.sqlite"),
+        () => throwRenew,
+      ),
+    });
+    createTask(tasks);
+    const evidence = await appendThroughIntegrationObserved(testFixture, tasks);
+
+    const application = recovery.recordCompletion("task-9");
+    await started;
+
+    await expect(application).rejects.toThrow(/lease authority was lost.*injected recovery lease renewal failure/i);
+    expect(delayedGit.signalObserved).toBe(true);
+    expect(existsSync(evidence.lease.path)).toBe(true);
+    expect(await gitOk(testFixture.project.repositoryPath, [
+      "rev-parse", `refs/heads/${evidence.lease.branch}`,
+    ])).toBe(evidence.sourceCommit);
+    expect(journal.readStream("task-9").filter((event) => [
+      "task.cleanup_observed",
+      "task.cleanup_completed",
+      "task.completed",
+    ].includes(event.type))).toHaveLength(0);
+  });
+
+  it("does not replace a primary completion error when lease release throws", async () => {
+    const testFixture = await fixture();
+    const { journal, tasks } = openSystem(testFixture);
+    createTask(tasks);
+    await appendThroughIntegrationObserved(testFixture, tasks);
+    const before = journal.readStream("task-9").length;
+    const recovery = new RecoveryService(
+      journal,
+      tasks,
+      testFixture.registry,
+      testFixture.worktrees,
+      new GitClient(),
+      {
+        integrationLeaseStoreFactory: (commonDirectory) => new InjectedReleaseFailureStore(
+          path.join(commonDirectory, ".zentra-integration-leases.sqlite"),
+        ),
+        completionHooks: {
+          afterAuthorization() {
+            throw new Error("primary injected completion failure");
+          },
+        },
+      },
+    );
+
+    await expect(recovery.recordCompletion("task-9")).rejects.toThrow("primary injected completion failure");
+    expect(journal.readStream("task-9")).toHaveLength(before);
   });
 
   it("returns record_failure for a missing task because recovery cannot reconstruct it", async () => {

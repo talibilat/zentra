@@ -14,6 +14,20 @@ import {
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
 import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
+import {
+  IntegrationLeaseStore,
+  MAX_INTEGRATION_LEASE_MS,
+} from "../integration/integration-lease.js";
+import {
+  cleanupFailureDatabasePath,
+  cleanupFailureStoreReference,
+  CleanupFailureEventRecordSchema,
+  CleanupFailureRecordSchema,
+  CleanupFailureStore,
+  CleanupFailureStoreReferenceSchema,
+  type CleanupFailureRecord,
+  type CleanupFailureStoreReference,
+} from "../integration/cleanup-failure-store.js";
 import { projectWorkerLifecycle, workerStreamId } from "../workers/worker-lifecycle.js";
 import { CapabilityBoundaryPausedPayloadSchema } from "../contracts/capability-boundary.js";
 import { MilestoneRegistry } from "../milestones/milestone-registry.js";
@@ -31,8 +45,19 @@ import {
   type GitClient,
 } from "../workspaces/git-client.js";
 import type { WorktreeManager } from "../workspaces/worktree-manager.js";
+import {
+  RecoveryCompletionAuthorizer,
+  RecoveryIntegrationLeaseAuthority,
+  type RecoveryCompletionAuthorization,
+  type RecoveryCompletionPath,
+  type RecoveryCompletionSnapshot,
+} from "./recovery-completion-authorization.js";
 
 const GIT_READ_TIMEOUT_MS = 30_000;
+const RECOVERY_AUTHORIZATION_TTL_MS = 1_000;
+const RECOVERY_INTEGRATION_LEASE_MS = MAX_INTEGRATION_LEASE_MS;
+const RECOVERY_INTEGRATION_LEASE_RENEWAL_MS = 20_000;
+const INTEGRATION_LEASE_DATABASE = ".zentra-integration-leases.sqlite";
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const EXTERNAL_PROGRAM_CONFIG =
   "^(merge\\..*\\.driver|diff\\.external|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process))$";
@@ -102,14 +127,8 @@ const IntegrationReceiptSchema = z.strictObject({
   validation: ValidationReportSchema,
   outcome: z.literal("completed"),
 });
-const CleanupFailureSchema = z.strictObject({
-  projectId: z.string().min(1),
-  taskId: z.string().min(1),
-  candidatePath: z.string().min(1),
-  reason: z.string().min(1),
-  timestamp: z.string().datetime(),
-});
-const CleanupFailuresSchema = z.array(CleanupFailureSchema).optional();
+const CleanupFailuresSchema = z.array(CleanupFailureEventRecordSchema).optional();
+const CleanupFailureStorePayloadSchema = CleanupFailureStoreReferenceSchema.optional();
 const IntegrationPreparedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
 });
@@ -117,6 +136,7 @@ const IntegrationObservedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
   verification: z.literal("verified"),
   cleanupFailures: CleanupFailuresSchema,
+  cleanupFailureStore: CleanupFailureStorePayloadSchema,
 });
 const CommitObservedPayloadSchema = z.strictObject({
   stage: z.literal("commit"),
@@ -134,6 +154,7 @@ const IntegrationUncertainPayloadSchema = z.strictObject({
     candidatePath: z.string().min(1),
   }),
   cleanupFailures: CleanupFailuresSchema,
+  cleanupFailureStore: CleanupFailureStorePayloadSchema,
 });
 const IntegrationErrorPayloadSchema = z.strictObject({
   error: z.strictObject({
@@ -141,13 +162,26 @@ const IntegrationErrorPayloadSchema = z.strictObject({
     message: z.string(),
   }),
   cleanupFailures: CleanupFailuresSchema,
+  cleanupFailureStore: CleanupFailureStorePayloadSchema,
 });
 const IntegrationVerificationFailedPayloadSchema = z.strictObject({
   receipt: IntegrationReceiptSchema,
   verification: z.literal("failed"),
   reason: z.string().min(1),
   cleanupFailures: CleanupFailuresSchema,
+  cleanupFailureStore: CleanupFailureStorePayloadSchema,
 });
+
+class CleanupFailureEvidenceError extends Error {
+  override readonly name = "CleanupFailureEvidenceError";
+}
+
+interface DurableCleanupState {
+  readonly unacknowledged: readonly CleanupFailureRecord[];
+  readonly history: readonly CleanupFailureRecord[];
+  readonly reference: CleanupFailureStoreReference;
+  readonly exists: boolean;
+}
 const CleanupStartedPayloadSchema = z.strictObject({
   sourceCommit: z.string().regex(COMMIT_ID),
   resultCommit: z.string().regex(COMMIT_ID),
@@ -222,14 +256,47 @@ interface WorkspaceInspection {
   readonly diff: string | null;
 }
 
+export interface RecoveryCompletionHooks {
+  readonly afterAuthorization?: (
+    path: RecoveryCompletionPath,
+    authorization: RecoveryCompletionAuthorization,
+  ) => void | Promise<void>;
+}
+
+export interface RecoveryServiceOptions {
+  readonly authorizationTtlMs?: number;
+  readonly now?: () => number;
+  readonly completionHooks?: RecoveryCompletionHooks;
+  readonly integrationLeaseStoreFactory?: (commonDirectory: string) => IntegrationLeaseStore;
+  readonly integrationLeaseMs?: number;
+  readonly integrationLeaseRenewalMs?: number;
+}
+
 export class RecoveryService {
+  private readonly authorizationTtlMs: number;
+  private readonly now: () => number;
+  private readonly completionHooks: RecoveryCompletionHooks;
+  private readonly integrationLeaseStoreFactory: (commonDirectory: string) => IntegrationLeaseStore;
+  private readonly integrationLeaseMs: number;
+  private readonly integrationLeaseRenewalMs: number;
+
   constructor(
     private readonly journal: EventJournal,
     private readonly tasks: TaskService,
     private readonly projects: ProjectRegistry,
     private readonly worktrees: WorktreeManager,
     private readonly git: GitClient,
-  ) {}
+    options: RecoveryServiceOptions = {},
+  ) {
+    this.authorizationTtlMs = options.authorizationTtlMs ?? RECOVERY_AUTHORIZATION_TTL_MS;
+    this.now = options.now ?? Date.now;
+    this.completionHooks = options.completionHooks ?? {};
+    this.integrationLeaseStoreFactory = options.integrationLeaseStoreFactory ?? ((commonDirectory) =>
+      new IntegrationLeaseStore(path.join(commonDirectory, INTEGRATION_LEASE_DATABASE)));
+    this.integrationLeaseMs = options.integrationLeaseMs ?? RECOVERY_INTEGRATION_LEASE_MS;
+    this.integrationLeaseRenewalMs = options.integrationLeaseRenewalMs ??
+      RECOVERY_INTEGRATION_LEASE_RENEWAL_MS;
+  }
 
   async inspect(taskId: string): Promise<RecoveryDecision> {
     if (!isSafeTaskId(taskId)) {
@@ -301,6 +368,13 @@ export class RecoveryService {
     try {
       chain = reconstructChain(taskId, events);
     } catch (error) {
+      if (error instanceof CleanupFailureEvidenceError) {
+        return decision(
+          taskId,
+          "await_reconciliation",
+          `cleanup failure evidence is invalid: ${error.message}`,
+        );
+      }
       return decision(
         taskId,
         hasCommitOrIntegrationEffect ? "await_reconciliation" : "record_failure",
@@ -691,6 +765,14 @@ export class RecoveryService {
           workspace,
           prepared.receipt,
         );
+        const durableCleanup = await this.readDurableCleanupState(project, taskId);
+        if (durableCleanup.unacknowledged.length > 0) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "candidate cleanup has durable unacknowledged failure evidence",
+          );
+        }
         return verified === null
           ? decision(
               taskId,
@@ -706,6 +788,18 @@ export class RecoveryService {
         const observed = IntegrationObservedPayloadSchema.safeParse(last.payload);
         if (!observed.success) {
           return decision(taskId, "await_reconciliation", "integration evidence is uncertain, invalid, missing, or truncated");
+        }
+        const durableCleanup = await this.readDurableCleanupState(project, taskId);
+        const cleanupEvidenceIssue = reconcileCleanupEvidence(last.payload, durableCleanup);
+        if (cleanupEvidenceIssue !== null) {
+          return decision(taskId, "await_reconciliation", cleanupEvidenceIssue);
+        }
+        if (durableCleanup.unacknowledged.length > 0) {
+          return decision(
+            taskId,
+            "await_reconciliation",
+            "candidate cleanup has durable unacknowledged failure evidence",
+          );
         }
         const verified = await this.completionEvidenceIssue(
           project,
@@ -825,82 +919,145 @@ export class RecoveryService {
   }
 
   async recordCompletion(taskId: string): Promise<TaskView> {
-    const authorization = await this.inspect(taskId);
-    if (authorization.action !== "record_completion") {
-      throw new Error(
-        `recovery completion is not authorized: ${authorization.action}`,
-      );
+    const existing = this.tasks.get(taskId);
+    if (existing?.lifecycle === "terminal") {
+      if (existing.terminalOutcome === "completed") return existing;
+      throw new Error(`recovery completion is not authorized for terminal outcome ${existing.terminalOutcome}`);
     }
+    const initialEvents = readStreamEvents(this.journal, taskId);
+    const initialChain = reconstructChain(taskId, initialEvents);
+    const project = this.projects.get(initialChain.created.projectId);
+    const commonDirectory = await this.readCanonicalCommonDirectory(project.repositoryPath);
+    const integrationRef = `refs/heads/${project.integrationBranch}`;
+    const leaseStore = this.integrationLeaseStoreFactory(commonDirectory);
+    const lease = leaseStore.acquire(
+      { commonDirectory, integrationRef },
+      this.integrationLeaseMs,
+      this.now(),
+    );
+    if (lease === null) {
+      leaseStore.close();
+      throw new Error("recovery completion integration lease is held by another owner");
+    }
+    const authorizer = new RecoveryCompletionAuthorizer(
+      leaseStore,
+      this.now,
+      this.authorizationTtlMs,
+    );
+    let authority: RecoveryIntegrationLeaseAuthority;
+    try {
+      authority = new RecoveryIntegrationLeaseAuthority(
+        leaseStore,
+        lease,
+        this.integrationLeaseMs,
+        this.integrationLeaseRenewalMs,
+        this.now,
+      );
+    } catch (error) {
+      leaseStore.release(lease);
+      leaseStore.close();
+      throw error;
+    }
+    try {
+      const classification = await this.inspect(taskId);
+      authority.assertActive();
+      if (classification.action !== "record_completion") {
+        throw new Error(`recovery completion is not authorized: ${classification.action}`);
+      }
+      return await this.recordCompletionUnderLease(
+        taskId,
+        project,
+        commonDirectory,
+        integrationRef,
+        authority,
+        authorizer,
+      );
+    } finally {
+      authority.close();
+      leaseStore.close();
+    }
+  }
 
-    const events = readStreamEvents(this.journal, taskId);
-    const chain = reconstructChain(taskId, events);
-    const last = events.at(-1);
+  private async recordCompletionUnderLease(
+    taskId: string,
+    project: ProjectConfig,
+    commonDirectory: string,
+    integrationRef: string,
+    leaseAuthority: RecoveryIntegrationLeaseAuthority,
+    authorizer: RecoveryCompletionAuthorizer,
+  ): Promise<TaskView> {
+    let events = readStreamEvents(this.journal, taskId);
+    let chain = reconstructChain(taskId, events);
+    let last = events.at(-1);
     if (last === undefined) throw new Error(`task ${taskId} not found`);
-    const observedReceipt = chain.integrationObserved?.receipt ?? null;
-    const preparedReceipt = chain.integrationPrepared?.receipt ?? null;
-    const receipt = observedReceipt ?? preparedReceipt;
+    const receipt = chain.integrationObserved?.receipt ?? chain.integrationPrepared?.receipt ?? null;
     if (receipt === null) throw new Error("durable completed integration receipt is missing");
+    const durableCleanup = await this.readDurableCleanupState(project, taskId);
+    if (durableCleanup.unacknowledged.length > 0) {
+      throw new Error("recovery completion is blocked by unacknowledged candidate cleanup evidence");
+    }
 
     if (last.type === "task.cleanup_completed") {
-      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+      return this.appendAuthorized(taskId, "cleanup_completed", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [{ type: "task.completed", payload: { receipt }, causationId: null }]);
     }
     if (last.type === "task.cleanup_started") {
-      const reauthorization = await this.inspect(taskId);
-      if (reauthorization.action !== "record_completion") {
-        throw new Error(
-          `cleanup completion is not authorized after reinspection: ${reauthorization.action}`,
-        );
-      }
-      const refreshedEvents = readStreamEvents(this.journal, taskId);
-      const refreshedChain = reconstructChain(taskId, refreshedEvents);
-      if (refreshedEvents.at(-1)?.type !== "task.cleanup_started") {
-        throw new Error("cleanup completion state changed after reinspection");
-      }
-      this.tasks.append(
-        taskId,
-        "task.cleanup_completed",
-        refreshedChain.cleanupStarted,
-        null,
-      );
-      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+      return this.appendAuthorized(taskId, "cleanup_started", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [
+          { type: "task.cleanup_completed", payload: chain.cleanupStarted, causationId: null },
+          { type: "task.completed", payload: { receipt }, causationId: null },
+        ]);
     }
     if (last.type === "task.cleanup_observed") {
-      this.tasks.append(taskId, "task.cleanup_reconciled", {
-        cleanup: chain.cleanupStarted,
-        observation: chain.cleanupObserved,
-      }, null);
-      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+      return this.appendAuthorized(taskId, "cleanup_observed", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [
+          { type: "task.cleanup_reconciled", payload: { cleanup: chain.cleanupStarted, observation: chain.cleanupObserved }, causationId: null },
+          { type: "task.completed", payload: { receipt }, causationId: null },
+        ]);
     }
     if (last.type === "task.cleanup_reconciled") {
-      return this.tasks.append(taskId, "task.completed", { receipt }, null);
+      return this.appendAuthorized(taskId, "cleanup_reconciled", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [{ type: "task.completed", payload: { receipt }, causationId: null }]);
     }
 
-    if (last.type === "task.integration_prepared") {
-      this.tasks.append(
-        taskId,
-        "task.integration_observed",
-        { receipt, verification: "verified", cleanupFailures: [] },
-        null,
-      );
-    } else if (last.type !== "task.integration_observed") {
-      throw new Error(`unsupported record_completion state ${last.type}`);
-    }
-
-    const lease = chain.lease;
-    if (lease === null) throw new Error("durable workspace lease is missing");
+    const durableLease = chain.lease;
+    if (durableLease === null) throw new Error("durable workspace lease is missing");
     const cleanupPayload = {
       sourceCommit: receipt.sourceCommit,
       resultCommit: receipt.resultCommit,
-      workspace: lease.workspace,
+      workspace: durableLease.workspace,
       branch: `ticket/${taskId}`,
     };
-    this.tasks.append(taskId, "task.cleanup_started", cleanupPayload, null);
+    if (last.type === "task.integration_prepared") {
+      await this.appendAuthorized(taskId, "integration_prepared", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [
+          {
+            type: "task.integration_observed",
+            payload: {
+              receipt,
+              verification: "verified",
+              cleanupFailures: durableCleanup.unacknowledged,
+              cleanupFailureStore: durableCleanup.reference,
+            },
+            causationId: null,
+          },
+          { type: "task.cleanup_started", payload: cleanupPayload, causationId: null },
+        ]);
+    } else if (last.type === "task.integration_observed") {
+      await this.appendAuthorized(taskId, "integration_observed", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer,
+        [{ type: "task.cleanup_started", payload: cleanupPayload, causationId: null }]);
+    } else {
+      throw new Error(`unsupported record_completion state ${last.type}`);
+    }
+
+    leaseAuthority.assertActive();
     try {
       await this.worktrees.cleanupCompleted(
-        this.projects.get(chain.created.projectId),
-        { taskId, branch: cleanupPayload.branch, path: lease.workspace },
+        project,
+        { taskId, branch: cleanupPayload.branch, path: durableLease.workspace },
         receipt.sourceCommit,
-        { timeoutMs: GIT_READ_TIMEOUT_MS },
+        { timeoutMs: GIT_READ_TIMEOUT_MS, signal: leaseAuthority.signal },
       );
     } catch (error) {
       const cleanupError = error as {
@@ -908,15 +1065,131 @@ export class RecoveryService {
         readonly uncertain?: unknown;
         readonly evidence?: unknown;
       };
-      return this.tasks.append(taskId, "task.cleanup_observed", {
-        phase: typeof cleanupError.phase === "string" ? cleanupError.phase : "unknown",
-        uncertain: cleanupError.uncertain === true,
-        evidence: isRecord(cleanupError.evidence) ? cleanupError.evidence : {},
-        reason: errorMessage(error),
-      }, null);
+      return this.appendAuthorized(taskId, "cleanup_observed", project, commonDirectory,
+        integrationRef, leaseAuthority, authorizer, [{
+          type: "task.cleanup_observed",
+          payload: {
+            phase: typeof cleanupError.phase === "string" ? cleanupError.phase : "unknown",
+            uncertain: cleanupError.uncertain === true,
+            evidence: isRecord(cleanupError.evidence) ? cleanupError.evidence : {},
+            reason: errorMessage(error),
+          },
+          causationId: null,
+        }]);
     }
-    this.tasks.append(taskId, "task.cleanup_completed", cleanupPayload, null);
-    return this.tasks.append(taskId, "task.completed", { receipt }, null);
+    events = readStreamEvents(this.journal, taskId);
+    chain = reconstructChain(taskId, events);
+    last = events.at(-1);
+    if (last?.type !== "task.cleanup_started" || chain.cleanupStarted === null) {
+      throw new Error("cleanup completion journal state changed");
+    }
+    return this.appendAuthorized(taskId, "cleanup_completed", project, commonDirectory,
+      integrationRef, leaseAuthority, authorizer, [
+        { type: "task.cleanup_completed", payload: cleanupPayload, causationId: null },
+        { type: "task.completed", payload: { receipt }, causationId: null },
+      ]);
+  }
+
+  private async appendAuthorized(
+    taskId: string,
+    completionPath: RecoveryCompletionPath,
+    project: ProjectConfig,
+    commonDirectory: string,
+    integrationRef: string,
+    leaseAuthority: RecoveryIntegrationLeaseAuthority,
+    authorizer: RecoveryCompletionAuthorizer,
+    inputs: readonly { readonly type: string; readonly payload: unknown; readonly causationId: string | null }[],
+  ): Promise<TaskView> {
+    leaseAuthority.assertActive();
+    const snapshot = await this.completionSnapshot(taskId, project, commonDirectory, integrationRef);
+    const authorization = authorizer.issue(completionPath, snapshot, leaseAuthority.current());
+    await this.completionHooks.afterAuthorization?.(completionPath, authorization);
+    const current = await this.completionSnapshot(taskId, project, commonDirectory, integrationRef);
+    authorizer.consume(authorization, completionPath, current);
+    leaseAuthority.assertActive();
+    return this.tasks.appendBatch(taskId, inputs);
+  }
+
+  private async completionSnapshot(
+    taskId: string,
+    project: ProjectConfig,
+    commonDirectory: string,
+    integrationRef: string,
+  ): Promise<RecoveryCompletionSnapshot> {
+    const events = readStreamEvents(this.journal, taskId);
+    const chain = reconstructChain(taskId, events);
+    const last = events.at(-1);
+    if (last === undefined) throw new Error(`task ${taskId} not found`);
+    if (await this.readCanonicalCommonDirectory(project.repositoryPath) !== commonDirectory) {
+      throw new Error("recovery completion Git common directory changed");
+    }
+    const workspace = await this.inspectWorkspace(project, taskId, chain);
+    return {
+      taskId,
+      streamVersion: last.streamVersion,
+      lastEventType: last.type,
+      commonDirectory,
+      integrationRef,
+      integrationCommit: await this.readExactIntegrationRef(project),
+      worktreePath: workspace.path,
+      worktreeRegistered: workspace.registered,
+      worktreePathExists: workspace.pathExists,
+      ticketRefExists: workspace.branchExists,
+      ticketCommit: workspace.head,
+      worktreeDirty: workspace.dirty,
+      worktreeDiffSha256: workspace.diff === null ? null : sha256(workspace.diff),
+    };
+  }
+
+  private async readCanonicalCommonDirectory(repositoryPath: string): Promise<string> {
+    const result = await this.read(repositoryPath, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+    if (lines.length !== 1 || !path.isAbsolute(lines[0]!)) {
+      throw new Error("Git common directory evidence is malformed");
+    }
+    return realpath(lines[0]!);
+  }
+
+  private async readDurableCleanupState(
+    project: ProjectConfig,
+    taskId: string,
+  ): Promise<DurableCleanupState> {
+    const commonDirectory = await this.readCanonicalCommonDirectory(project.repositoryPath);
+    const databasePath = cleanupFailureDatabasePath(commonDirectory);
+    try {
+      await lstat(databasePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const unacknowledged: readonly CleanupFailureRecord[] = [];
+      return {
+        unacknowledged,
+        history: unacknowledged,
+        reference: cleanupFailureStoreReference(unacknowledged),
+        exists: false,
+      };
+    }
+    const store = CleanupFailureStore.openReadOnly(databasePath);
+    try {
+      const scope = {
+        commonDirectory,
+        repositoryIdentitySha256: sha256(commonDirectory),
+        integrationRef: `refs/heads/${project.integrationBranch}`,
+        taskId,
+      };
+      const unacknowledged = store.listUnacknowledged(scope);
+      return {
+        unacknowledged,
+        history: store.getHistory(scope),
+        reference: cleanupFailureStoreReference(unacknowledged),
+        exists: true,
+      };
+    } finally {
+      store.close();
+    }
   }
 
   private async inspectWorkspace(
@@ -1464,6 +1737,9 @@ function reconstructChain(taskId: string, events: readonly StoredEvent[]): Recov
   const commitObserved = events.find((event) => event.type === "task.commit_observed");
   if (commitObserved !== undefined) parseEvent(CommitObservedPayloadSchema, commitObserved);
   const integrationObserved = events.find((event) => event.type === "task.integration_observed");
+  if (integrationObserved !== undefined) {
+    validateCleanupFailureEventPayload(integrationObserved.payload);
+  }
   const successfulObservation = integrationObserved === undefined
     ? null
     : IntegrationObservedPayloadSchema.safeParse(integrationObserved.payload);
@@ -1719,6 +1995,75 @@ function parseWorktrees(output: string): Array<{ path: string; branch: string | 
       branch: branch?.slice("branch ".length) ?? null,
     };
   });
+}
+
+function validateCleanupFailureEventPayload(payload: unknown): void {
+  if (!isRecord(payload) || !("cleanupFailures" in payload)) return;
+  const failures = z.array(CleanupFailureEventRecordSchema).safeParse(payload.cleanupFailures);
+  if (!failures.success) {
+    throw new CleanupFailureEvidenceError("cleanupFailures does not match the canonical schema");
+  }
+  const durable = failures.data.filter((failure) => "recordId" in failure);
+  if (durable.some((failure) => failure.acknowledgement !== null)) {
+    throw new CleanupFailureEvidenceError("current task evidence contains an acknowledged record");
+  }
+  const reference = CleanupFailureStoreReferenceSchema.safeParse(payload.cleanupFailureStore);
+  if (reference.success) {
+    const expected = cleanupFailureStoreReference(durable);
+    if (canonicalJson(reference.data) !== canonicalJson(expected)) {
+      throw new CleanupFailureEvidenceError("cleanup store reference does not match its records");
+    }
+  }
+}
+
+function reconcileCleanupEvidence(
+  payload: unknown,
+  durable: DurableCleanupState,
+): string | null {
+  if (!isRecord(payload)) return "cleanup failure evidence payload is not an object";
+  const failures = z.array(CleanupFailureEventRecordSchema).parse(payload.cleanupFailures ?? []);
+  const legacy = failures.filter((failure) => !("recordId" in failure));
+  if (legacy.length > 0) {
+    return "legacy candidate cleanup failure evidence remains unacknowledged";
+  }
+  const reference = CleanupFailureStoreReferenceSchema.safeParse(payload.cleanupFailureStore);
+  if (!reference.success) {
+    const snapshots = failures.filter((failure): failure is CleanupFailureRecord =>
+      "recordId" in failure
+    );
+    if (snapshots.length === 0) return null;
+    if (!durable.exists) return "cleanup failure store required by durable task evidence is missing";
+    const historyById = new Map(durable.history.map((record) => [record.recordId, record]));
+    for (const snapshot of snapshots) {
+      const historical = historyById.get(snapshot.recordId);
+      if (
+        historical === undefined ||
+        canonicalJson({ ...historical, acknowledgement: null }) !== canonicalJson(snapshot)
+      ) {
+        return "cleanup failure store contradicts reference-less durable task evidence";
+      }
+    }
+    return null;
+  }
+  if (!durable.exists && reference.data.recordIds.length > 0) {
+    return "cleanup failure store referenced by the task journal is missing";
+  }
+  const historyById = new Map(durable.history.map((record) => [record.recordId, record]));
+  const referencedHistory: CleanupFailureRecord[] = [];
+  for (const recordId of reference.data.recordIds) {
+    const historical = historyById.get(recordId);
+    if (historical === undefined) {
+      return "cleanup failure store no longer contains a task-journal referenced record";
+    }
+    referencedHistory.push({ ...historical, acknowledgement: null });
+  }
+  if (
+    canonicalJson(cleanupFailureStoreReference(referencedHistory)) !==
+      canonicalJson(reference.data)
+  ) {
+    return "cleanup failure store identity contradicts the task-journal reference";
+  }
+  return null;
 }
 
 function canonicalJson(value: unknown): string {

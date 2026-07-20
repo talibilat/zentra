@@ -27,6 +27,14 @@ export {
   isDurablePagedEventJournal,
 } from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
+export { projectTaskDiagnostic } from "./tasks/task-diagnostics.js";
+export type {
+  DiagnosticRecoveryAction,
+  DiagnosticStage,
+  TaskDiagnostic,
+  TaskDiagnosticArtifact,
+  TaskValidationDiagnostic,
+} from "./tasks/task-diagnostics.js";
 export {
   ArchivedEventJournal,
   JournalRetentionService,
@@ -166,6 +174,7 @@ export type {
   ScopeDependencies,
 } from "./attention/attention-dispatcher.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";
+export { isAgentTailProjectableEventType } from "./observability/agent-tail.js";
 export { AgentTailSegmentStore } from "./observability/agent-tail-segment-store.js";
 export type {
   AgentTailSegmentDescriptor,
@@ -488,6 +497,7 @@ export {
 } from "./gateway/service-attention.js";
 export type { ServiceAttentionEvidence } from "./gateway/service-attention.js";
 export { startZentraService } from "./service/start-service.js";
+export { createFirstDeliveryConformanceProfile } from "./conformance/first-delivery-profile.js";
 export type {
   AgentTrailService,
   GatewayService,

@@ -130,6 +130,11 @@ export async function createLocalWorkflowSurface(
           limits: DEFAULT_INTAKE_LIMITS,
           commandId: derivedCommandId(submission.commandId, "intake"),
         }));
+        options.runAdvancer?.schedule?.({
+          runId,
+          advanceId: digestCanonical({ schemaVersion: 1, runId, commandId: submission.commandId, stage: "submission" }),
+          stage: "submission",
+        });
         const detail = surface.getRun(runId);
         if (detail === null) throw new Error("submitted run disappeared after durable reservation");
         return detail;

@@ -27,12 +27,22 @@ import {
   type IntegrationLease,
   type IntegrationLeaseKey,
 } from "./integration-lease.js";
+import {
+  cleanupFailureDatabasePath,
+  cleanupFailureStoreReference,
+  CleanupFailureStore,
+  type CleanupFailureEventRecord,
+  type CleanupFailureRecord,
+  type CleanupFailureScope,
+  type CleanupFailureStoreReference,
+} from "./cleanup-failure-store.js";
 
 const GIT_OPERATION_TIMEOUT_MS = 30_000;
 const DEFAULT_INTEGRATION_LEASE_MS = 10_000;
 const DEFAULT_INTEGRATION_LEASE_RENEWAL_MS = 3_000;
 const DEFAULT_INTEGRATION_LEASE_RETRY_MS = 50;
 const INTEGRATION_LEASE_DATABASE = ".zentra-integration-leases.sqlite";
+const MAX_RECENT_CLEANUP_FAILURES = 128;
 const verifiedIntegrationReceipts = new WeakSet<IntegrationReceipt>();
 
 export interface IntegrationReceipt {
@@ -82,17 +92,19 @@ export class IntegrationLeaseLostError extends Error {
   }
 }
 
+export class CleanupFailureRetentionError extends Error {
+  override readonly name = "CleanupFailureRetentionError";
+
+  constructor(reason: string) {
+    super(`cleanup failure could not be retained: ${reason}`);
+  }
+}
+
 class IntegrationPreparationError extends Error {
   override readonly name = "IntegrationPreparationError";
 }
 
-export interface CleanupFailure {
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly candidatePath: string;
-  readonly reason: string;
-  readonly timestamp: string;
-}
+export type CleanupFailure = CleanupFailureEventRecord;
 
 export interface LeaseAnomaly {
   readonly commonDirectory: string;
@@ -133,6 +145,78 @@ export class IntegrationQueue {
     return [...this.cleanupFailures];
   }
 
+  async getCleanupFailuresFor(input: {
+    readonly project: ProjectConfig;
+    readonly taskId: string;
+    readonly leaseOwnerToken?: string;
+  }): Promise<readonly CleanupFailureRecord[]> {
+    const { store, scope } = await this.openCleanupFailureStore(input);
+    try {
+      const failures = store.listUnacknowledged(scope);
+      this.rememberCleanupFailures(failures);
+      return failures;
+    } finally {
+      store.close();
+    }
+  }
+
+  async getCleanupFailureEvidenceFor(input: {
+    readonly project: ProjectConfig;
+    readonly taskId: string;
+    readonly leaseOwnerToken?: string;
+  }): Promise<{
+    readonly cleanupFailures: readonly CleanupFailureRecord[];
+    readonly cleanupFailureStore: CleanupFailureStoreReference;
+  }> {
+    const cleanupFailures = await this.getCleanupFailuresFor(input);
+    return {
+      cleanupFailures,
+      cleanupFailureStore: cleanupFailureStoreReference(cleanupFailures),
+    };
+  }
+
+  async getCleanupFailureHistoryFor(input: {
+    readonly project: ProjectConfig;
+    readonly taskId: string;
+    readonly leaseOwnerToken?: string;
+  }): Promise<readonly CleanupFailureRecord[]> {
+    const { store, scope } = await this.openCleanupFailureStore(input);
+    try {
+      return store.getHistory(scope);
+    } finally {
+      store.close();
+    }
+  }
+
+  async acknowledgeCleanupFailure(input: {
+    readonly project: ProjectConfig;
+    readonly taskId: string;
+    readonly recordId: string;
+    readonly actor: string;
+    readonly dispositionEvidence: string;
+  }): Promise<CleanupFailureRecord> {
+    const { store, scope } = await this.openCleanupFailureStore(input);
+    try {
+      const matching = store.getHistory(scope).find((record) => record.recordId === input.recordId);
+      if (matching === undefined) {
+        throw new Error("cleanup failure record is outside the acknowledged task scope");
+      }
+      const acknowledged = store.acknowledge({
+        recordId: input.recordId,
+        actor: input.actor,
+        acknowledgedAt: new Date().toISOString(),
+        dispositionEvidence: input.dispositionEvidence,
+      });
+      const index = this.cleanupFailures.findIndex((record) =>
+        "recordId" in record && record.recordId === input.recordId
+      );
+      if (index !== -1) this.cleanupFailures.splice(index, 1);
+      return acknowledged;
+    } finally {
+      store.close();
+    }
+  }
+
   getLeaseAnomalies(): readonly LeaseAnomaly[] {
     return [...this.leaseAnomalies];
   }
@@ -153,10 +237,12 @@ export class IntegrationQueue {
     return withIntegrationLease(
       key,
       input.signal,
-      (assertLease, leaseSignal) =>
+      (assertLease, leaseSignal, currentLease) =>
         this.integrateUnderLock(
           { ...input, signal: AbortSignal.any([input.signal, leaseSignal]) },
           assertLease,
+          key,
+          currentLease,
         ),
       (reason) => {
         this.leaseAnomalies.push({
@@ -174,13 +260,18 @@ export class IntegrationQueue {
     );
   }
 
-  private async integrateUnderLock(input: {
-    project: ProjectConfig;
-    lease: WorkspaceLease;
-    review: ReviewDecision;
-    signal: AbortSignal;
-    onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
-  }, assertLease: () => void): Promise<IntegrationReceipt> {
+  private async integrateUnderLock(
+    input: {
+      project: ProjectConfig;
+      lease: WorkspaceLease;
+      review: ReviewDecision;
+      signal: AbortSignal;
+      onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
+    },
+    assertLease: () => void,
+    key: IntegrationLeaseKey,
+    currentLease: () => IntegrationLease,
+  ): Promise<IntegrationReceipt> {
     const { project, lease, review, signal } = input;
     const integrationRef = `refs/heads/${project.integrationBranch}`;
     let candidatePath: string | null = null;
@@ -439,6 +530,8 @@ export class IntegrationQueue {
         this.recordCleanupFailure(
           project,
           lease,
+          key,
+          currentLease(),
           candidatePath,
           `candidate creation result is uncertain: ${errorMessage(error)}`,
         );
@@ -456,6 +549,8 @@ export class IntegrationQueue {
         this.recordCleanupFailure(
           project,
           lease,
+          key,
+          currentLease(),
           candidatePath,
           `candidate creation was ${candidate.termination}`,
         );
@@ -466,6 +561,8 @@ export class IntegrationQueue {
         this.recordCleanupFailure(
           project,
           lease,
+          key,
+          currentLease(),
           candidatePath,
           gitFailure("create candidate", candidate),
         );
@@ -727,6 +824,8 @@ export class IntegrationQueue {
         this.recordCleanupFailure(
           project,
           lease,
+          key,
+          currentLease(),
           candidatePath,
           `${uncertainUpdateReason}; update-ref reconciliation ${
             reconciledHead === null
@@ -757,7 +856,8 @@ export class IntegrationQueue {
         error instanceof IntegrationExecutionError ||
         error instanceof IntegrationUncertainError ||
         error instanceof IntegrationPreparationError ||
-        error instanceof IntegrationLeaseLostError
+        error instanceof IntegrationLeaseLostError ||
+        error instanceof CleanupFailureRetentionError
       ) {
         throw error;
       }
@@ -782,6 +882,8 @@ export class IntegrationQueue {
             this.recordCleanupFailure(
               project,
               lease,
+              key,
+              currentLease(),
               candidatePath,
               `candidate cleanup was ${cleanup.termination}`,
             );
@@ -789,6 +891,8 @@ export class IntegrationQueue {
             this.recordCleanupFailure(
               project,
               lease,
+              key,
+              currentLease(),
               candidatePath,
               cleanup.truncated
                 ? "candidate cleanup output was truncated"
@@ -796,7 +900,14 @@ export class IntegrationQueue {
             );
           }
         } catch (error) {
-          this.recordCleanupFailure(project, lease, candidatePath, errorMessage(error));
+          this.recordCleanupFailure(
+            project,
+            lease,
+            key,
+            currentLease(),
+            candidatePath,
+            errorMessage(error),
+          );
         }
       }
       if (candidateRoot !== null && candidateRootCreated && !preserveCandidate) {
@@ -808,16 +919,80 @@ export class IntegrationQueue {
   private recordCleanupFailure(
     project: ProjectConfig,
     lease: WorkspaceLease,
+    key: IntegrationLeaseKey,
+    integrationLease: IntegrationLease,
     candidatePath: string,
     reason: string,
   ): void {
-    this.cleanupFailures.push({
-      projectId: project.projectId,
-      taskId: lease.taskId,
-      candidatePath,
-      reason,
-      timestamp: new Date().toISOString(),
-    });
+    let store: CleanupFailureStore;
+    try {
+      store = new CleanupFailureStore(cleanupFailureDatabasePath(key.commonDirectory));
+    } catch (error) {
+      throw new CleanupFailureRetentionError(errorMessage(error));
+    }
+    try {
+      const failure = store.record({
+        projectId: project.projectId,
+        taskId: lease.taskId,
+        commonDirectory: key.commonDirectory,
+        repositoryIdentitySha256: sha256(key.commonDirectory),
+        integrationRef: key.integrationRef,
+        candidateId: path.basename(candidatePath),
+        candidatePath,
+        reason,
+        recordedAt: new Date().toISOString(),
+        lease: {
+          ownerToken: integrationLease.ownerToken,
+          acquiredAt: integrationLease.acquiredAt,
+          expiresAt: integrationLease.expiresAt,
+          pid: integrationLease.pid,
+          hostname: integrationLease.hostname,
+        },
+      });
+      this.rememberCleanupFailures([failure]);
+    } catch (error) {
+      if (error instanceof CleanupFailureRetentionError) throw error;
+      throw new CleanupFailureRetentionError(errorMessage(error));
+    } finally {
+      store.close();
+    }
+  }
+
+  private rememberCleanupFailures(failures: readonly CleanupFailureRecord[]): void {
+    for (const failure of failures) {
+      if (!this.cleanupFailures.some((existing) =>
+        "recordId" in existing && existing.recordId === failure.recordId
+      )) {
+        this.cleanupFailures.push(failure);
+      }
+    }
+    if (this.cleanupFailures.length > MAX_RECENT_CLEANUP_FAILURES) {
+      this.cleanupFailures.splice(0, this.cleanupFailures.length - MAX_RECENT_CLEANUP_FAILURES);
+    }
+  }
+
+  private async openCleanupFailureStore(input: {
+    readonly project: ProjectConfig;
+    readonly taskId: string;
+    readonly leaseOwnerToken?: string;
+  }): Promise<{ readonly store: CleanupFailureStore; readonly scope: CleanupFailureScope }> {
+    const commonDirectory = await canonicalGitCommonDirectory(
+      this.git,
+      input.project.repositoryPath,
+    );
+    const scope: CleanupFailureScope = {
+      commonDirectory,
+      repositoryIdentitySha256: sha256(commonDirectory),
+      integrationRef: `refs/heads/${input.project.integrationBranch}`,
+      taskId: input.taskId,
+      ...(input.leaseOwnerToken === undefined
+        ? {}
+        : { leaseOwnerToken: input.leaseOwnerToken }),
+    };
+    return {
+      store: new CleanupFailureStore(cleanupFailureDatabasePath(commonDirectory)),
+      scope,
+    };
   }
 }
 
@@ -900,7 +1075,11 @@ interface IntegrationLeaseTimings {
 async function withIntegrationLease<T>(
   key: IntegrationLeaseKey,
   signal: AbortSignal,
-  action: (assertLease: () => void, leaseSignal: AbortSignal) => Promise<T>,
+  action: (
+    assertLease: () => void,
+    leaseSignal: AbortSignal,
+    currentLease: () => IntegrationLease,
+  ) => Promise<T>,
   onLeaseAnomaly?: (reason: string) => void,
   timings: IntegrationLeaseTimings = {
     leaseMs: DEFAULT_INTEGRATION_LEASE_MS,
@@ -963,7 +1142,7 @@ async function withIntegrationLease<T>(
       | { readonly kind: "value"; readonly value: T }
       | { readonly kind: "error"; readonly error: unknown };
     try {
-      const result = await action(renew, leaseController.signal);
+      const result = await action(renew, leaseController.signal, () => currentLease);
       outcome = { kind: "value", value: result };
     } catch (error) {
       outcome = { kind: "error", error };

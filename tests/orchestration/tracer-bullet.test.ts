@@ -29,6 +29,10 @@ import {
   type CleanupFailure,
   type IntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
+import {
+  cleanupFailureStoreReference,
+  type CleanupFailureRecord,
+} from "../../src/integration/cleanup-failure-store.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
@@ -616,10 +620,19 @@ describe("TracerBulletOrchestrator", () => {
       event.type === "task.integration_observed")?.payload).toMatchObject({
       cleanupFailures: [
         {
+          recordId: expect.any(String),
           taskId: result.taskId,
+          integrationRef: "refs/heads/zentra/integration",
+          repositoryIdentitySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          lease: { authority: "historical_evidence_only" },
           reason: expect.stringContaining("candidate cleanup"),
         },
       ],
+      cleanupFailureStore: {
+        schemaVersion: 1,
+        recordIds: [expect.any(String)],
+        recordsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
     });
     expect(journal.readStream(result.taskId).at(-1)).toMatchObject({
       type: "task.effect_uncertain",
@@ -780,6 +793,7 @@ describe("TracerBulletOrchestrator", () => {
     const worktrees = new WorktreeManager();
     const supervisor = new ProcessSupervisor();
     const validations = new ValidationRunner(supervisor);
+    const integrations = new IntegrationQueue(new CandidateCleanupFailingGit(), validations);
     const orchestrator = new TracerBulletOrchestrator(
       tasks,
       projects,
@@ -788,7 +802,7 @@ describe("TracerBulletOrchestrator", () => {
       validations,
       new DeterministicReviewerAdapter(supervisor, reviewerFixture),
       new ReviewGate(),
-      new IntegrationQueue(new CandidateCleanupFailingGit(), validations),
+      integrations,
       workerFixture,
     );
 
@@ -802,6 +816,13 @@ describe("TracerBulletOrchestrator", () => {
       receipt: { validation: { provenance: { canonicalCwd: string } } };
     };
     expect(existsSync(prepared.receipt.validation.provenance.canonicalCwd)).toBe(true);
+    await gitOk(fixture.repositoryPath, [
+      "worktree",
+      "remove",
+      "--force",
+      prepared.receipt.validation.provenance.canonicalCwd,
+    ]);
+    expect(existsSync(prepared.receipt.validation.provenance.canonicalCwd)).toBe(false);
     const recovery = new RecoveryService(
       journal,
       new TaskService(journal),
@@ -811,8 +832,27 @@ describe("TracerBulletOrchestrator", () => {
     );
     await expect(recovery.inspect("task-retained-candidate")).resolves.toMatchObject({
       action: "await_reconciliation",
-      reason: expect.stringMatching(/candidate.*cleanup|cleanup.*retained/i),
+      reason: expect.stringMatching(/cleanup/i),
     });
+    const [failure] = await integrations.getCleanupFailuresFor({
+      project: projects.get("greeting-project"),
+      taskId: "task-retained-candidate",
+    });
+    await integrations.acknowledgeCleanupFailure({
+      project: projects.get("greeting-project"),
+      taskId: "task-retained-candidate",
+      recordId: failure!.recordId,
+      actor: "operator:test",
+      dispositionEvidence: "candidate worktree absence verified",
+    });
+    await expect(integrations.getCleanupFailuresFor({
+      project: projects.get("greeting-project"),
+      taskId: "task-retained-candidate",
+    })).resolves.toEqual([]);
+    await expect(integrations.getCleanupFailureHistoryFor({
+      project: projects.get("greeting-project"),
+      taskId: "task-retained-candidate",
+    })).resolves.toMatchObject([{ acknowledgement: { actor: "operator:test" } }]);
   });
 
   it("recovers completion after cleanup is durable but task completion append crashes", async () => {
@@ -1643,23 +1683,29 @@ describe("TracerBulletOrchestrator", () => {
           };
         }
 
-        override getCleanupFailures(): readonly CleanupFailure[] {
-          return [
-            {
-              projectId: "greeting-project",
-              taskId: "foreign-task",
-              candidatePath: "/foreign/candidate",
-              reason: "foreign cleanup failed",
-              timestamp: "2026-07-12T00:00:00.000Z",
-            },
-            {
-              projectId: "greeting-project",
-              taskId: `task-integration-${outcome}`,
-              candidatePath: "/retained/candidate",
-              reason: "candidate cleanup failed",
-              timestamp: "2026-07-12T00:00:00.000Z",
-            },
-          ];
+        override getCleanupFailureEvidenceFor(input: {
+          readonly project: ProjectConfig;
+          readonly taskId: string;
+        }) {
+          const commonDirectory = realpathSync(path.join(input.project.repositoryPath, ".git"));
+          const cleanupFailures: readonly CleanupFailureRecord[] = [{
+            recordId: "9ca3d4e9-5413-4a0b-bf77-791bd8f7847d",
+            projectId: input.project.projectId,
+            taskId: input.taskId,
+            commonDirectory,
+            repositoryIdentitySha256: sha256(commonDirectory),
+            integrationRef: `refs/heads/${input.project.integrationBranch}`,
+            candidateId: "retained-candidate",
+            candidatePath: "/retained/candidate",
+            reason: "candidate cleanup failed",
+            recordedAt: "2026-07-12T00:00:00.000Z",
+            lease: null,
+            acknowledgement: null,
+          }];
+          return Promise.resolve({
+            cleanupFailures,
+            cleanupFailureStore: cleanupFailureStoreReference(cleanupFailures),
+          });
         }
       }
       const validations = new ValidationRunner(new ProcessSupervisor());
@@ -2236,7 +2282,7 @@ describe("TracerBulletOrchestrator", () => {
     expect(result.lifecycle).toBe("integrating");
     expect(result.terminalOutcome).toBeNull();
     expect(journal.readStream(result.taskId).findLast((event) =>
-      event.type === "task.integration_observed")?.payload).toEqual({
+      event.type === "task.integration_observed")?.payload).toMatchObject({
       reason: "update-ref reconciliation unresolved",
       evidence: { mode: "competing-head", candidatePath: "/candidate" },
       cleanupFailures: [],

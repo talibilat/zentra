@@ -60,6 +60,11 @@ describe("startZentraService", () => {
         { actorId: "operator", channel: "cli" },
       ) as WorkflowRunDetail;
       expect(detail).toMatchObject({ run: { lifecycle: "analyzing", authority: { executionAuthority: "none" } } });
+      await waitFor(() => configuredSurface!.getRun(detail.run.runId)?.run.lifecycle === "waiting");
+      expect(configuredSurface!.getRun(detail.run.runId)?.run).toMatchObject({
+        lifecycle: "waiting",
+        suspendedFrom: "analyzing",
+      });
       const bootstrapToken = new URL(service.sessionUrl).hash.slice("#token=".length);
       const handoff = await fetch(`${service.origin}/api/v1/session`, {
         method: "POST",
@@ -76,6 +81,34 @@ describe("startZentraService", () => {
     } finally {
       await service.shutdown("test_requested");
     }
+  });
+
+  it("resumes durable nonterminal runs before publishing gateway readiness and shuts the coordinator down", async () => {
+    const root = repository();
+    const sidecar = new FakeAgentTrail();
+    let resumes = 0;
+    let shutdowns = 0;
+    let readyAfterResume = false;
+    const service = await startZentraService({ cwd: root }, {
+      createAgentTrail: (evidence) => sidecar.attach(evidence),
+      runAdvancer: {
+        advance: () => undefined,
+        resumeNonterminalRuns: async () => { resumes += 1; },
+        shutdown: async () => { shutdowns += 1; },
+      },
+      createGateway: (options) => workflowGateway(
+        new LoopbackGateway(options),
+        () => undefined,
+        () => undefined,
+        () => { readyAfterResume = resumes === 1; },
+        () => undefined,
+      ),
+    });
+
+    expect(resumes).toBe(1);
+    expect(readyAfterResume).toBe(true);
+    await service.shutdown("test_requested");
+    expect(shutdowns).toBe(1);
   });
 
   it("fails startup when the gateway cannot accept a workflow surface", async () => {

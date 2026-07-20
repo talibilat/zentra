@@ -382,6 +382,17 @@ pnpm start -- task status \
   --task-id task-greeting
 ```
 
+Replay a bounded operator diagnostic with a stable stage and reason code, validation summary, typed artifact identities and digests, recovery classification, and only an exactly configured retained worktree path.
+
+```bash
+pnpm start -- task diagnose \
+  --config /absolute/path/to/zentra.project.json \
+  --database /absolute/path/to/zentra.sqlite \
+  --task-id task-greeting
+```
+
+Diagnostics never expose raw validation output, child environments, stacks, arbitrary retained paths, or raw failure reasons.
+
 Inspect recovery state and return a recovery classification without automatically retrying or applying an effect.
 
 ```bash
@@ -394,6 +405,19 @@ pnpm start -- recover \
 Recovery exits with code `0` for `resume_preparation`, `await_reconciliation`, or `record_completion`, because those values are successful inspection results.
 
 Recovery exits nonzero for `record_failure`, and unknown tasks also produce `record_failure` without appending an event.
+
+Apply only a freshly verified `record_completion` classification with an explicit effectful command.
+
+```bash
+pnpm start -- recover-apply \
+  --config /absolute/path/to/zentra.project.json \
+  --database /absolute/path/to/zentra.sqlite \
+  --task-id task-greeting
+```
+
+`recover-apply` opens the journal read-write and obtains its own short-lived, single-use authorization inside the race-safe completion path.
+It never accepts a caller-supplied recovery decision, and repeated application after completion returns the existing terminal task without appending another terminal event.
+Unsupported, stale, or competing applications fail with `RECOVERY_NOT_AUTHORIZED` and do not authorize a retry of an uncertain effect.
 
 Every operational invocation writes exactly one JSON object, with successful results on standard output and errors or unsuccessful outcomes on standard error.
 Live Agent Tail streaming is the exception because it reserves standard output for JSONL and writes the operational result to standard error.

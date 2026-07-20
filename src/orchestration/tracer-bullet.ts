@@ -26,6 +26,7 @@ import {
   type IntegrationReceipt,
 } from "../integration/integration-queue.js";
 import type { ProjectRegistry } from "../projects/project-registry.js";
+import type { ProjectConfig } from "../projects/project-config.js";
 import {
   isVerifiedReviewDecision,
   type ReviewGate,
@@ -545,13 +546,13 @@ export class TracerBulletOrchestrator {
         });
       } catch (error) {
         if (error instanceof IntegrationUncertainError) {
-          return this.observeIntegration(input.taskId, {
+          return this.observeIntegration(project, input.taskId, {
             reason: error.message,
             evidence: error.evidence,
           }, true, lease);
         }
         if (error instanceof IntegrationExecutionError) throw error;
-        return this.observeIntegration(input.taskId, {
+        return this.observeIntegration(project, input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         }, true, lease);
       }
@@ -559,6 +560,7 @@ export class TracerBulletOrchestrator {
         const finalReceipt = prepared.receipt === null
           ? receipt
           : { ...prepared.receipt, outcome: receipt.outcome };
+        const cleanupEvidence = await this.integrationCleanupEvidence(project, input.taskId);
         this.recordArtifact(
           input.taskId,
           "integration_receipt",
@@ -569,7 +571,8 @@ export class TracerBulletOrchestrator {
               stage,
               reason: "integration did not complete successfully",
               receipt: finalReceipt,
-              candidateCleanupFailures: this.integrationCleanupFailures(input.taskId),
+              candidateCleanupFailures: cleanupEvidence.cleanupFailures,
+              candidateCleanupFailureStore: cleanupEvidence.cleanupFailureStore,
             },
           },
           "final",
@@ -586,14 +589,15 @@ export class TracerBulletOrchestrator {
           git: this.git,
         });
       } catch (error) {
-        return this.observeIntegration(input.taskId, {
+        return this.observeIntegration(project, input.taskId, {
           receipt,
           verification: "failed",
           reason: errorMessage(error),
         }, true, lease);
       }
-      const cleanupFailures = this.integrationCleanupFailures(input.taskId);
-      const integrationObserved = { receipt, verification: "verified", cleanupFailures };
+      const cleanupEvidence = await this.integrationCleanupEvidence(project, input.taskId);
+      const integrationObserved = { receipt, verification: "verified", ...cleanupEvidence };
+      const { cleanupFailures } = cleanupEvidence;
       if (cleanupFailures.length > 0) {
         return this.tasks.appendBatch(input.taskId, [
           { type: "task.integration_observed", payload: integrationObserved, causationId: null },
@@ -715,7 +719,7 @@ export class TracerBulletOrchestrator {
         }));
       }
       if (stage === "integration" && dependencyOutcome === null) {
-        return this.observeIntegration(input.taskId, {
+        return this.observeIntegration(project, input.taskId, {
           error: { name: errorName(error), message: errorMessage(error) },
         }, true, lease);
       }
@@ -751,15 +755,17 @@ export class TracerBulletOrchestrator {
     );
   }
 
-  private observeIntegration(
+  private async observeIntegration(
+    project: ProjectConfig,
     taskId: string,
     payload: unknown,
     uncertain = false,
     lease?: WorkspaceLease,
-  ): TaskView {
+  ): Promise<TaskView> {
+    const cleanupEvidence = await this.integrationCleanupEvidence(project, taskId);
     const durablePayload = typeof payload === "object" && payload !== null
-      ? { ...payload, cleanupFailures: this.integrationCleanupFailures(taskId) }
-      : { evidence: payload, cleanupFailures: this.integrationCleanupFailures(taskId) };
+      ? { ...payload, ...cleanupEvidence }
+      : { evidence: payload, ...cleanupEvidence };
     if (!uncertain) return this.tasks.append(taskId, "task.integration_observed", durablePayload, null);
     return this.tasks.appendBatch(taskId, [
       { type: "task.integration_observed", payload: durablePayload, causationId: null },
@@ -777,8 +783,8 @@ export class TracerBulletOrchestrator {
     ]);
   }
 
-  private integrationCleanupFailures(taskId: string): readonly unknown[] {
-    return this.integrations.getCleanupFailures().filter((failure) => failure.taskId === taskId);
+  private integrationCleanupEvidence(project: ProjectConfig, taskId: string) {
+    return this.integrations.getCleanupFailureEvidenceFor({ project, taskId });
   }
 
   private recordArtifact(

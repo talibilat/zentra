@@ -62,6 +62,25 @@ function event(overrides: Partial<StoredEvent> = {}): StoredEvent {
 }
 
 describe("AgentTailJsonlFileSink", () => {
+  it("durably projects every recognized journal correlation while withholding unknown event policy", () => {
+    const { root } = fixture();
+    const tracePath = path.join(root, "service.jsonl");
+    const sink = AgentTailJsonlFileSink.openAll(root, tracePath);
+
+    sink.append([
+      event({ correlationId: "service-1" }),
+      event({ eventId: "internal-1", type: "first_delivery.internal", correlationId: "run-1", globalPosition: 2 }),
+      event({ eventId: "run-1", correlationId: "run-1", globalPosition: 3 }),
+    ]);
+    sink.close();
+
+    const lines = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines.map((line) => [line.event_id, line.trace_id, line.sequence])).toEqual([
+      ["event-1", "service-1", 1],
+      ["run-1", "run-1", 3],
+    ]);
+  });
+
   it("appends accepted events as readable UTF-8 JSONL without replacing earlier bytes", () => {
     const { root } = fixture();
     const tracePath = path.join(root, "task-1.jsonl");

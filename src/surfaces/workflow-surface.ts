@@ -70,9 +70,24 @@ export interface RunAdvanceRequest {
   readonly commandId: string;
 }
 
+export interface RunScheduleRequest {
+  readonly advanceId: string;
+  readonly runId: string;
+  readonly stage: "submission" | "restart";
+}
+
+export interface RunCancellationNotice {
+  readonly advanceId: string;
+  readonly runId: string;
+}
+
 /** Implementations must treat advanceId as an idempotency key across process restarts. */
 export interface RunAdvancer {
   advance(input: RunAdvanceRequest): void;
+  schedule?(input: RunScheduleRequest): void;
+  cancel?(input: RunCancellationNotice): void;
+  resumeNonterminalRuns?(): Promise<void>;
+  shutdown?(): Promise<void>;
 }
 
 export interface IntakeArtifactTextReader {
@@ -474,6 +489,10 @@ export class WorkflowSurface<TResult = unknown> {
         cancellationId: input.cancellationId,
         requestedBy: { actorId: actor.actorId, kind: "operator" },
         reasonCode: evidence.reasonCode,
+      });
+      this.runAdvancer.cancel?.({
+        runId: input.runId,
+        advanceId: digestCanonical({ schemaVersion: 1, runId: input.runId, cancellationId: input.cancellationId }),
       });
       return requiredDetail(this.runDetail(input.runId));
     });
