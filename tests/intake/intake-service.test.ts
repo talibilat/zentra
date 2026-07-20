@@ -55,9 +55,11 @@ describe("IntakeService durable orchestration", () => {
     expect(runIntake.type).toBe("run.intake_completed");
     expect(runIntake.causationId).toBe(sourceEvents[1]!.eventId);
 
-    const analyzed = await service.completeAnalysis(RUN_ID, result.run.streamVersion, "analysis-90");
-    expect(analyzed.run.lifecycle).toBe("planning");
-    expect(analyzed.snapshot.sources[0]?.quotedText).toBe("untrusted ticket\n");
+    const retained = await service.loadRetainedAnalysisSnapshot(RUN_ID);
+    expect(fixture.runs.get(RUN_ID)?.lifecycle).toBe("analyzing");
+    expect(retained.snapshot.sources[0]?.quotedText).toBe("untrusted ticket\n");
+    await expect(service.completeAnalysis(RUN_ID, result.run.streamVersion, "analysis-90"))
+      .rejects.toThrow("only through AnalysisCoordinator");
     fixture.journal.close();
   });
 
@@ -312,7 +314,7 @@ describe("IntakeService durable orchestration", () => {
       if (mode === "deleted") rmSync(storedPath);
       else writeFileSync(storedPath, "tampered", { mode: 0o600 });
 
-      await expect(service.completeAnalysis(RUN_ID, intake.run.streamVersion, `analysis-${mode}`))
+      await expect(service.loadRetainedAnalysisSnapshot(RUN_ID))
         .rejects.toThrow(/artifact|missing|schema|digest/i);
       expect(fixture.runs.get(RUN_ID)?.lifecycle).toBe("analyzing");
       fixture.journal.close();
@@ -328,7 +330,6 @@ describe("IntakeService durable orchestration", () => {
       fixture.runs,
       new BoundedTicketIntake(),
       await artifacts(fixture),
-      { beforeAnalysisTransition: () => writeFileSync(artifactPath, "tampered after capability", { mode: 0o600 }) },
     );
     const intake = await service.intake(request(fixture));
     artifactPath = path.join(
@@ -339,7 +340,9 @@ describe("IntakeService durable orchestration", () => {
       `${intake.snapshot.sources[0]!.artifact!.sha256}.json`,
     );
 
-    await expect(service.completeAnalysis(RUN_ID, intake.run.streamVersion, "analysis-stale-capability"))
+    await service.loadRetainedAnalysisSnapshot(RUN_ID);
+    writeFileSync(artifactPath, "tampered after capability", { mode: 0o600 });
+    await expect(service.loadRetainedAnalysisSnapshot(RUN_ID))
       .rejects.toThrow(/artifact|schema|digest/i);
     expect(fixture.runs.get(RUN_ID)?.lifecycle).toBe("analyzing");
     fixture.journal.close();

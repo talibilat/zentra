@@ -352,6 +352,10 @@ export class DockerOpenCodeReadOnlyCapsule implements OpenCodeReadOnlyCapsule {
         brokerFailureReason = terminalModel.failure.failureReason ?? "model_turn_budget_exceeded";
         brokerFailureTool = terminalModel.failure.failureTool;
       }
+      if (request.budget.maxOutputBytes !== undefined &&
+        Buffer.byteLength(run.stdout, "utf8") + Buffer.byteLength(run.stderr, "utf8") > request.budget.maxOutputBytes) {
+        throw new Error("OpenCode capsule output exceeded the request byte limit");
+      }
       const result = parseResult(run.stdout);
       new OpenCodeWorkerEventAdapter().assertNoDelegation(parseJsonLines(result.stdout));
       outcome = run.exitCode === 0 && result.exitCode === 0 && brokerState.receipt?.outcome === "completed" ? "completed" : "failed";

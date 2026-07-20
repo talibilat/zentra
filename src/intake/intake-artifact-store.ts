@@ -38,6 +38,7 @@ export interface VerifiedIntakeArtifacts {
   readonly sourceStreamId: string;
   readonly closureEventId: string;
   readonly artifactAggregateSha256: string;
+  readonly retainedSourceAggregateSha256: string;
 }
 
 export interface IntakeArtifactVerificationCapability {
@@ -402,7 +403,24 @@ function verifySnapshotArtifacts(
     sourceStreamId,
     closureEventId,
     artifactAggregateSha256: computeIntakeArtifactAggregateSha256(aggregate),
+    retainedSourceAggregateSha256: computeRetainedAnalysisSourceSha256(snapshot),
   });
+}
+
+export function computeRetainedAnalysisSourceSha256(snapshot: TicketIntakeSnapshot): string {
+  return createHash("sha256").update(JSON.stringify([...snapshot.sources]
+    .sort((left, right) => left.sourceId.localeCompare(right.sourceId))
+    .map((source) => {
+      if (source.artifact === null) throw new Error("retained intake source lacks an artifact");
+      return {
+        sourceId: source.sourceId,
+        relativePath: source.relativePath,
+        artifactId: source.artifact.artifactId,
+        sha256: source.sha256,
+        normalizedContentSha256: source.artifact.sha256,
+        provenanceSha256: createHash("sha256").update(JSON.stringify(source.provenance)).digest("hex"),
+      };
+    }))).digest("hex");
 }
 
 async function ensurePrivateDirectory(directory: string, projectRoot: string): Promise<void> {

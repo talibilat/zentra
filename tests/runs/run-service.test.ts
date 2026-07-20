@@ -16,6 +16,10 @@ import { IntakeService } from "../../src/intake/intake-service.js";
 import { IntakeArtifactStore } from "../../src/intake/intake-artifact-store.js";
 import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
 import { BoundedTicketIntake } from "../../src/intake/ticket-intake.js";
+import { AnalysisCoordinator } from "../../src/analysis/analysis-coordinator.js";
+import { CapsuleBackedAnalysisAdapter } from "../../src/analysis/capsule-analysis-adapter.js";
+import { DisabledModelBroker } from "../../src/capsule/model-broker.js";
+import { AttentionService } from "../../src/attention/attention-service.js";
 
 const cleanup: string[] = [];
 
@@ -269,7 +273,7 @@ describe("RunService", () => {
     run = result.run;
     expect(() => service.completeAnalysis("run-89", run.streamVersion, "analysis-1", undefined as never))
       .toThrow(/capability|verified intake artifact/i);
-    run = (await intake.completeAnalysis("run-89", run.streamVersion, "analysis-1")).run;
+    run = await completeAnalysis(journal, service, intake, "run-89");
     run = service.requestApproval("run-89", run.streamVersion, "approval-request-1", {
       planDigest: "d".repeat(64),
       envelopeDigest: "e".repeat(64),
@@ -474,7 +478,7 @@ describe("RunService", () => {
       limits: intakeLimits,
       commandId: "revise-intake",
     })).run;
-    run = (await intake.completeAnalysis(input.runId, run.streamVersion, "revise-analysis")).run;
+    run = await completeAnalysis(journal, service, intake, input.runId);
     run = service.requestApproval(input.runId, run.streamVersion, "revise-approval-1", {
       planDigest: "d".repeat(64), envelopeDigest: "e".repeat(64),
     });
@@ -491,6 +495,51 @@ describe("RunService", () => {
     journal.close();
   });
 });
+
+async function completeAnalysis(
+  journal: SqliteEventJournal,
+  runs: RunService,
+  intake: IntakeService,
+  runId: string,
+) {
+  const attention = new AttentionService(journal);
+  const coordinator = new AnalysisCoordinator(journal, runs, attention, intake, CapsuleBackedAnalysisAdapter.composeTrusted({
+    execute: async (capsuleRequest) => {
+      const request = JSON.parse(capsuleRequest.rolePrompt.slice(capsuleRequest.rolePrompt.indexOf("\n") + 1));
+      const round = request.answers.length === 0 ? {
+        observations: [{ observationId: "obs", summary: "Observed.", sourceIds: [], repositoryPaths: [], affectedScopes: [] }],
+        uncertainties: [{ uncertaintyId: "choice", question: "Proceed?", materiality: "material", affectedScopes: [], dependentScopes: [],
+          options: [{ optionId: "yes", label: "Yes", impacts: ["Continue"] }], recommendation: { optionId: "yes", rationale: "Required." } }],
+      } : { observations: [{ observationId: "resolved", summary: "Resolved.", sourceIds: [], repositoryPaths: [], affectedScopes: [] }], uncertainties: [] };
+      return { outcome: "completed", openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
+        model: { id: "zentra/analysis", provider: "fixture", name: "analysis" }, evidence: [{ kind: "plan", summary: JSON.stringify(round) }],
+        cleanup: "completed", brokerTransport: "completed",
+        usage: { seconds: 0.001, inputTokens: 1, outputTokens: 1, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 1 } };
+    },
+  }, new DisabledModelBroker(), {
+    snapshots: { prepare: async (request) => ({
+      view: { path: "/tmp/sanitized-analysis-view", revision: createHash("sha256").update(request.projectRevision.commit).digest("hex"),
+        readableScopes: ["src/**", ".analysis-sources/**"], forbiddenPaths: [".git/**", ".zentra/**"] },
+      sourceBundleSha256: "b".repeat(64), sourceManifestPath: ".analysis-sources/manifest.json", release: () => {},
+    }) }, capabilityId: "analysis",
+    transportModelId: "zentra/analysis", imageName: "zentra-opencode-readonly:analysis",
+  }));
+  const budget = {
+    maxRounds: 2, maxObservations: 8, maxQuestions: 8, maxOptionsPerQuestion: 4,
+    maxQuestionnaireOptions: 16, maxOutputBytes: 128 * 1024, maxDurationMs: 10_000,
+    maxInputTokens: 1_000, maxOutputTokens: 1_000, maxCostUsdNano: 0,
+  };
+  const first = await coordinator.advance({ runId, budget, signal: new AbortController().signal });
+  if (first.status !== "waiting") throw new Error("analysis fixture did not request its material decision");
+  const question = attention.getDecision(first.decisionId)!;
+  attention.answer(question.decisionId, {
+    runId, expectedVersion: question.streamVersion, optionId: question.recommendation!.optionId,
+    actor: { actorId: "operator", kind: "operator", channel: "api" },
+    commandId: `answer-${runId}`, evidenceSha256: "9".repeat(64),
+  });
+  await coordinator.advance({ runId, budget, signal: new AbortController().signal });
+  return runs.get(runId)!;
+}
 
 function seedIntakeClosure(
   journal: SqliteEventJournal,

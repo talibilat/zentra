@@ -251,10 +251,10 @@ export class ProcessSupervisor implements WorkerAdapter {
         }
       };
 
-      child.stdout.on("data", (chunk: Buffer) => {
+      child.stdout!.on("data", (chunk: Buffer) => {
         capture(stdoutChunks, chunk);
       });
-      child.stderr.on("data", (chunk: Buffer) => {
+      child.stderr!.on("data", (chunk: Buffer) => {
         capture(stderrChunks, chunk);
       });
 

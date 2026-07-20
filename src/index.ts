@@ -44,6 +44,49 @@ export type {
 export { ProjectingEventJournal } from "./journal/projecting-journal.js";
 export type { StoredEventSink } from "./journal/projecting-journal.js";
 export {
+  ANALYSIS_SCHEMA_VERSION,
+  AnalysisBudgetExhaustedPayloadSchema,
+  AnalysisBudgetReservedPayloadSchema,
+  AnalysisBudgetChargedPayloadSchema,
+  AnalysisBudgetRevisedPayloadSchema,
+  AnalysisBudgetSchema,
+  AnalysisCancelledPayloadSchema,
+  AnalysisCompletedPayloadSchema,
+  AnalysisObservedPayloadSchema,
+  AnalysisInvocationReservedPayloadSchema,
+  AnalysisRevisedPayloadSchema,
+  AnalysisReconciliationRequiredPayloadSchema,
+  AnalysisRoundResultSchema,
+  AnalysisStartedPayloadSchema,
+  AnalysisTerminalPayloadSchema,
+  AnalysisUncertaintySchema,
+  RetainedAnalysisSourceSchema,
+  analysisStreamId,
+  analysisBudgetStreamId,
+} from "./analysis/analysis-contracts.js";
+export type {
+  AnalysisAdapterRequest,
+  AnalysisAnswer,
+  AnalysisBudget,
+  AnalysisObservation,
+  AnalysisRoundResult,
+  AnalysisUncertainty,
+  RetainedAnalysisSource,
+} from "./analysis/analysis-contracts.js";
+export { AnalysisCoordinator } from "./analysis/analysis-coordinator.js";
+export type {
+  AnalysisCoordinatorResult,
+} from "./analysis/analysis-coordinator.js";
+export { AnalysisExecutionError, CapsuleBackedAnalysisAdapter, createCapsuleBackedAnalysisAdapter } from "./analysis/capsule-analysis-adapter.js";
+export type { AnalysisAdapterResult, CapsuleBackedAnalysisAdapterOptions, TrustedAnalysisCapsuleConfig } from "./analysis/capsule-analysis-adapter.js";
+export { GitAnalysisRepositorySnapshotProvider } from "./analysis/analysis-repository-snapshot.js";
+export type {
+  AnalysisRepositorySnapshotProvider,
+  AnalysisSnapshotPreparationLimits,
+  GitAnalysisRepositorySnapshotProviderOptions,
+  PreparedAnalysisSnapshot,
+} from "./analysis/analysis-repository-snapshot.js";
+export {
   ATTENTION_SCHEMA_VERSION,
   ApprovalAcceptedPayloadSchema,
   ApprovalPacketSchema,

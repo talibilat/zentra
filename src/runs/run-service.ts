@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
-import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
+import { findAllEvent, isAtomicEventJournal, readStreamEvents, type AtomicAppend, type EventJournal } from "../journal/journal.js";
 import {
   RUN_SCHEMA_VERSION,
   IntakeClosureReferenceSchema,
@@ -31,8 +31,8 @@ import {
 } from "../intake/intake-contracts.js";
 import {
   consumeAndVerifyIntakeArtifacts,
-  type IntakeArtifactVerificationCapability,
 } from "../intake/intake-artifact-store.js";
+import { consumeAnalysisCompletion, type AnalysisCompletionCapability } from "../analysis/analysis-completion.js";
 import { projectRun, type RunView } from "./run-projection.js";
 import { verifyAgentTrailReady } from "./service-lifecycle.js";
 
@@ -162,7 +162,7 @@ export class RunService {
     runId: string,
     expectedVersion: number,
     commandId: string,
-    artifactVerificationCapability: IntakeArtifactVerificationCapability,
+    analysisCompletionCapability: AnalysisCompletionCapability,
   ): RunView {
     const current = this.require(runId);
     if (current.lifecycle !== "analyzing") throw new Error(`invalid run transition ${current.lifecycle} -> run.analysis_completed`);
@@ -174,23 +174,33 @@ export class RunService {
       (intakeEvent.payload as Readonly<Record<string, unknown>>)["intake"],
     );
     const verified = this.verifyIntakeClosure(current, intake);
-    const artifactVerification = consumeAndVerifyIntakeArtifacts(artifactVerificationCapability);
+    const analysisVerification = consumeAnalysisCompletion(analysisCompletionCapability);
+    if (analysisVerification.runId !== runId) throw new Error("analysis completion evidence belongs to a different run");
+    const completionEvent = findAllEvent(this.journal, (event) => event.eventId === analysisVerification.completionEventId);
+    if (completionEvent?.streamId !== analysisVerification.analysisStreamId || completionEvent.type !== "analysis.completed" ||
+      completionEvent.correlationId !== runId) throw new Error("analysis completion event is missing or incorrectly bound");
+    const artifactVerification = consumeAndVerifyIntakeArtifacts(analysisVerification.intakeArtifactVerification);
     if (artifactVerification.runId !== runId
       || artifactVerification.snapshotSha256 !== verified.snapshotSha256
       || artifactVerification.sourceStreamId !== verified.sourceStreamId
       || artifactVerification.closureEventId !== verified.closureEventId
-      || artifactVerification.artifactAggregateSha256 !== this.intakeArtifactAggregate(verified.sourceStreamId)) {
+      || artifactVerification.artifactAggregateSha256 !== this.intakeArtifactAggregate(verified.sourceStreamId)
+      || artifactVerification.retainedSourceAggregateSha256 !== analysisVerification.sourceEvidenceSha256) {
       throw new Error("verified intake artifact evidence does not match the durable closure");
     }
     return this.append(runId, {
       expectedVersion,
       commandId,
-      causationId: intakeEvent.eventId,
+      causationId: completionEvent.eventId,
       process: current.activeProcess,
     }, "run.analysis_completed", {
       schemaVersion: RUN_SCHEMA_VERSION,
       commandId,
       intake: verified,
+      analysisStreamId: analysisVerification.analysisStreamId,
+      analysisCompletionEventId: completionEvent.eventId,
+      analysisEvidenceSha256: analysisVerification.evidenceSha256,
+      sourceEvidenceSha256: analysisVerification.sourceEvidenceSha256,
       executionAuthority: "none",
     });
   }
@@ -275,6 +285,43 @@ export class RunService {
       schemaVersion: RUN_SCHEMA_VERSION, commandId: context.commandId, evidenceSha256,
       process: RunProcessSchema.parse(context.process), executionAuthority: "none",
     });
+  }
+
+  settleAnalysisTerminalAtomically(input: {
+    readonly runId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly outcome: "cancelled" | "timed_out" | "failed";
+    readonly evidenceSha256: string;
+  }, companion: (runTerminalEventId: string) => {
+    readonly writes: readonly AtomicAppend[];
+    readonly analysisEventId: string;
+  }): RunView {
+    if (!isAtomicEventJournal(this.journal)) throw new Error("analysis terminal settlement requires an atomic journal");
+    const events = this.readStream(input.runId);
+    const current = requiredProjection(events);
+    if (current.lifecycle === "terminal") throw new Error("run is already terminal");
+    if (current.streamVersion !== input.expectedVersion) throw new Error(`expected version ${input.expectedVersion}, actual ${current.streamVersion}`);
+    const runTerminalEventId = randomUUID();
+    const prepared = companion(runTerminalEventId);
+    const payload = input.outcome === "cancelled" ? {
+      schemaVersion: RUN_SCHEMA_VERSION, commandId: input.commandId,
+      cancellationId: `analysis-cancel:${runTerminalEventId}`,
+      requestedBy: { actorId: "zentra-analysis", kind: "service" as const }, reasonCode: "service_shutdown" as const,
+      observedLifecycle: current.lifecycle, process: current.activeProcess, executionAuthority: "none" as const,
+    } : {
+      schemaVersion: RUN_SCHEMA_VERSION, commandId: input.commandId, evidenceSha256: input.evidenceSha256,
+      process: current.activeProcess, executionAuthority: "none" as const,
+    };
+    const runEvent = {
+      eventId: runTerminalEventId, streamId: runStreamId(input.runId), type: `run.${input.outcome}`,
+      payload, causationId: prepared.analysisEventId, correlationId: input.runId,
+    } as NewEvent<string, unknown>;
+    projectRun([...events, prospective(runEvent, current.streamVersion + 1)]);
+    this.journal.appendAtomically([...prepared.writes, {
+      streamId: runStreamId(input.runId), expectedVersion: current.streamVersion, events: [runEvent],
+    }]);
+    return this.require(input.runId);
   }
 
   get(runId: string): RunView | null {

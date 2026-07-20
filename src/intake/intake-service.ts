@@ -13,6 +13,7 @@ import type { RunService } from "../runs/run-service.js";
 import {
   IntakeArtifactStore,
   prepareIntakeArtifactVerification,
+  type IntakeArtifactVerificationCapability,
   type PreparedIntakeArtifact,
 } from "./intake-artifact-store.js";
 import {
@@ -54,6 +55,11 @@ export interface IntakeAnalysisResult {
   readonly snapshot: TicketIntakeSnapshot;
 }
 
+export interface RetainedAnalysisSnapshot {
+  readonly snapshot: TicketIntakeSnapshot;
+  readonly artifactVerification: IntakeArtifactVerificationCapability;
+}
+
 type DurableEvidence =
   | { readonly type: "source.discovered"; readonly payload: SourceDiscoveredPayload }
   | { readonly type: "source.rejected"; readonly payload: SourceRejectedPayload };
@@ -67,7 +73,6 @@ export class IntakeService {
     private readonly hooks: {
       readonly afterEvidenceAppended?: (count: number) => void | Promise<void>;
       readonly afterSnapshotClosed?: () => void | Promise<void>;
-      readonly beforeAnalysisTransition?: () => void | Promise<void>;
     } = {},
   ) {}
 
@@ -169,14 +174,12 @@ export class IntakeService {
     return Object.freeze({ run, snapshot, closure });
   }
 
-  async completeAnalysis(
-    runId: string,
-    expectedVersion: number,
-    commandId: string,
-  ): Promise<IntakeAnalysisResult> {
+  async loadRetainedAnalysisSnapshot(runId: string): Promise<RetainedAnalysisSnapshot> {
     const run = this.runs.get(runId);
     if (run === null) throw new Error(`run ${runId} not found`);
-    if (run.lifecycle !== "analyzing") throw new Error(`invalid run transition ${run.lifecycle} -> run.analysis_completed`);
+    if (run.lifecycle !== "analyzing" && run.lifecycle !== "waiting") {
+      throw new Error(`analysis snapshot cannot load run from ${run.lifecycle}`);
+    }
     const streamId = intakeStreamId(runId);
     const events = readStreamEvents(this.journal, streamId);
     const closureEvent = events.at(-1);
@@ -196,10 +199,16 @@ export class IntakeService {
       || snapshot.events.length !== closure.evidenceCount) {
       throw new Error("analysis snapshot contradicts durable intake closure");
     }
-    const verification = prepareIntakeArtifactVerification(this.artifacts, snapshot, streamId, closureEvent.eventId);
-    await this.hooks.beforeAnalysisTransition?.();
-    const next = await this.runs.completeAnalysis(runId, expectedVersion, commandId, verification);
-    return Object.freeze({ run: next, snapshot });
+    const artifactVerification = prepareIntakeArtifactVerification(this.artifacts, snapshot, streamId, closureEvent.eventId);
+    return Object.freeze({ snapshot, artifactVerification });
+  }
+
+  async completeAnalysis(
+    _runId: string,
+    _expectedVersion: number,
+    _commandId: string,
+  ): Promise<IntakeAnalysisResult> {
+    throw new Error("analysis completion is available only through AnalysisCoordinator replay evidence");
   }
 
   private requireAuthoritativeRun(input: IntakeServiceRequest): RunView {
