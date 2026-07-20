@@ -82,6 +82,8 @@ import {
   createInstalledModelBroker,
   loadInstalledProviderConfig,
 } from "../providers/provider-config.js";
+import { openSessionInBrowser } from "../service/browser.js";
+import { startZentraService } from "../service/start-service.js";
 
 const WORKER_ID = "zentra-deterministic-worker";
 const REVIEWER_ID = "zentra-deterministic-reviewer";
@@ -163,6 +165,9 @@ export interface CliRuntime {
   readonly stderr?: WriteOutput;
   readonly signalSource?: SignalSource;
   readonly fixtureAnchor?: string | URL;
+  readonly interactive?: boolean;
+  readonly openBrowser?: typeof openSessionInBrowser;
+  readonly startService?: typeof startZentraService;
 }
 
 export interface SignalSource {
@@ -192,6 +197,12 @@ interface RunOptions extends ProjectOptions, DatabaseTaskOptions {
 }
 
 interface RecoverOptions extends ProjectOptions, DatabaseTaskOptions {}
+
+interface StartOptions {
+  readonly project?: string;
+  readonly tokenTtlSeconds: number;
+  readonly agenttrailTimeoutMs: number;
+}
 
 interface JournalBoundaryOptions {
   readonly database: string;
@@ -288,7 +299,11 @@ export async function runCli(
   const commandResults: CommandResult[] = [];
   const program = createProgram(stdout, liveStdout, (result) => {
     commandResults.push(result);
-  }, controller.signal, runtime.fixtureAnchor);
+  }, controller.signal, runtime.fixtureAnchor, {
+    interactive: runtime.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
+    openBrowser: runtime.openBrowser ?? openSessionInBrowser,
+    startService: runtime.startService ?? startZentraService,
+  });
 
   try {
     await program.parseAsync([...userArgv], { from: "user" });
@@ -334,12 +349,48 @@ function createProgram(
   setResult: (result: CommandResult) => void,
   signal: AbortSignal,
   fixtureAnchor: string | URL | undefined,
+  startRuntime: {
+    readonly interactive: boolean;
+    readonly openBrowser: typeof openSessionInBrowser;
+    readonly startService: typeof startZentraService;
+  },
 ): Command {
   const program = new Command()
     .name("zentra")
     .description("Run bounded local software-development workflows with durable evidence.")
     .exitOverride()
     .configureOutput({ writeOut: stdout, writeErr: () => {} });
+
+  program
+    .command("start")
+    .description("Start the tokenized local Zentra service for the current Git project.")
+    .option("--project <path>", "path inside the Git project; defaults to cwd")
+    .option("--token-ttl-seconds <seconds>", "session token lifetime in seconds", boundedTokenTtlSeconds, 900)
+    .option("--agenttrail-timeout-ms <milliseconds>", "AgentTrail readiness deadline", boundedAgentTrailTimeout, 60_000)
+    .action(async (options: StartOptions) => {
+      const service = await startRuntime.startService({
+        cwd: options.project ?? process.cwd(),
+        tokenTtlMs: options.tokenTtlSeconds * 1_000,
+        agentTrailStartupTimeoutMs: options.agenttrailTimeoutMs,
+        signal,
+      });
+      stdout(`${service.sessionUrl}\n`);
+      try {
+        if (startRuntime.interactive && !signal.aborted) await startRuntime.openBrowser(service.sessionUrl);
+        await service.closed;
+      } catch (error) {
+        await service.shutdown("internal_failure").catch(() => undefined);
+        throw error;
+      }
+      setResult({
+        exitCode: 0,
+        value: {
+          command: "start",
+          status: "stopped",
+          projectRoot: service.layout.projectRoot,
+        },
+      });
+    });
 
   const project = program.command("project").description("Manage project configuration.");
   project
@@ -1473,6 +1524,18 @@ function boundedVacuumPages(value: string): number {
   return parsed;
 }
 
+function boundedTokenTtlSeconds(value: string): number {
+  const parsed = positiveInteger(value);
+  if (parsed > 86_400) throw new CliFailure("INVALID_COMMAND");
+  return parsed;
+}
+
+function boundedAgentTrailTimeout(value: string): number {
+  const parsed = positiveInteger(value);
+  if (parsed > 600_000) throw new CliFailure("INVALID_COMMAND");
+  return parsed;
+}
+
 function assertSafeTitle(title: string): void {
   if (title.length === 0 || Buffer.byteLength(title, "utf8") > MAX_TITLE_BYTES) {
     throw new CliFailure("INVALID_TITLE");
@@ -1590,6 +1653,7 @@ function publicMilestoneStatus(milestone: NonNullable<ReturnType<MilestoneRegist
 }
 
 function commandLabel(argv: readonly string[]): string {
+  if (argv[0] === "start") return "start";
   if (argv[0] === "milestone" && argv[1] === "run") return "milestone.run";
   if (argv[0] === "milestone" && argv[1] === "preview") return "milestone.preview";
   if (argv[0] === "milestone" && argv[1] === "list") return "milestone.list";

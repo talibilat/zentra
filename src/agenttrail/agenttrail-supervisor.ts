@@ -298,6 +298,10 @@ export class AgentTrailSupervisor {
           port,
           Math.min(1_000, Math.max(1, Math.floor(remaining))),
           readinessAbort.signal,
+          {
+            sha256: packaged.webAssetSha256,
+            byteLength: packaged.webAssetByteLength,
+          },
         )) {
           if (readyEvidencePending || startupSettled) return;
           readyEvidencePending = true;
@@ -645,7 +649,12 @@ async function validateTracePath(runtime: ProjectRuntimeLayout, candidate: strin
   return canonical;
 }
 
-function probeLoopback(port: number, timeoutMs: number, signal: AbortSignal): Promise<boolean> {
+function probeLoopback(
+  port: number,
+  timeoutMs: number,
+  signal: AbortSignal,
+  expected: { readonly sha256: string; readonly byteLength: number },
+): Promise<boolean> {
   return new Promise((resolve) => {
     if (signal.aborted) {
       resolve(false);
@@ -665,8 +674,29 @@ function probeLoopback(port: number, timeoutMs: number, signal: AbortSignal): Pr
       timeout: timeoutMs,
       agent: false,
     }, (response) => {
-      response.resume();
-      finish(response.statusCode !== undefined && response.statusCode >= 200 && response.statusCode < 500);
+      const contentType = response.headers["content-type"];
+      if (response.statusCode !== 200 || contentType !== "text/html; charset=utf-8") {
+        response.resume();
+        finish(false);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      response.on("data", (chunk: Buffer) => {
+        bytes += chunk.byteLength;
+        if (bytes > expected.byteLength) {
+          request.destroy();
+          finish(false);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("end", () => {
+        const body = Buffer.concat(chunks);
+        finish(body.byteLength === expected.byteLength &&
+          createHash("sha256").update(body).digest("hex") === expected.sha256);
+      });
+      response.once("error", () => finish(false));
     });
     const abort = (): void => {
       request.destroy();
@@ -675,6 +705,17 @@ function probeLoopback(port: number, timeoutMs: number, signal: AbortSignal): Pr
     signal.addEventListener("abort", abort, { once: true });
     request.once("timeout", () => request.destroy());
     request.once("error", () => finish(false));
+  });
+}
+
+export function probeAgentTrailReadinessForTesting(
+  port: number,
+  expectedBody: Buffer,
+  timeoutMs = 1_000,
+): Promise<boolean> {
+  return probeLoopback(port, timeoutMs, new AbortController().signal, {
+    sha256: createHash("sha256").update(expectedBody).digest("hex"),
+    byteLength: expectedBody.byteLength,
   });
 }
 

@@ -123,7 +123,31 @@ export const ServiceReadyPayloadSchema = z.strictObject({
   address: z.strictObject({ host: z.literal("127.0.0.1"), port: z.number().int().min(1).max(65_535) }),
   runtimeSchemaVersion: z.number().int().positive(),
   journalSchemaVersion: z.number().int().positive(),
+  tokenExpiresAt: z.iso.datetime({ offset: true }),
+  agentTrailStreamId: IdSchema,
+  agentTrailReadyEventId: IdSchema,
+  agentTrailIncarnation: IdSchema,
   observation: z.enum(["performed", "reconciled"]),
+  commandId: IdSchema,
+});
+
+export const ServiceStoppingPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(RUN_SCHEMA_VERSION),
+  serviceId: IdSchema,
+  process: RunProcessSchema,
+  observation: z.enum(["performed", "reconciled"]),
+  occurredAt: z.iso.datetime({ offset: true }),
+  commandId: IdSchema,
+});
+
+export const ServiceShutdownPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(RUN_SCHEMA_VERSION),
+  serviceId: IdSchema,
+  process: RunProcessSchema,
+  outcome: z.enum(["completed", "failed"]),
+  reasonCode: z.enum(["signal", "operator_requested", "startup_failed", "internal_failure", "test_requested"]),
+  observation: z.enum(["performed", "reconciled"]),
+  occurredAt: z.iso.datetime({ offset: true }),
   commandId: IdSchema,
 });
 

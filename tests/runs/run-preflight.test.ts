@@ -9,6 +9,7 @@ import { ProjectingEventJournal, type StoredEventSink } from "../../src/journal/
 import { RunPreflightCoordinator } from "../../src/runs/run-preflight.js";
 import { RunService } from "../../src/runs/run-service.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
+import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 
 class MemoryJournal implements EventJournal {
   readonly events: StoredEvent[] = [];
@@ -48,12 +49,16 @@ function seedServiceReady(journal: MemoryJournal): string {
       observation: "performed", commandId: "service-start",
     },
   }])[0]!;
+  const agentTrail = seedAgentTrailReady(journal, {
+    serviceId: "zentra-local", serviceStartingEventId: starting.eventId, seed: "6",
+  });
   return journal.append(streamId, 1, [{
-    streamId, type: "service.ready", causationId: starting.eventId, correlationId: "zentra-local",
+    streamId, type: "service.ready", causationId: agentTrail.agentTrailReadyEventId, correlationId: "zentra-local",
     payload: {
       schemaVersion: 1, serviceId: "zentra-local", process: processIdentity,
       address: { host: "127.0.0.1", port: 43_219 }, runtimeSchemaVersion: 1, journalSchemaVersion: 2,
-      observation: "performed", commandId: "service-ready",
+      observation: "performed", commandId: "service-ready", tokenExpiresAt: "2026-07-19T13:00:00.000Z",
+      ...agentTrail,
     },
   }])[0]!.eventId;
 }

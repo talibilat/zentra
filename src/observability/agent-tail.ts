@@ -46,8 +46,22 @@ import {
   RunSuspendedPayloadSchema,
   RunTerminalPayloadSchema,
   ServiceReadyPayloadSchema,
+  ServiceShutdownPayloadSchema,
   ServiceStartingPayloadSchema,
+  ServiceStoppingPayloadSchema,
 } from "../runs/run-contracts.js";
+import {
+  AgentTrailFailedEvidenceSchema,
+  AgentTrailReadyEvidenceSchema,
+  AgentTrailRestartedEvidenceSchema,
+  AgentTrailStartingEvidenceSchema,
+} from "../agenttrail/agenttrail-events.js";
+import {
+  GatewayBackfillTargetPayloadSchema,
+  GatewayDegradedPayloadSchema,
+  GatewayRecoveredPayloadSchema,
+} from "../gateway/gateway-events.js";
+import { ServiceCriticalAttentionPayloadSchema } from "../gateway/service-attention.js";
 import {
   IntakeSnapshotClosedPayloadSchema,
   SourceDiscoveredPayloadSchema,
@@ -116,7 +130,9 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "routing.model_selected", "routing.outcome_recorded",
   "capability_envelope.accepted", "capability_envelope.evaluated",
   "web_research.observed",
-  "service.starting", "service.ready",
+  "service.starting", "service.ready", "service.stopping", "service.shutdown", "service.critical_attention",
+  "agenttrail.starting", "agenttrail.ready", "agenttrail.failed", "agenttrail.restarted",
+  "gateway.degraded", "gateway.backfill_target", "gateway.recovered",
   "run.accepted", "preflight.started", "preflight.completed", "preflight.failed",
   "run.waiting", "run.blocked", "run.resumed", "run.reopened", "run.intake_completed",
   "run.analysis_completed", "run.approval_requested", "run.ready_for_execution",
@@ -296,6 +312,16 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "intake.snapshot_closed": IntakeSnapshotClosedPayloadSchema,
   "service.starting": ServiceStartingPayloadSchema,
   "service.ready": ServiceReadyPayloadSchema,
+  "service.stopping": ServiceStoppingPayloadSchema,
+  "service.shutdown": ServiceShutdownPayloadSchema,
+  "service.critical_attention": ServiceCriticalAttentionPayloadSchema,
+  "agenttrail.starting": AgentTrailStartingEvidenceSchema.omit({ type: true }),
+  "agenttrail.ready": AgentTrailReadyEvidenceSchema.omit({ type: true }),
+  "agenttrail.failed": AgentTrailFailedEvidenceSchema.omit({ type: true }),
+  "agenttrail.restarted": AgentTrailRestartedEvidenceSchema.omit({ type: true }),
+  "gateway.degraded": GatewayDegradedPayloadSchema,
+  "gateway.backfill_target": GatewayBackfillTargetPayloadSchema,
+  "gateway.recovered": GatewayRecoveredPayloadSchema,
   "run.accepted": RunAcceptedPayloadSchema,
   "preflight.started": PreflightPayloadSchema,
   "preflight.completed": PreflightPayloadSchema,
@@ -454,7 +480,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedReleaseTaskCompletionPayload(event.payload)
     : event.type.startsWith("release.")
       ? redactedReleasePayload(event.type, event.payload)
-    : event.type.startsWith("run.") || event.type.startsWith("preflight.") || event.type.startsWith("service.")
+    : event.type.startsWith("run.") || event.type.startsWith("preflight.") || event.type.startsWith("service.") ||
+      event.type.startsWith("agenttrail.") || event.type.startsWith("gateway.")
       ? AGENT_TAIL_PAYLOAD_SCHEMAS[event.type as AgentTailEventType].parse(event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
@@ -824,6 +851,9 @@ function actorFor(event: StoredEvent): AgentTailActor {
       ? { id: "zentra-attention-service", role: "attention" }
       : { id: payloadString(actor, "actorId")!, role: payloadString(actor, "kind")! };
   }
+  if (event.type === "service.critical_attention") return { id: "zentra-service-health", role: "attention" };
+  if (event.type.startsWith("agenttrail.")) return { id: "zentra-agenttrail-supervisor", role: "observability" };
+  if (event.type.startsWith("gateway.")) return { id: "zentra-loopback-gateway", role: "service" };
   if (event.type.startsWith("service.")) return { id: "zentra-runtime", role: "service" };
   if (event.type === "run.accepted") {
     const actor = payloadRecord(event.payload, "actor");
@@ -935,6 +965,10 @@ function actorFor(event: StoredEvent): AgentTailActor {
 function operationName(event: StoredEvent): string {
   if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return "source_intake";
   if (isAttentionEventType(event.type)) return "attention_decision";
+  if (event.type === "service.critical_attention") return "service_attention";
+  if (event.type.startsWith("agenttrail.")) return "agenttrail_lifecycle";
+  if (event.type.startsWith("gateway.")) return "gateway_observability";
+  if (event.type === "service.shutdown") return "service_shutdown";
   if (event.type.startsWith("service.")) return "service_startup";
   if (event.type.startsWith("preflight.")) return "run_preflight";
   if (event.type.startsWith("run.")) return "run";
@@ -992,7 +1026,11 @@ function operationStatus(event: StoredEvent): string {
     if (type.includes("duplicate_attempted")) return "failed";
     return "completed";
   }
-  if (type === "service.starting" || type === "preflight.started") return "running";
+  if (type === "agenttrail.failed" || type === "gateway.degraded" || type === "service.critical_attention") return "failed";
+  if (type === "agenttrail.starting" || type === "agenttrail.restarted" || type === "gateway.backfill_target") return "running";
+  if (type === "agenttrail.ready" || type === "gateway.recovered") return "completed";
+  if (type === "service.shutdown") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "service.starting" || type === "service.stopping" || type === "preflight.started") return "running";
   if (type === "run.waiting" || type === "run.blocked" || type === "run.approval_requested") return "waiting";
   if (type === "preflight.failed" || type === "run.failed") return "failed";
   if (type === "run.cancelled") return "cancelled";

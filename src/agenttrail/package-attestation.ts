@@ -67,6 +67,9 @@ export interface PackagedAgentTrail {
   readonly executablePath: string;
   readonly executableBytes: Buffer;
   readonly webAssetPath: string;
+  readonly webAssetBytes: Buffer;
+  readonly webAssetSha256: string;
+  readonly webAssetByteLength: number;
   readonly executableSha256: string;
   readonly manifestSha256: string;
   readonly architecture: "arm64";
@@ -145,6 +148,9 @@ export async function verifyAgentTrailPackageRoot(
     executablePath,
     executableBytes: Buffer.from(executableBytes),
     webAssetPath,
+    webAssetBytes: Buffer.from(webAssetBytes),
+    webAssetSha256: sha256(webAssetBytes),
+    webAssetByteLength: webAssetBytes.byteLength,
     executableSha256: sha256(executableBytes),
     manifestSha256,
     architecture: "arm64",
