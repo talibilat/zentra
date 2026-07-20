@@ -36,6 +36,7 @@ export async function createReadOnlyRepositoryViewAtCommit(
   forbiddenPaths: readonly string[],
   destinationPath: string,
   signal?: AbortSignal,
+  remainingDurationMs?: () => number,
 ): Promise<ReadOnlyRepositoryView> {
   const repository = realpathSync.native(repositoryPath);
   if (repository !== repositoryPath || !statSync(repository).isDirectory() || !/^[a-f0-9]{40,64}$/.test(commit)) {
@@ -43,15 +44,19 @@ export async function createReadOnlyRepositoryViewAtCommit(
   }
   const scopes = validateScopes(readableScopes, "readable scope", false);
   const forbidden = validateScopes(forbiddenPaths, "forbidden path", true);
-  const options = { ...(signal === undefined ? {} : { signal }), timeoutMs: 30_000 };
-  const resolved = await git.run(repository, ["rev-parse", "--verify", `${commit}^{commit}`], options);
-  const format = await git.run(repository, ["rev-parse", "--show-object-format"], options);
+  const options = () => {
+    const remaining = remainingDurationMs?.() ?? 30_000;
+    if (remaining <= 0) throw new Error("read-only Git snapshot preparation deadline exhausted");
+    return { ...(signal === undefined ? {} : { signal }), timeoutMs: Math.max(1, Math.min(30_000, remaining)) };
+  };
+  const resolved = await git.run(repository, ["rev-parse", "--verify", `${commit}^{commit}`], options());
+  const format = await git.run(repository, ["rev-parse", "--show-object-format"], options());
   if (resolved.exitCode !== 0 || resolved.termination !== null || resolved.truncated || resolved.stdout.trim() !== commit ||
     format.exitCode !== 0 || format.termination !== null || format.truncated ||
     (format.stdout.trim() !== "sha1" && format.stdout.trim() !== "sha256")) {
     throw new Error("read-only Git snapshot commit identity is invalid");
   }
-  const tree = await git.run(repository, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...scopes.map(scopeBase)], options);
+  const tree = await git.run(repository, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...scopes.map(scopeBase)], options());
   if (tree.exitCode !== 0 || tree.termination !== null || tree.truncated || tree.stdoutBytes === undefined ||
     !Buffer.from(tree.stdout, "utf8").equals(tree.stdoutBytes)) {
     throw new Error("read-only Git snapshot tree could not be measured");
@@ -71,7 +76,7 @@ export async function createReadOnlyRepositoryViewAtCommit(
       if (entry.type !== "blob" || (entry.mode !== "100644" && entry.mode !== "100755")) {
         throw new Error("read-only Git snapshot contains an unsupported entry");
       }
-      const blob = await git.run(repository, ["cat-file", "blob", entry.oid], options);
+      const blob = await git.run(repository, ["cat-file", "blob", entry.oid], options());
       if (blob.exitCode !== 0 || blob.termination !== null || blob.truncated) throw new Error("read-only Git snapshot blob could not be read");
       const content = blob.stdoutBytes;
       if (content === undefined) throw new Error("read-only Git snapshot binary evidence is unavailable");

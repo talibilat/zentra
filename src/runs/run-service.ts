@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
-import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
+import { findAllEvent, isAtomicEventJournal, readStreamEvents, type AtomicAppend, type EventJournal } from "../journal/journal.js";
 import {
   RUN_SCHEMA_VERSION,
   IntakeClosureReferenceSchema,
@@ -285,6 +285,43 @@ export class RunService {
       schemaVersion: RUN_SCHEMA_VERSION, commandId: context.commandId, evidenceSha256,
       process: RunProcessSchema.parse(context.process), executionAuthority: "none",
     });
+  }
+
+  settleAnalysisTerminalAtomically(input: {
+    readonly runId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly outcome: "cancelled" | "timed_out" | "failed";
+    readonly evidenceSha256: string;
+  }, companion: (runTerminalEventId: string) => {
+    readonly writes: readonly AtomicAppend[];
+    readonly analysisEventId: string;
+  }): RunView {
+    if (!isAtomicEventJournal(this.journal)) throw new Error("analysis terminal settlement requires an atomic journal");
+    const events = this.readStream(input.runId);
+    const current = requiredProjection(events);
+    if (current.lifecycle === "terminal") throw new Error("run is already terminal");
+    if (current.streamVersion !== input.expectedVersion) throw new Error(`expected version ${input.expectedVersion}, actual ${current.streamVersion}`);
+    const runTerminalEventId = randomUUID();
+    const prepared = companion(runTerminalEventId);
+    const payload = input.outcome === "cancelled" ? {
+      schemaVersion: RUN_SCHEMA_VERSION, commandId: input.commandId,
+      cancellationId: `analysis-cancel:${runTerminalEventId}`,
+      requestedBy: { actorId: "zentra-analysis", kind: "service" as const }, reasonCode: "service_shutdown" as const,
+      observedLifecycle: current.lifecycle, process: current.activeProcess, executionAuthority: "none" as const,
+    } : {
+      schemaVersion: RUN_SCHEMA_VERSION, commandId: input.commandId, evidenceSha256: input.evidenceSha256,
+      process: current.activeProcess, executionAuthority: "none" as const,
+    };
+    const runEvent = {
+      eventId: runTerminalEventId, streamId: runStreamId(input.runId), type: `run.${input.outcome}`,
+      payload, causationId: prepared.analysisEventId, correlationId: input.runId,
+    } as NewEvent<string, unknown>;
+    projectRun([...events, prospective(runEvent, current.streamVersion + 1)]);
+    this.journal.appendAtomically([...prepared.writes, {
+      streamId: runStreamId(input.runId), expectedVersion: current.streamVersion, events: [runEvent],
+    }]);
+    return this.require(input.runId);
   }
 
   get(runId: string): RunView | null {

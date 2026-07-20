@@ -2,21 +2,27 @@ import { createHash } from "node:crypto";
 
 import { DecisionAcceptedPayloadSchema, decisionStreamId } from "../attention/attention-contracts.js";
 import { projectAttention } from "../attention/attention-projection.js";
+import { digestCanonical } from "../contracts/authority-attention.js";
 import type { StoredEvent } from "../contracts/event.js";
 import type { IntakeArtifactVerificationCapability } from "../intake/intake-artifact-store.js";
 import { findAllEvent, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   AnalysisBudgetExhaustedPayloadSchema,
+  AnalysisBudgetReservedPayloadSchema,
+  AnalysisBudgetChargedPayloadSchema,
   AnalysisBudgetRevisedPayloadSchema,
   AnalysisCancelledPayloadSchema,
   AnalysisCompletedPayloadSchema,
   AnalysisInvocationReservedPayloadSchema,
   AnalysisObservedPayloadSchema,
   AnalysisRevisedPayloadSchema,
+  AnalysisReconciliationRequiredPayloadSchema,
+  AnalysisReconciliationResolvedPayloadSchema,
   AnalysisStartedPayloadSchema,
   analysisStreamId,
   type AnalysisBudget,
 } from "./analysis-contracts.js";
+import { combinedQuestionnaireOptions, questionnaireEvidenceSha256 } from "./analysis-questionnaire.js";
 
 declare const analysisCompletionBrand: unique symbol;
 export interface AnalysisCompletionCapability { readonly [analysisCompletionBrand]: true }
@@ -61,7 +67,7 @@ function verifyAnalysisReplay(journal: EventJournal, runId: string): Omit<Verifi
   let finalObservationEvent: StoredEvent | null = null;
   let rounds = 0;
   let observations = 0;
-  let totalUsage = { inputTokens: 0, outputTokens: 0, outputBytes: 0, durationMs: 0, costUsdNano: 0 };
+  let totalUsage = zeroUsage();
   let completed: { readonly event: StoredEvent; readonly payload: ReturnType<typeof AnalysisCompletedPayloadSchema.parse> } | null = null;
   let exhausted: StoredEvent | null = null;
   let materialAnswered = true;
@@ -93,6 +99,13 @@ function verifyAnalysisReplay(journal: EventJournal, runId: string): Omit<Verifi
         assertRun(payload.runId, runId);
         if (payload.round !== rounds + 1 || payload.sourceEvidenceSha256 !== started.sourceEvidenceSha256 ||
           JSON.stringify(payload.budget) !== JSON.stringify(budget)) throw new Error("analysis invocation reservation contradicts replay state");
+        const budgetReservation = findAllEvent(journal, (candidate) => candidate.eventId === payload.budgetReservationEventId);
+        if (budgetReservation?.type !== "analysis.budget_reserved") throw new Error("analysis invocation lacks shared budget reservation");
+        const reserved = AnalysisBudgetReservedPayloadSchema.parse(budgetReservation.payload);
+        if (reserved.runId !== runId || reserved.reservationId !== payload.reservationId ||
+          reserved.analysisReservationEventId !== event.eventId || reserved.analysisStreamVersion !== event.streamVersion) {
+          throw new Error("analysis invocation contradicts shared budget reservation");
+        }
         pendingReservation = { event, payload };
         break;
       }
@@ -102,6 +115,13 @@ function verifyAnalysisReplay(journal: EventJournal, runId: string): Omit<Verifi
         assertRun(payload.runId, runId);
         if (payload.round !== pendingReservation.payload.round || payload.reservationEventId !== pendingReservation.event.eventId ||
           payload.sourceEvidenceSha256 !== pendingReservation.payload.sourceEvidenceSha256) throw new Error("analysis observation contradicts its reservation");
+        const chargeEvent = findAllEvent(journal, (candidate) => candidate.type === "analysis.budget_charged" &&
+          typeof candidate.payload === "object" && candidate.payload !== null &&
+          (candidate.payload as { analysisEventId?: unknown }).analysisEventId === event.eventId);
+        if (chargeEvent === undefined) throw new Error("analysis observation lacks shared budget charge");
+        const charged = AnalysisBudgetChargedPayloadSchema.parse(chargeEvent.payload);
+        if (charged.runId !== runId || charged.reservationId !== pendingReservation.payload.reservationId ||
+          JSON.stringify(charged.usage) !== JSON.stringify(payload.usage)) throw new Error("analysis observation contradicts measured budget charge");
         rounds += 1;
         observations += payload.observations.length;
         for (const observation of payload.observations) {
@@ -139,6 +159,34 @@ function verifyAnalysisReplay(journal: EventJournal, runId: string): Omit<Verifi
             uncertaintyId: item.uncertaintyId, question: item.question, material: item.materiality === "material",
             affectedScopes: item.affectedScopes, dependentScopes: item.dependentScopes, options: item.options, recommendation: item.recommendation,
           })))) throw new Error("analysis questionnaire does not preserve observed uncertainties");
+        if (payload.answer.packetSha256 !== digestCanonical(decisionView.packet) ||
+          decisionView.packet.evidenceSha256 !== questionnaireEvidenceSha256(runId, lastObserved.round, lastObserved.uncertainties)) {
+          throw new Error("analysis questionnaire packet digest is invalid");
+        }
+        const chosen = combinedQuestionnaireOptions(lastObserved.uncertainties, 64)
+          .find((option) => option.optionId === accepted.optionId);
+        if (chosen === undefined || JSON.stringify(chosen.selections) !== JSON.stringify(payload.answer.selections)) {
+          throw new Error("analysis answer selections do not match the accepted canonical combined option");
+        }
+        if (lastObserved.uncertainties.some((item) => item.materiality === "material") && accepted.actor.kind !== "operator") {
+          throw new Error("material analysis questionnaire lacks an operator decision");
+        }
+        const expectedSemantics = lastObserved.uncertainties.map((uncertainty) => {
+          const selectedId = chosen.selections.find((selection) => selection.uncertaintyId === uncertainty.uncertaintyId)!.optionId;
+          return {
+            uncertaintyId: uncertainty.uncertaintyId, question: uncertainty.question, materiality: uncertainty.materiality,
+            affectedScopes: uncertainty.affectedScopes, dependentScopes: uncertainty.dependentScopes,
+            options: uncertainty.options, recommendation: uncertainty.recommendation,
+            selectedOption: uncertainty.options.find((option) => option.optionId === selectedId)!,
+          };
+        });
+        const expectedSemanticSha256 = evidenceDigestValue({
+          packetSha256: payload.answer.packetSha256, selectedCombinedOptionId: accepted.optionId, semantics: expectedSemantics,
+        });
+        if (JSON.stringify(payload.answer.semantics) !== JSON.stringify(expectedSemantics) ||
+          payload.answer.semanticSha256 !== expectedSemanticSha256) {
+          throw new Error("analysis answer semantic history is invalid");
+        }
         const selectionIds = payload.answer.selections.map((item) => item.uncertaintyId);
         if (JSON.stringify(selectionIds) !== JSON.stringify(lastObserved.uncertainties.map((item) => item.uncertaintyId))) {
           throw new Error("analysis revision does not answer the complete questionnaire");
@@ -168,8 +216,35 @@ function verifyAnalysisReplay(journal: EventJournal, runId: string): Omit<Verifi
           event.causationId !== payload.decisionEventId || !strictlyHigherBudget(payload.budget, payload.priorBudget)) {
           throw new Error("analysis budget revision is not a higher provenance-bound budget");
         }
+        const decisionEvent = findAllEvent(journal, (candidate) => candidate.eventId === payload.decisionEventId);
+        if (decisionEvent?.type !== "decision.accepted") throw new Error("analysis budget revision lacks an accepted decision");
+        const accepted = DecisionAcceptedPayloadSchema.parse(decisionEvent.payload);
+        const decisionView = projectAttention(readStreamEvents(journal, decisionEvent.streamId));
+        const expectedEvidence = evidenceDigestValue({ runId, exhaustionEventId: exhausted.eventId, budget: payload.budget });
+        if (accepted.runId !== runId || accepted.optionId !== "budget_revised" || accepted.actor.kind !== "operator" ||
+          JSON.stringify(accepted.actor) !== JSON.stringify(payload.actor) || decisionView?.packet?.evidenceSha256 !== expectedEvidence ||
+          payload.evidenceSha256 !== expectedEvidence) throw new Error("analysis budget revision decision is not bound to the exact operator-approved budget");
+        assertUsageWithin(totalUsage, payload.budget);
         budget = payload.budget;
         exhausted = null;
+        break;
+      }
+      case "analysis.reconciliation_required": {
+        if (pendingReservation === null) throw new Error("analysis reconciliation lacks reservation");
+        const payload = AnalysisReconciliationRequiredPayloadSchema.parse(event.payload);
+        if (payload.runId !== runId || payload.reservationEventId !== pendingReservation.event.eventId || event.causationId !== pendingReservation.event.eventId) {
+          throw new Error("analysis reconciliation evidence is invalid");
+        }
+        break;
+      }
+      case "analysis.reconciliation_resolved": {
+        if (pendingReservation === null) throw new Error("analysis reconciliation resolution lacks reservation");
+        const payload = AnalysisReconciliationResolvedPayloadSchema.parse(event.payload);
+        if (payload.runId !== runId || payload.reservationEventId !== pendingReservation.event.eventId ||
+          payload.actor.kind !== "operator" || event.causationId !== payload.reconciliationEventId) {
+          throw new Error("analysis reconciliation resolution is invalid");
+        }
+        pendingReservation = null;
         break;
       }
       case "analysis.completed": {
@@ -209,13 +284,15 @@ function addUsage(left: ReturnType<typeof zeroUsage>, right: ReturnType<typeof z
   return {
     inputTokens: left.inputTokens + right.inputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
+    inputBytes: left.inputBytes + right.inputBytes,
     outputBytes: left.outputBytes + right.outputBytes,
     durationMs: left.durationMs + right.durationMs,
     costUsdNano: left.costUsdNano + right.costUsdNano,
+    modelReceiptSha256: right.modelReceiptSha256,
   };
 }
 
-function zeroUsage() { return { inputTokens: 0, outputTokens: 0, outputBytes: 0, durationMs: 0, costUsdNano: 0 }; }
+function zeroUsage() { return { inputTokens: 0, outputTokens: 0, inputBytes: 0, outputBytes: 0, durationMs: 0, costUsdNano: 0, modelReceiptSha256: "0".repeat(64) }; }
 
 function assertUsageWithin(usage: ReturnType<typeof zeroUsage>, budget: AnalysisBudget): void {
   if (usage.inputTokens > budget.maxInputTokens || usage.outputTokens > budget.maxOutputTokens ||
@@ -235,4 +312,8 @@ function evidenceDigest(events: readonly StoredEvent[]): string {
 
 function assertRun(actual: string, expected: string): void {
   if (actual !== expected) throw new Error("analysis payload belongs to a different run");
+}
+
+function evidenceDigestValue(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }

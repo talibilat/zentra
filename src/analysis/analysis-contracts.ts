@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { z } from "zod";
 
 import { DecisionActorSchema } from "../attention/attention-contracts.js";
@@ -35,18 +33,12 @@ export const RetainedAnalysisSourceSchema = z.strictObject({
   sha256: DigestSchema,
   normalizedContentSha256: DigestSchema,
   quotedText: z.string().max(1024 * 1024 * 1024),
+  sizeBytes: z.number().int().nonnegative().max(1024 * 1024 * 1024),
   trust: z.literal("untrusted_planning_data"),
   provenanceSha256: DigestSchema,
 }).superRefine((source, context) => {
   if (source.artifactId !== `intake-text-v1:${source.sha256}`) {
     context.addIssue({ code: "custom", message: "retained source artifact does not match its digest" });
-  }
-  const normalized = Buffer.from(source.quotedText, "utf8");
-  if (source.normalizedContentSha256 !== createHash("sha256").update(normalized).digest("hex")) {
-    context.addIssue({ code: "custom", message: "retained source normalized content digest is invalid" });
-  }
-  if (Buffer.byteLength(source.quotedText, "utf8") > 1024 * 1024 * 1024) {
-    context.addIssue({ code: "custom", message: "retained source exceeds its byte bound" });
   }
 });
 
@@ -75,9 +67,6 @@ export const AnalysisUncertaintySchema = z.strictObject({
   if (new Set(optionIds).size !== optionIds.length) {
     context.addIssue({ code: "custom", message: "uncertainty option identities must be unique" });
   }
-  if (optionIds.some((value, index) => index > 0 && optionIds[index - 1]! >= value)) {
-    context.addIssue({ code: "custom", message: "uncertainty options must be canonically sorted" });
-  }
   if (!optionIds.includes(uncertainty.recommendation.optionId)) {
     context.addIssue({ code: "custom", message: "uncertainty recommendation must reference an option" });
   }
@@ -86,24 +75,22 @@ export const AnalysisUncertaintySchema = z.strictObject({
 export const AnalysisUsageSchema = z.strictObject({
   inputTokens: z.number().int().nonnegative().max(2_000_000),
   outputTokens: z.number().int().nonnegative().max(2_000_000),
+  inputBytes: z.number().int().nonnegative().max(64 * 1024 * 1024),
   outputBytes: z.number().int().nonnegative().max(16 * 1024 * 1024),
   durationMs: z.number().int().nonnegative().max(86_400_000),
   costUsdNano: z.number().int().nonnegative().max(10_000_000_000_000),
+  modelReceiptSha256: DigestSchema,
 });
 
 export const AnalysisRoundResultSchema = z.strictObject({
   observations: z.array(AnalysisObservationSchema).max(1_024),
   uncertainties: z.array(AnalysisUncertaintySchema).max(64),
-  usage: AnalysisUsageSchema,
 }).superRefine((result, context) => {
   for (const [label, ids] of [
     ["observation", result.observations.map((item) => item.observationId)],
     ["uncertainty", result.uncertainties.map((item) => item.uncertaintyId)],
   ] as const) {
     if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", message: `${label} identities must be unique` });
-    if (ids.some((value, index) => index > 0 && ids[index - 1]! >= value)) {
-      context.addIssue({ code: "custom", message: `${label} identities must be canonically sorted` });
-    }
   }
   const optionIds = result.uncertainties.flatMap((item) => item.options.map((option) => option.optionId));
   if (new Set(optionIds).size !== optionIds.length) {
@@ -117,7 +104,19 @@ export const AnalysisAnswerSchema = z.strictObject({
   optionId: IdSchema,
   actor: DecisionActorSchema,
   evidenceSha256: DigestSchema,
+  packetSha256: DigestSchema,
   selections: z.array(z.strictObject({ uncertaintyId: IdSchema, optionId: IdSchema })).min(1).max(64),
+  semantics: z.array(z.strictObject({
+    uncertaintyId: IdSchema,
+    question: TextSchema,
+    materiality: z.enum(["material", "advisory"]),
+    affectedScopes: CanonicalIdsSchema,
+    dependentScopes: CanonicalIdsSchema,
+    options: z.array(z.strictObject({ optionId: IdSchema, label: TextSchema, impacts: z.array(TextSchema).min(1).max(64) })).min(1).max(16),
+    recommendation: z.strictObject({ optionId: IdSchema, rationale: TextSchema }),
+    selectedOption: z.strictObject({ optionId: IdSchema, label: TextSchema, impacts: z.array(TextSchema).min(1).max(64) }),
+  })).min(1).max(64),
+  semanticSha256: DigestSchema,
 });
 
 export const AnalysisStartedPayloadSchema = z.strictObject({
@@ -151,6 +150,38 @@ export const AnalysisInvocationReservedPayloadSchema = z.strictObject({
   requestSha256: DigestSchema,
   sourceEvidenceSha256: DigestSchema,
   budget: AnalysisBudgetSchema,
+  reservationId: IdSchema,
+  budgetReservationEventId: IdSchema,
+  runStreamVersion: z.number().int().positive(),
+  commandId: IdSchema,
+  authority: z.literal("none"),
+});
+
+export const AnalysisBudgetReservedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(ANALYSIS_SCHEMA_VERSION),
+  runId: IdSchema,
+  reservationId: IdSchema,
+  round: z.number().int().positive().max(32),
+  limits: z.strictObject({
+    maxDurationMs: z.number().int().positive().max(86_400_000),
+    maxOutputBytes: z.number().int().positive().max(16 * 1024 * 1024),
+    maxInputTokens: z.number().int().positive().max(2_000_000),
+    maxOutputTokens: z.number().int().positive().max(2_000_000),
+    maxCostUsdNano: z.number().int().nonnegative().max(10_000_000_000_000),
+  }),
+  analysisStreamVersion: z.number().int().positive(),
+  analysisReservationEventId: IdSchema,
+  commandId: IdSchema,
+  authority: z.literal("none"),
+});
+
+export const AnalysisBudgetChargedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(ANALYSIS_SCHEMA_VERSION),
+  runId: IdSchema,
+  reservationId: IdSchema,
+  reservationEventId: IdSchema,
+  analysisEventId: IdSchema,
+  usage: AnalysisUsageSchema,
   commandId: IdSchema,
   authority: z.literal("none"),
 });
@@ -211,21 +242,68 @@ export const AnalysisCancelledPayloadSchema = z.strictObject({
   authority: z.literal("none"),
 });
 
+export const AnalysisTerminalPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(ANALYSIS_SCHEMA_VERSION),
+  runId: IdSchema,
+  outcome: z.enum(["timed_out", "failed"]),
+  runTerminalEventId: IdSchema,
+  reservationEventId: IdSchema,
+  usage: AnalysisUsageSchema,
+  evidenceSha256: DigestSchema,
+  commandId: IdSchema,
+  authority: z.literal("none"),
+});
+
+export const AnalysisReconciliationRequiredPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(ANALYSIS_SCHEMA_VERSION),
+  runId: IdSchema,
+  reservationEventId: IdSchema,
+  reason: z.enum(["capsule_uncertain", "cleanup_uncertain"]),
+  capsuleOutcome: z.enum(["cancelled", "timed_out", "failed", "uncertain"]),
+  cleanup: z.enum(["completed", "uncertain"]),
+  effectState: z.enum(["known_no_effect", "uncertain"]),
+  usage: AnalysisUsageSchema,
+  evidenceSha256: DigestSchema,
+  commandId: IdSchema,
+  authority: z.literal("none"),
+});
+
+export const AnalysisReconciliationResolvedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(ANALYSIS_SCHEMA_VERSION),
+  runId: IdSchema,
+  reservationEventId: IdSchema,
+  reconciliationEventId: IdSchema,
+  resolution: z.enum(["released_known_no_effect"]),
+  actor: DecisionActorSchema,
+  evidenceSha256: DigestSchema,
+  commandId: IdSchema,
+  authority: z.literal("none"),
+});
+
 export type AnalysisBudget = z.infer<typeof AnalysisBudgetSchema>;
 export type RetainedAnalysisSource = z.infer<typeof RetainedAnalysisSourceSchema>;
 export type AnalysisObservation = z.infer<typeof AnalysisObservationSchema>;
 export type AnalysisUncertainty = z.infer<typeof AnalysisUncertaintySchema>;
 export type AnalysisRoundResult = z.infer<typeof AnalysisRoundResultSchema>;
+export type AnalysisUsage = z.infer<typeof AnalysisUsageSchema>;
 export type AnalysisAnswer = z.infer<typeof AnalysisAnswerSchema>;
 
 export interface AnalysisAdapterRequest {
   readonly runId: string;
   readonly round: number;
+  readonly projectRevision: { readonly objectFormat: "sha1" | "sha256"; readonly commit: string };
+  readonly sourceByteBudget: number;
   readonly sources: readonly RetainedAnalysisSource[];
   readonly priorObservations: readonly AnalysisObservation[];
   readonly answers: readonly AnalysisAnswer[];
   readonly budget: AnalysisBudget;
-  readonly invocationLimits: { readonly timeoutMs: number; readonly maxOutputBytes: number };
+  readonly invocationLimits: {
+    readonly timeoutMs: number;
+    readonly maxOutputBytes: number;
+    readonly maxInputTokens: number;
+    readonly maxOutputTokens: number;
+    readonly maxCostUsdNano: number;
+  };
   readonly securityBoundary: {
     readonly authority: "none";
     readonly effects: "none";
@@ -239,6 +317,10 @@ export interface AnalysisAdapterRequest {
 
 export function analysisStreamId(runId: string): string {
   return `analysis:${IdSchema.parse(runId)}`;
+}
+
+export function analysisBudgetStreamId(runId: string): string {
+  return `analysis-budget:${IdSchema.parse(runId)}`;
 }
 
 function canonicalArray(values: readonly string[], context: z.RefinementCtx): void {

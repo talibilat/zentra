@@ -27,6 +27,10 @@ import {
   AgentTailSegmentStore,
   AgentTailTraceService,
   createSegmentedAgentTailProjection,
+  CapsuleBackedAnalysisAdapter,
+  GitAnalysisRepositorySnapshotProvider,
+  createCapsuleBackedAnalysisAdapter,
+  DisabledModelBroker,
 } from "../../src/index.js";
 import type {
   ArchiveManifest,
@@ -73,6 +77,19 @@ describe("package-root programmatic API", () => {
     expect(AgentTailTraceService).toBeTypeOf("function");
     expect(createSegmentedAgentTailProjection).toBeTypeOf("function");
     expect(LocalReleaseCoordinator).toBeTypeOf("function");
+    expect(CapsuleBackedAnalysisAdapter).toBeTypeOf("function");
+    expect(GitAnalysisRepositorySnapshotProvider).toBeTypeOf("function");
+    expect(createCapsuleBackedAnalysisAdapter).toBeTypeOf("function");
+    const adapter = createCapsuleBackedAnalysisAdapter({
+      capsule: { execute: async () => ({ outcome: "failed", openCode: null, model: null, evidence: [], cleanup: "completed", brokerTransport: "completed" }) },
+      broker: new DisabledModelBroker(),
+      snapshots: { prepare: async () => ({
+        view: { path: "/tmp/sanitized", revision: "a".repeat(64), readableScopes: ["src/**"], forbiddenPaths: [".git/**"] },
+        sourceBundleSha256: "b".repeat(64), sourceManifestPath: ".analysis-sources/manifest.json", release: () => {},
+      }) },
+      capabilityId: "analysis", transportModelId: "zentra/analysis", imageName: "zentra-opencode-readonly:analysis",
+    });
+    expect(adapter).toBeInstanceOf(CapsuleBackedAnalysisAdapter);
     expect("InstalledMilestoneRunner" in packageApi).toBe(false);
     expect("AzureOpenAIModelBroker" in packageApi).toBe(false);
     expect("azureOpenAIModelBrokerForTest" in packageApi).toBe(false);

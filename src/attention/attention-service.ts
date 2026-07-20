@@ -270,6 +270,7 @@ export class AttentionService {
       }
     }
     if (current.kind !== "question") throw new Error("approval requires exact approval acceptance");
+    if (current.material && input.actor.kind !== "operator") throw new Error("material question requires an operator actor");
     this.validateSubmission(current, input);
     if (!current.options.some((option) => option.optionId === input.optionId)) {
       throw new Error("answer is not one of the immutable options");

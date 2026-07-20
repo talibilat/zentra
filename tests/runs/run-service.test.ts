@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -17,7 +17,8 @@ import { IntakeArtifactStore } from "../../src/intake/intake-artifact-store.js";
 import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
 import { BoundedTicketIntake } from "../../src/intake/ticket-intake.js";
 import { AnalysisCoordinator } from "../../src/analysis/analysis-coordinator.js";
-import { SupervisedAnalysisAdapter } from "../../src/analysis/supervised-analysis-adapter.js";
+import { CapsuleBackedAnalysisAdapter } from "../../src/analysis/capsule-analysis-adapter.js";
+import { DisabledModelBroker } from "../../src/capsule/model-broker.js";
 import { AttentionService } from "../../src/attention/attention-service.js";
 
 const cleanup: string[] = [];
@@ -501,14 +502,27 @@ async function completeAnalysis(
   intake: IntakeService,
   runId: string,
 ) {
-  const repositoryRoot = realpathSync.native(path.resolve(import.meta.dirname, "../.."));
-  const program = realpathSync.native(path.join(repositoryRoot, "fixtures/deterministic-analyzer.mjs"));
-  const executable = realpathSync.native(process.execPath);
-  const fileDigest = (filename: string) => createHash("sha256").update(readFileSync(filename)).digest("hex");
   const attention = new AttentionService(journal);
-  const coordinator = new AnalysisCoordinator(journal, runs, attention, intake, new SupervisedAnalysisAdapter({
-    executable, executableSha256: fileDigest(executable), program, programSha256: fileDigest(program),
-    cwd: realpathSync.native("/tmp"), timeoutMs: 2_000, maxInputBytes: 128 * 1024, maxOutputBytes: 128 * 1024,
+  const coordinator = new AnalysisCoordinator(journal, runs, attention, intake, CapsuleBackedAnalysisAdapter.composeTrusted({
+    execute: async (capsuleRequest) => {
+      const request = JSON.parse(capsuleRequest.rolePrompt.slice(capsuleRequest.rolePrompt.indexOf("\n") + 1));
+      const round = request.answers.length === 0 ? {
+        observations: [{ observationId: "obs", summary: "Observed.", sourceIds: [], repositoryPaths: [], affectedScopes: [] }],
+        uncertainties: [{ uncertaintyId: "choice", question: "Proceed?", materiality: "material", affectedScopes: [], dependentScopes: [],
+          options: [{ optionId: "yes", label: "Yes", impacts: ["Continue"] }], recommendation: { optionId: "yes", rationale: "Required." } }],
+      } : { observations: [{ observationId: "resolved", summary: "Resolved.", sourceIds: [], repositoryPaths: [], affectedScopes: [] }], uncertainties: [] };
+      return { outcome: "completed", openCode: { version: "1.18.3", executableSha256: "a".repeat(64) },
+        model: { id: "zentra/analysis", provider: "fixture", name: "analysis" }, evidence: [{ kind: "plan", summary: JSON.stringify(round) }],
+        cleanup: "completed", brokerTransport: "completed",
+        usage: { seconds: 0.001, inputTokens: 1, outputTokens: 1, costUsd: 0, costUsdNano: 0, toolCalls: 0, modelTurns: 1 } };
+    },
+  }, new DisabledModelBroker(), {
+    snapshots: { prepare: async (request) => ({
+      view: { path: "/tmp/sanitized-analysis-view", revision: createHash("sha256").update(request.projectRevision.commit).digest("hex"),
+        readableScopes: ["src/**", ".analysis-sources/**"], forbiddenPaths: [".git/**", ".zentra/**"] },
+      sourceBundleSha256: "b".repeat(64), sourceManifestPath: ".analysis-sources/manifest.json", release: () => {},
+    }) }, capabilityId: "analysis",
+    transportModelId: "zentra/analysis", imageName: "zentra-opencode-readonly:analysis",
   }));
   const budget = {
     maxRounds: 2, maxObservations: 8, maxQuestions: 8, maxOptionsPerQuestion: 4,

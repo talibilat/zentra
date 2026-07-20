@@ -417,7 +417,7 @@ export function computeRetainedAnalysisSourceSha256(snapshot: TicketIntakeSnapsh
         relativePath: source.relativePath,
         artifactId: source.artifact.artifactId,
         sha256: source.sha256,
-        normalizedContentSha256: createHash("sha256").update(Buffer.from(source.quotedText, "utf8")).digest("hex"),
+        normalizedContentSha256: source.artifact.sha256,
         provenanceSha256: createHash("sha256").update(JSON.stringify(source.provenance)).digest("hex"),
       };
     }))).digest("hex");
