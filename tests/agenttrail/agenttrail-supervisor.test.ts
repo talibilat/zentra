@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentTrailSupervisor,
   createAgentTrailSupervisorForTesting,
+  probeAgentTrailReadinessForTesting,
   type AgentTrailEvidence,
 } from "../../src/agenttrail/agenttrail-supervisor.js";
 import type { ProjectRuntimeLayout } from "../../src/runtime/repository-runtime.js";
@@ -22,6 +24,33 @@ afterEach(async () => {
 });
 
 describe("AgentTrailSupervisor", () => {
+  it.each([
+    ["404", 404, "text/html; charset=utf-8", "<title>AgentTrail</title>", false],
+    ["redirect", 302, "text/html; charset=utf-8", "<title>AgentTrail</title>", false],
+    ["title-matching changed bytes", 200, "text/html; charset=utf-8", "<title>AgentTrail</title>changed", false],
+    ["wrong content type", 200, "application/json", "<title>AgentTrail</title>", false],
+    ["packaged identity", 200, "text/html; charset=utf-8", "<!doctype html><title>AgentTrail</title>", true],
+  ] as const)("requires exact AgentTrail HTML readiness for %s", async (_name, status, contentType, body, expected) => {
+    const reviewedBody = Buffer.from("<!doctype html><title>AgentTrail</title>");
+    const server = createServer((_request, response) => {
+      response.statusCode = status;
+      response.setHeader("content-type", contentType);
+      if (status === 302) response.setHeader("location", "/other");
+      response.end(body);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("fixture server did not bind");
+    try {
+      await expect(probeAgentTrailReadinessForTesting(address.port, reviewedBody)).resolves.toBe(expected);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("starts the packaged sidecar with Python absent from PATH and a minimal environment", async () => {
     const fixture = await traceFixture();
     const evidence: AgentTrailEvidence[] = [];

@@ -25,6 +25,7 @@ import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { RunService } from "../../src/runs/run-service.js";
 import { ServiceLifecycleService } from "../../src/runs/service-lifecycle.js";
+import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 
 const cleanup: string[] = [];
 const planDigest = "a".repeat(64);
@@ -60,6 +61,10 @@ function seedRun(journal: EventJournal, runId: string): void {
     observation: "performed",
     commandId: `start-${runId}`,
   });
+  const agentTrail = seedAgentTrailReady(journal, {
+    serviceId: `service-${runId}`, serviceStartingEventId: starting.eventId,
+    seed: runId === "run-1" ? "3" : "4",
+  });
   const ready = lifecycle.ready({
     serviceId: `service-${runId}`,
     process: normalizedProcess,
@@ -68,7 +73,9 @@ function seedRun(journal: EventJournal, runId: string): void {
     journalSchemaVersion: 6,
     observation: "performed",
     commandId: `ready-${runId}`,
-    causationId: starting.eventId,
+    tokenExpiresAt: "2026-07-20T00:00:00.000Z",
+    ...agentTrail,
+    causationId: agentTrail.agentTrailReadyEventId,
   });
   const runs = new RunService(journal);
   let run = runs.accept({

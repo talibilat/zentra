@@ -34,6 +34,7 @@ import {
   type IntakeArtifactVerificationCapability,
 } from "../intake/intake-artifact-store.js";
 import { projectRun, type RunView } from "./run-projection.js";
+import { verifyAgentTrailReady } from "./service-lifecycle.js";
 
 export interface AcceptRunInput {
   readonly runId: string;
@@ -439,8 +440,11 @@ export class RunService {
     }
     const readyPayload = ServiceReadyPayloadSchema.parse(serviceReady.payload);
     const serviceEvents = readStreamEvents(this.journal, serviceReady.streamId);
+    if (serviceEvents.at(-1)?.eventId !== serviceReady.eventId) {
+      throw new Error("service.ready is not the latest active service lifecycle event after shutdown");
+    }
     const starting = serviceEvents[0];
-    if (starting?.type !== "service.starting" || starting.streamVersion !== 1 || serviceReady.causationId !== starting.eventId) {
+    if (starting?.type !== "service.starting" || starting.streamVersion !== 1) {
       throw new Error("service.ready does not follow service.starting");
     }
     const startingPayload = ServiceStartingPayloadSchema.parse(starting.payload);
@@ -450,6 +454,14 @@ export class RunService {
       throw new Error("service lifecycle identity is contradictory");
     }
     if (startingPayload.observation !== readyPayload.observation) throw new Error("service lifecycle observation is contradictory");
+    verifyAgentTrailReady(this.journal, {
+      serviceId: readyPayload.serviceId,
+      serviceStartingEventId: starting.eventId,
+      agentTrailStreamId: readyPayload.agentTrailStreamId,
+      agentTrailReadyEventId: readyPayload.agentTrailReadyEventId,
+      agentTrailIncarnation: readyPayload.agentTrailIncarnation,
+      causationId: serviceReady.causationId,
+    });
   }
 
   private event(streamId: string, type: string, payload: unknown, causationId: string | null, correlationId: string): NewEvent<string, unknown> {

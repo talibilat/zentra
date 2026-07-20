@@ -22,6 +22,8 @@ describe("resolvePackagedAgentTrail", () => {
 
     expect(resolved.executablePath).toBe(path.join(await packagedAgentTrailRoot(), "agenttrail"));
     expect(resolved.webAssetPath).toBe(path.join(await packagedAgentTrailRoot(), "web", "index.html"));
+    expect(resolved.webAssetByteLength).toBe(resolved.webAssetBytes.byteLength);
+    expect(resolved.webAssetSha256).toBe("0016d4baa63c11617c3ee69b78410c847591e6cbf021d91259d71f1e756a8020");
     expect(resolved.executableSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(resolved.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(resolved.architecture).toBe("arm64");

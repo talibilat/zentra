@@ -10,6 +10,7 @@ import { projectRun } from "../../src/runs/run-projection.js";
 import { RunService } from "../../src/runs/run-service.js";
 import { ServiceLifecycleService } from "../../src/runs/service-lifecycle.js";
 import { storedEventToAgentTailEvent } from "../../src/observability/agent-tail.js";
+import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 import { intakeStreamId } from "../../src/intake/intake-service.js";
 import { IntakeService } from "../../src/intake/intake-service.js";
 import { IntakeArtifactStore } from "../../src/intake/intake-artifact-store.js";
@@ -36,10 +37,15 @@ function fixture(seedService = true) {
       address: { host: "127.0.0.1", port: 43_219 }, tokenExpiresAt: "2026-07-19T13:00:00.000Z",
       observation: "performed", commandId: "fixture-service-start",
     });
+    const agentTrail = seedAgentTrailReady(journal, {
+      serviceId: "zentra-local", serviceStartingEventId: starting.eventId,
+    });
     const ready = services.ready({
       serviceId: "zentra-local", process: accepted.process,
       address: { host: "127.0.0.1", port: 43_219 }, runtimeSchemaVersion: 1, journalSchemaVersion: 2,
-      observation: "performed", commandId: "fixture-service-ready", causationId: starting.eventId,
+      observation: "performed", commandId: "fixture-service-ready",
+      tokenExpiresAt: "2026-07-19T13:00:00.000Z", ...agentTrail,
+      causationId: agentTrail.agentTrailReadyEventId,
     });
     input = { ...accepted, causationId: ready.eventId };
   }
@@ -92,6 +98,9 @@ describe("RunService", () => {
       observation: "performed",
       commandId: "service-start-1",
     });
+    const agentTrail = seedAgentTrailReady(journal, {
+      serviceId: "zentra-local", serviceStartingEventId: starting.eventId,
+    });
     const ready = services.ready({
       serviceId: "zentra-local",
       process: accepted.process,
@@ -100,16 +109,132 @@ describe("RunService", () => {
       journalSchemaVersion: 2,
       observation: "performed",
       commandId: "service-ready-1",
-      causationId: starting.eventId,
+      tokenExpiresAt: "2026-07-19T13:00:00.000Z",
+      ...agentTrail,
+      causationId: agentTrail.agentTrailReadyEventId,
     });
 
     expect([starting.type, ready.type]).toEqual(["service.starting", "service.ready"]);
-    expect(ready.causationId).toBe(starting.eventId);
+    expect(ready.causationId).toBe(agentTrail.agentTrailReadyEventId);
     expect(storedEventToAgentTailEvent(ready)).toMatchObject({
       kind: "service.ready",
       actor: { id: "zentra-runtime", role: "service" },
       operation: { name: "service_startup", status: "completed" },
     });
+    journal.close();
+  });
+
+  it("rejects missing and contradictory mandatory AgentTrail readiness evidence", () => {
+    for (const mode of ["missing", "wrong_incarnation"] as const) {
+      const { journal } = fixture(false);
+      const services = new ServiceLifecycleService(journal);
+      const starting = services.start({
+        serviceId: "zentra-local", process: accepted.process,
+        address: { host: "127.0.0.1", port: 43_219 }, tokenExpiresAt: "2026-07-19T13:00:00.000Z",
+        observation: "performed", commandId: `service-start-${mode}`,
+      });
+      const agentTrail = seedAgentTrailReady(journal, {
+        serviceId: "zentra-local", serviceStartingEventId: starting.eventId, seed: mode === "missing" ? "7" : "8",
+      });
+      const readyEventId = mode === "missing" ? "missing-agenttrail-ready" : agentTrail.agentTrailReadyEventId;
+      expect(() => services.ready({
+        serviceId: "zentra-local", process: accepted.process,
+        address: { host: "127.0.0.1", port: 43_219 }, runtimeSchemaVersion: 1, journalSchemaVersion: 2,
+        tokenExpiresAt: "2026-07-19T13:00:00.000Z", observation: "performed",
+        commandId: `service-ready-${mode}`, ...agentTrail,
+        agentTrailReadyEventId: readyEventId,
+        agentTrailIncarnation: mode === "wrong_incarnation"
+          ? "agenttrail-v1:99999999-9999-4999-8999-999999999999"
+          : agentTrail.agentTrailIncarnation,
+        causationId: readyEventId,
+      })).toThrow(/AgentTrail readiness|incarnation/i);
+      expect(journal.readStream(`service:${accepted.process.processIncarnation}`)).toHaveLength(1);
+      journal.close();
+    }
+  });
+
+  it.each(["degraded", "recovering"] as const)("accepts runs while gateway observability is %s", (state) => {
+    const { journal, service, input } = fixture();
+    const gatewayStream = `gateway:${accepted.process.processIncarnation}`;
+    const types = state === "degraded"
+      ? ["gateway.degraded", "service.critical_attention"]
+      : ["gateway.degraded", "service.critical_attention", "gateway.backfill_target"];
+    journal.append(gatewayStream, 0, types.map((type) => ({
+      streamId: gatewayStream,
+      type,
+      payload: {},
+      causationId: "agenttrail-failure",
+      correlationId: "zentra-local",
+    })));
+
+    expect(service.accept({ ...input, runId: `run-${state}` })).toMatchObject({ lifecycle: "accepted" });
+    journal.close();
+  });
+
+  it("rejects historical service.ready authority after service.shutdown", () => {
+    const { journal, service, input } = fixture();
+    const lifecycle = new ServiceLifecycleService(journal);
+    lifecycle.beginShutdown({
+      serviceId: "zentra-local",
+      process: accepted.process,
+      occurredAt: "2026-07-19T12:29:00.000Z",
+      commandId: "stopping-before-run",
+    });
+    lifecycle.shutdown({
+      serviceId: "zentra-local",
+      process: accepted.process,
+      outcome: "completed",
+      reasonCode: "operator_requested",
+      occurredAt: "2026-07-19T12:30:00.000Z",
+      commandId: "shutdown-before-run",
+    });
+
+    expect(() => service.accept(input)).toThrow(/shutdown|latest|active service/i);
+    journal.close();
+  });
+
+  it("reconciles stale takeover shutdown before new readiness and rejects old authority", () => {
+    const { journal, service, input } = fixture();
+    const oldReady = journal.readStream(`service:${accepted.process.processIncarnation}`).at(-1)!;
+    const lifecycle = new ServiceLifecycleService(journal);
+    const reconciled = lifecycle.reconcileStale({
+      stalePid: accepted.process.pid,
+      staleProcessIncarnation: accepted.process.processIncarnation,
+      detectedAt: "2026-07-19T12:45:00.000Z",
+      commandId: "reconcile-stale-service",
+    })!;
+    const stopping = journal.readStream(`service:${accepted.process.processIncarnation}`)
+      .find(({ type }) => type === "service.stopping")!;
+    expect(stopping).toMatchObject({ causationId: oldReady.eventId, payload: { observation: "reconciled" } });
+    expect(reconciled).toMatchObject({
+      type: "service.shutdown",
+      causationId: stopping.eventId,
+      payload: { outcome: "failed", reasonCode: "internal_failure", observation: "reconciled" },
+    });
+
+    const replacementProcess = { pid: 456, processIncarnation: `process-v2:${"9".repeat(64)}` };
+    const starting = lifecycle.start({
+      serviceId: "zentra-replacement", process: replacementProcess,
+      address: { host: "127.0.0.1", port: 43_220 }, tokenExpiresAt: "2026-07-19T14:00:00.000Z",
+      observation: "performed", commandId: "replacement-start",
+    });
+    const agentTrail = seedAgentTrailReady(journal, {
+      serviceId: "zentra-replacement", serviceStartingEventId: starting.eventId, seed: "9",
+    });
+    const ready = lifecycle.ready({
+      serviceId: "zentra-replacement", process: replacementProcess,
+      address: { host: "127.0.0.1", port: 43_220 }, runtimeSchemaVersion: 1, journalSchemaVersion: 2,
+      tokenExpiresAt: "2026-07-19T14:00:00.000Z", observation: "performed",
+      commandId: "replacement-ready", ...agentTrail, causationId: agentTrail.agentTrailReadyEventId,
+    });
+
+    expect(() => service.accept(input)).toThrow(/shutdown|latest|active service/i);
+    expect(service.accept({
+      ...input,
+      runId: "run-after-takeover",
+      process: replacementProcess,
+      causationId: ready.eventId,
+    })).toMatchObject({ lifecycle: "accepted", activeProcess: replacementProcess });
     journal.close();
   });
 
@@ -218,10 +343,14 @@ describe("RunService", () => {
       serviceId: "zentra-local", process: newProcess, address: { host: "127.0.0.1", port: 43_220 },
       tokenExpiresAt: "2026-07-19T14:00:00.000Z", observation: "performed", commandId: "takeover-service-start",
     });
+    const agentTrail = seedAgentTrailReady(reopenedJournal, {
+      serviceId: "zentra-local", serviceStartingEventId: starting.eventId, seed: "2",
+    });
     const ready = lifecycle.ready({
       serviceId: "zentra-local", process: newProcess, address: { host: "127.0.0.1", port: 43_220 },
       runtimeSchemaVersion: 1, journalSchemaVersion: 2, observation: "performed",
-      commandId: "takeover-service-ready", causationId: starting.eventId,
+      commandId: "takeover-service-ready", tokenExpiresAt: "2026-07-19T14:00:00.000Z",
+      ...agentTrail, causationId: agentTrail.agentTrailReadyEventId,
     });
     const reopenedService = new RunService(reopenedJournal);
     run = reopenedService.reopenWithProcess(input.runId, run.streamVersion, "takeover-run", newProcess, ready.eventId);

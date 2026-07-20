@@ -355,6 +355,8 @@ export {
   RunReadyPayloadSchema,
   RunSourceSchema,
   ServiceReadyPayloadSchema,
+  ServiceShutdownPayloadSchema,
+  ServiceStoppingPayloadSchema,
   ServiceStartingPayloadSchema,
   runStreamId,
   serviceStreamId,
@@ -393,6 +395,34 @@ export { RunService } from "./runs/run-service.js";
 export type { AcceptRunInput, RunCommandContext } from "./runs/run-service.js";
 export { RunPreflightCoordinator } from "./runs/run-preflight.js";
 export { ServiceLifecycleService } from "./runs/service-lifecycle.js";
+export { LoopbackGateway } from "./gateway/loopback-gateway.js";
+export type { GatewayReadiness, GatewaySession, LoopbackGatewayOptions } from "./gateway/loopback-gateway.js";
+export {
+  GATEWAY_EVENT_SCHEMA_VERSION,
+  GatewayBackfillTargetPayloadSchema,
+  GatewayDegradedPayloadSchema,
+  GatewayLifecycleService,
+  GatewayRecoveredPayloadSchema,
+  replayGatewayLifecycle,
+} from "./gateway/gateway-events.js";
+export type { GatewayLifecycleEvidence, GatewayLifecycleIdentity } from "./gateway/gateway-events.js";
+export {
+  SERVICE_ATTENTION_SCHEMA_VERSION,
+  ServiceCriticalAttentionPayloadSchema,
+  replayServiceAttention,
+} from "./gateway/service-attention.js";
+export type { ServiceAttentionEvidence } from "./gateway/service-attention.js";
+export { startZentraService } from "./service/start-service.js";
+export type {
+  AgentTrailService,
+  GatewayService,
+  RunningZentraService,
+  RuntimeStateService,
+  ServiceTraceSink,
+  ServiceShutdownReason,
+  StartZentraServiceDependencies,
+  StartZentraServiceOptions,
+} from "./service/start-service.js";
 export { projectRevisionMatches, resolveProjectRevision } from "./runs/project-revision.js";
 export {
   BoundedTicketIntake,

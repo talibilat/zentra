@@ -11,6 +11,7 @@ import { IntakeService, intakeStreamId } from "../../src/intake/intake-service.j
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { RunService } from "../../src/runs/run-service.js";
 import { ServiceLifecycleService } from "../../src/runs/service-lifecycle.js";
+import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 
 const cleanup: string[] = [];
 
@@ -406,6 +407,9 @@ function preparedRun(options: { readonly sourceAtProjectRoot?: boolean } = {}) {
     observation: "performed",
     commandId: "service-start-intake",
   });
+  const agentTrail = seedAgentTrailReady(journal, {
+    serviceId: "intake-service", serviceStartingEventId: starting.eventId, seed: "5",
+  });
   const ready = lifecycle.ready({
     serviceId: "intake-service",
     process,
@@ -414,7 +418,9 @@ function preparedRun(options: { readonly sourceAtProjectRoot?: boolean } = {}) {
     journalSchemaVersion: 2,
     observation: "performed",
     commandId: "service-ready-intake",
-    causationId: starting.eventId,
+    tokenExpiresAt: "2026-07-19T20:00:00.000Z",
+    ...agentTrail,
+    causationId: agentTrail.agentTrailReadyEventId,
   });
   const reference = Buffer.from(path.resolve(sourceRoot), "utf8");
   let run = runs.accept({
