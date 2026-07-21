@@ -119,6 +119,10 @@ import {
   SchedulerResourceSchema,
   SchedulerTaskSchema,
 } from "../scheduling/scheduler-contracts.js";
+import {
+  OpenCodeSubagentProbeEventPayloadSchema,
+  projectOpenCodeSubagentDenial,
+} from "../harnesses/opencode-subagent-capability.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -148,6 +152,7 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "milestone.timed_out", "milestone.failed",
   "worker.bound", "worker.started", "worker.heartbeat", "worker.observed", "worker.uncertain",
   "worker.cleanup_observed", "worker.terminal",
+  "subagent.capability_probe_observed", "subagent.capability_denied",
   "path_claim.requested", "path_claim.acquired", "path_claim.denied",
   "path_claim.renewed", "path_claim.released", "path_claim.diff_observed",
   "writer.dispatch_started", "writer.receipt_observed", "writer.evidence_missing",
@@ -337,6 +342,8 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "worker.uncertain": parseWith((payload) => parseWorkerEventPayload("worker.uncertain", payload)),
   "worker.cleanup_observed": parseWith((payload) => parseWorkerEventPayload("worker.cleanup_observed", payload)),
   "worker.terminal": parseWith((payload) => parseWorkerEventPayload("worker.terminal", payload)),
+  "subagent.capability_probe_observed": OpenCodeSubagentProbeEventPayloadSchema,
+  "subagent.capability_denied": OpenCodeSubagentProbeEventPayloadSchema,
   "path_claim.requested": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, paths: z.array(Id), canonicalPaths: z.array(Id), leaseToken: z.string().uuid() }),
   "path_claim.acquired": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, paths: z.array(Id), canonicalPaths: z.array(Id), leaseToken: z.string().uuid(), acquiredAt: z.string().datetime(), expiresAt: z.string().datetime() }),
   "path_claim.denied": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, conflictingClaimIds: z.array(Id), deniedAt: z.string().datetime() }),
@@ -697,6 +704,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedWebResearchPayload(event.type, event.payload)
     : event.type.startsWith("worker.")
       ? redactedWorkerPayload(event.type, event.payload)
+    : event.type.startsWith("subagent.")
+      ? redactedSubagentProbePayload(event.payload)
     : isPotentialOpenCodeRoleEvent(event)
       ? redactedOpenCodeMilestonePayload(event.type, event.payload)
       : projectExactSafeFields(event.type, event.payload);
@@ -1296,6 +1305,7 @@ function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("capability_envelope.")) return `capability-envelope:${event.streamId}`;
   if (event.type.startsWith("web_research.")) return `web-research:${payloadString(event.payload, "requestId")!}`;
   if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
+  if (event.type.startsWith("subagent.")) return `subagent-probe:${payloadString(event.payload, "probeId")!}`;
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
   if (event.type.startsWith("pod.")) return `pod:${event.streamId}`;
@@ -1360,6 +1370,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
   if (event.type.startsWith("pod.")) return { id: "zentra-pod-coordinator", role: "subordinate_coordinator" };
   if (event.type.startsWith("lease.")) return { id: "zentra-daemon-scheduler", role: "scheduler" };
   if (event.type.startsWith("scheduler.")) return { id: "zentra-daemon-scheduler", role: "scheduler" };
+  if (event.type.startsWith("subagent.")) return { id: "zentra-subagent-conformance", role: "policy" };
   if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
   if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
   if (event.type.startsWith("web_research.")) {
@@ -1470,6 +1481,7 @@ function operationName(event: StoredEvent): string {
   if (event.type.startsWith("capability_envelope.")) return "capability_envelope";
   if (event.type.startsWith("web_research.")) return "web_research";
   if (event.type.startsWith("worker.")) return "worker";
+  if (event.type.startsWith("subagent.")) return "native_subagent_capability";
   if (event.type.startsWith("lease.")) return "lease_health";
   if (event.type.startsWith("scheduler.")) return "scheduling";
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
@@ -1543,6 +1555,8 @@ function operationStatus(event: StoredEvent): string {
     return payloadString(event.payload, "outcome") === "completed" ? "completed" : "waiting";
   }
   if (type === "worker.terminal") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "subagent.capability_probe_observed") return "completed";
+  if (type === "subagent.capability_denied") return "denied";
   if (type === "lease.expired") return "timed_out";
   if (type === "lease.released" || type === "lease.reconciled") return "completed";
   if (type.startsWith("lease.")) return "running";
@@ -1887,6 +1901,10 @@ function redactedWorkerPayload(type: string, payload: unknown): unknown {
       effectDigest: digestCanonical(binding.envelope.effects),
     }),
   });
+}
+
+function redactedSubagentProbePayload(payload: unknown): unknown {
+  return projectOpenCodeSubagentDenial(payload);
 }
 
 function redactedOpenCodeMilestonePayload(type: string, payload: unknown): unknown {

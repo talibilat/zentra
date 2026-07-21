@@ -122,7 +122,115 @@ Unknown parents, self-cycles, duplicate worker identities, authority expansion, 
 
 OpenCode parsing and translation are isolated in `OpenCodeWorkerEventAdapter`.
 
-Local inspection on 2026-07-18 confirmed installed OpenCode 1.18.3 documents `run --format json` and agent selection but no stable nested-agent lifecycle or parent, budget, usage, and terminal protocol.
+Local inspection on 2026-07-21 identified the canonical installed OpenCode executable as version `1.18.3` and SHA-256 `43f7083d450567706a80b6441331a25b5ed6d6c9f742826790545b068229cbb2`.
+
+The externally signed negative `1.18.3` report remains retained as the genuine v2 journal fixture `tests/fixtures/retained-opencode-subagent-v2.sqlite.fixture` and in the approved temporary evidence journal `zentra-issue-104-subagent-probe-v2-final.sqlite`.
+
+OpenCode release `1.18.3` is source revision `127bdb30784d508cc556c71a0f32b508a3061517`.
+
+Its Task tool creates a child session with `parentID`, returns parent and child session IDs in tool metadata, and cancels a foreground child when the foreground Task call is interrupted.
+
+It also supports experimental background subagents and task-ID session resumption.
+
+Those mechanisms are OpenCode session lifecycle features rather than a stable Zentra execution protocol.
+
+The `run --format json` implementation filters message-part events to the root session, so it does not expose a complete attributed child event stream to the supervising Zentra process.
+
+The Task tool does not carry Zentra task, worker, or process-incarnation identities.
+
+It does not bind child sessions to the parent's Zentra authority and path claims, shared task budget and resource reservations, at-most-60-second heartbeat, canonical terminal outcome, descendant-process absence proof, or restart reconciliation decision.
+
+OpenCode's `deriveSubagentSessionPermission` preserves parent deny and external-directory rules but otherwise delegates capability selection to the configured subagent.
+
+That is useful OpenCode policy behavior, but it is not proof of Zentra envelope containment.
+
+Background child lifecycle and task-ID resumption also do not prove cancellation propagation or no-retry handling after an uncertain effect.
+
+Zentra therefore defines `zentra.opencode-native-subagents.v2` with these mandatory contracts:
+
+- Stable parent and child identity.
+- Exact Zentra task, worker, and process-incarnation mapping.
+- Inherited and non-expanded authority and logical path claims.
+- Shared budget and resource accounting.
+- Matching journal and AgentTrail attribution.
+- An active heartbeat no more than 60 seconds apart.
+- Parent cancellation propagation.
+- Process-group and descendant cleanup evidence.
+- Restart reconciliation without implicit redispatch.
+- Exactly one canonical terminal outcome.
+- No automatic retry after an uncertain effect.
+
+Every contract requires one explicit observation with references to retained command or source-attestation evidence.
+
+Observations use `supported`, `not_observable`, or `unsupported` rather than claiming that an unexecuted native lifecycle check failed.
+
+Missing, duplicate, unsupported-version, changed-version, source-revision, executable-identity, executable-digest, noncanonical-path, incomplete, or truncated evidence fails closed.
+
+The trusted identity fixes the canonical executable path, executable SHA-256, version, and source revision before probing.
+
+The probe rejects a different executable before spawning it even when that executable prints `1.18.3`.
+
+When the exact canonical path remains attested but its digest has drifted, the probe executes only bounded `--version` identity evidence.
+
+It records the supported expected path, digest, version, and source revision together with the observed digest and version, classifies the capability as `denied` with `version_drift` when applicable, and does not execute or claim lifecycle capability evidence from the unsupported binary.
+
+The probe invokes the canonical executable directly with `shell: false`, a minimal environment, bounded output, bounded deadlines, and no credential values.
+
+Only after the complete reviewed executable and source identity matches does it sequentially retain raw output, byte counts, SHA-256 digests, exit status, and argv for root help, debug help, run help, pure resolved configuration, agent inventory, primary and subagent tool inventories, session help, and server help in addition to `--version`.
+
+The pure configuration must report an empty plugin list.
+
+The source attestation binds release revision `127bdb30784d508cc556c71a0f32b508a3061517` to the inspected Task tool, subagent-permission, session, JSON-run, and session HTTP API implementation paths.
+
+The experimental HTTP API exposes session status, child listing, and abort routes at API version `0.0.1`.
+
+Those routes do not expose Zentra identity, shared budgets, heartbeats, cleanup proof, reconciliation, or canonical child terminal outcomes.
+
+No stable native child-lifecycle conformance endpoint is exposed by the command, debug, session, or server surfaces.
+
+Parent and child session identity is source-attested as supported.
+
+The other ten contracts are classified as `not_observable` or `unsupported`, so the feature is denied without inventing runtime failures.
+
+The executable is digested before and after invocation.
+
+The operator supplies a private Ed25519 key from a canonical, bounded, owner-private file.
+
+The complete report digest and signature cover the probe and project identities, executable identity, source revision, every raw command evidence record, every observation, and the terminal denial.
+
+New probe reports use strict report and journal schema v3.
+
+The retained v2 schema is separately strict and exactly matches the signed `1.18.3` evidence: it has the original four-path source attestation and does not add `expectedExecutable`, `capability`, or `classification` to the signed payload.
+
+Verification selects the unsigned canonical payload by the signed report version, recomputes its report and command-evidence digests, and verifies its Ed25519 signature against the configured trusted signer digest.
+
+Unknown report and journal versions fail closed.
+
+Verification requires the expected public-key SHA-256 or a configured trust store.
+
+An embedded public key never establishes trust by itself.
+
+The operator entrypoint pins the exact canonical executable, version, digest, and source revision instead of accepting caller-defined expected identities.
+
+After `pnpm build`, operators run `node scripts/probe-opencode-subagents.mjs` with the exact executable, canonical working directory and home, journal database, retained report path, project and probe identities, private signing key, and trusted public-key digest.
+
+The journal rejects reports whose signed project or probe identity differs from the target stream.
+
+It atomically records the complete signed report under `subagent.capability_probe_observed` and `subagent.capability_denied`.
+
+An exact retry replays the retained pair without duplication, while a different report for that probe identity is rejected.
+
+AgentTrail accepts only strict v2 and v3 journal evidence.
+
+Its versioned public denial projection preserves the signed report digest, trusted signer digest, report schema version, evidence aggregate digest, and exact probe and project identity without projecting raw command output.
+
+The projection classifies retained v2 evidence as `legacy_v2` and `legacy_retained_denial`; these public fields are not inserted into or used to reinterpret the original signed payload.
+
+Fixture evidence can prove the generic positive and negative contracts but is explicitly ineligible to enable production tools.
+
+The retained externally signed `1.18.3` report is negative, so there is no production enablement path for this provider revision.
+
+Closure also requires signed drift denial, positive and negative fixtures, and the continued absence of any production enablement path.
 
 Production OpenCode configurations therefore keep the `task` tool denied.
 
@@ -150,7 +258,9 @@ Azure provider configuration is strict, host-brokered, and deployment-bound for 
 
 Zentra assigns one research task to an OpenCode worker.
 
-The worker may inspect the repository, search documentation, browse approved web sources, and use internal research subagents.
+The worker may inspect the repository, search documentation, and browse approved web sources.
+
+Native internal research subagents remain denied for OpenCode `1.18.3`.
 
 The worker returns findings with source and provenance evidence.
 

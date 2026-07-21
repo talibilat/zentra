@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "observations": [
+    { "contract": "parent_child_identity", "status": "supported", "evidenceRefs": ["fixture:parent-child"], "reason": "Fixture proves parent and child identity." },
+    { "contract": "zentra_task_worker_incarnation_mapping", "status": "supported", "evidenceRefs": ["fixture:mapping"], "reason": "Fixture proves exact Zentra identity mapping." },
+    { "contract": "authority_path_containment", "status": "supported", "evidenceRefs": ["fixture:authority"], "reason": "Fixture proves authority containment." },
+    { "contract": "shared_budget_resource_accounting", "status": "supported", "evidenceRefs": ["fixture:budget"], "reason": "Fixture proves shared accounting." },
+    { "contract": "journal_agenttrail_attribution", "status": "supported", "evidenceRefs": ["fixture:attribution"], "reason": "Fixture proves matching attribution." },
+    { "contract": "heartbeat_lte_60s", "status": "supported", "evidenceRefs": ["fixture:heartbeat"], "reason": "Fixture proves bounded heartbeat." },
+    { "contract": "cancellation_propagation", "status": "supported", "evidenceRefs": ["fixture:cancellation"], "reason": "Fixture proves cancellation propagation." },
+    { "contract": "process_descendant_cleanup", "status": "supported", "evidenceRefs": ["fixture:cleanup"], "reason": "Fixture proves descendant cleanup." },
+    { "contract": "restart_reconciliation", "status": "supported", "evidenceRefs": ["fixture:restart"], "reason": "Fixture proves restart reconciliation." },
+    { "contract": "canonical_terminal_outcome", "status": "supported", "evidenceRefs": ["fixture:terminal"], "reason": "Fixture proves one canonical outcome." },
+    { "contract": "uncertain_effect_no_retry", "status": "supported", "evidenceRefs": ["fixture:no-retry"], "reason": "Fixture proves no uncertain retry." }
+  ]
+}
