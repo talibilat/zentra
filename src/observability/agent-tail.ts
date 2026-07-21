@@ -110,6 +110,7 @@ import {
 } from "../planning/planning-contracts.js";
 import { WriterCheckpointSchema } from "../contracts/writer-request.js";
 import { WriterReceiptSchema } from "../workspaces/path-claims.js";
+import { parsePodEventPayload } from "../pods/pod-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -180,6 +181,12 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "approval.reserved", "approval.reservation_consumed",
   "attention.raised", "attention.resolved", "attention.index_raised",
   "attention.index_resolved", "attention.scope_admitted", "attention.identity_reserved",
+  "pod.registered", "pod.task_relationships_recorded", "pod.admitted", "pod.lease_received", "pod.workspace_lease_received", "pod.started", "pod.blocked",
+  "pod.attention_raised", "pod.attention_resolved", "pod.assignment_recorded",
+  "pod.assignment_dispatched", "pod.assignment_invocation_started", "pod.execution_reserved", "pod.execution_bound", "pod.assignment_observed", "pod.ownership_intent_observed",
+  "pod.checkpointed", "pod.evidence_recorded", "pod.revised",
+  "pod.reconciliation_required", "pod.reconciliation_resolved", "pod.cancel_requested", "pod.completed", "pod.cancelled",
+  "pod.denied", "pod.timed_out", "pod.failed",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -449,6 +456,33 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "attention.index_resolved": AttentionIndexResolvedPayloadSchema,
   "attention.scope_admitted": ScopeAdmissionPayloadSchema,
   "attention.identity_reserved": AttentionIdentityReservationPayloadSchema,
+  "pod.registered": parseWith((payload) => parsePodEventPayload("pod.registered", payload)),
+  "pod.task_relationships_recorded": parseWith((payload) => parsePodEventPayload("pod.task_relationships_recorded", payload)),
+  "pod.admitted": parseWith((payload) => parsePodEventPayload("pod.admitted", payload)),
+  "pod.lease_received": parseWith((payload) => parsePodEventPayload("pod.lease_received", payload)),
+  "pod.workspace_lease_received": parseWith((payload) => parsePodEventPayload("pod.workspace_lease_received", payload)),
+  "pod.started": parseWith((payload) => parsePodEventPayload("pod.started", payload)),
+  "pod.blocked": parseWith((payload) => parsePodEventPayload("pod.blocked", payload)),
+  "pod.attention_raised": parseWith((payload) => parsePodEventPayload("pod.attention_raised", payload)),
+  "pod.attention_resolved": parseWith((payload) => parsePodEventPayload("pod.attention_resolved", payload)),
+  "pod.assignment_recorded": parseWith((payload) => parsePodEventPayload("pod.assignment_recorded", payload)),
+  "pod.assignment_dispatched": parseWith((payload) => parsePodEventPayload("pod.assignment_dispatched", payload)),
+  "pod.assignment_invocation_started": parseWith((payload) => parsePodEventPayload("pod.assignment_invocation_started", payload)),
+  "pod.execution_reserved": parseWith((payload) => parsePodEventPayload("pod.execution_reserved", payload)),
+  "pod.execution_bound": parseWith((payload) => parsePodEventPayload("pod.execution_bound", payload)),
+  "pod.assignment_observed": parseWith((payload) => parsePodEventPayload("pod.assignment_observed", payload)),
+  "pod.ownership_intent_observed": parseWith((payload) => parsePodEventPayload("pod.ownership_intent_observed", payload)),
+  "pod.checkpointed": parseWith((payload) => parsePodEventPayload("pod.checkpointed", payload)),
+  "pod.evidence_recorded": parseWith((payload) => parsePodEventPayload("pod.evidence_recorded", payload)),
+  "pod.revised": parseWith((payload) => parsePodEventPayload("pod.revised", payload)),
+  "pod.reconciliation_required": parseWith((payload) => parsePodEventPayload("pod.reconciliation_required", payload)),
+  "pod.reconciliation_resolved": parseWith((payload) => parsePodEventPayload("pod.reconciliation_resolved", payload)),
+  "pod.cancel_requested": parseWith((payload) => parsePodEventPayload("pod.cancel_requested", payload)),
+  "pod.completed": parseWith((payload) => parsePodEventPayload("pod.completed", payload)),
+  "pod.cancelled": parseWith((payload) => parsePodEventPayload("pod.cancelled", payload)),
+  "pod.denied": parseWith((payload) => parsePodEventPayload("pod.denied", payload)),
+  "pod.timed_out": parseWith((payload) => parsePodEventPayload("pod.timed_out", payload)),
+  "pod.failed": parseWith((payload) => parsePodEventPayload("pod.failed", payload)),
 };
 
 export interface AgentTailActor {
@@ -572,6 +606,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     : event.type.startsWith("run.") || event.type.startsWith("preflight.") || event.type.startsWith("service.") ||
       event.type.startsWith("agenttrail.") || event.type.startsWith("gateway.")
       ? AGENT_TAIL_PAYLOAD_SCHEMAS[event.type as AgentTailEventType].parse(event.payload)
+    : event.type.startsWith("pod.")
+      ? projectExactSafeFields(event.type, event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -820,6 +856,7 @@ function identitiesFor(event: StoredEvent, payload: unknown): AgentTailIdentitie
   assign("task_id", payloadString(payload, "taskId") ??
     (event.type.startsWith("task.") || event.type.startsWith("artifact.") ? event.streamId : null));
   assign("pod_id", payloadString(payload, "podId"));
+  if (event.type.startsWith("pod.")) assign("pod_id", event.streamId);
   assign("worker_id", payloadString(payload, "workerId") ?? payloadString(payload, "actorId"));
   assign("process_incarnation", payloadString(payload, "processIncarnation") ??
     payloadString(payloadRecord(payload, "process"), "processIncarnation"));
@@ -840,6 +877,17 @@ const SAFE_FIELDS_BY_EVENT = new Map<string, readonly string[]>([
   ["milestone.completed", ["outcome"]], ["milestone.failed", ["outcome"]],
   ["milestone.cancelled", ["outcome"]], ["milestone.denied", ["outcome"]],
   ["milestone.timed_out", ["outcome"]],
+  ["pod.registered", []], ["pod.admitted", []], ["pod.started", []], ["pod.blocked", []],
+  ["pod.lease_received", []],
+  ["pod.workspace_lease_received", []],
+  ["pod.task_relationships_recorded", []],
+  ["pod.assignment_observed", ["assignmentId", "dispatchId", "outcome"]],
+  ["pod.assignment_invocation_started", ["assignmentId", "dispatchId"]],
+  ["pod.execution_reserved", ["assignmentId", "dispatchId", "executionId"]],
+  ["pod.execution_bound", ["assignmentId", "dispatchId", "executionId", "processId"]],
+  ["pod.cancel_requested", []],
+  ["pod.completed", ["outcome"]], ["pod.cancelled", ["outcome"]],
+  ["pod.denied", ["outcome"]], ["pod.timed_out", ["outcome"]], ["pod.failed", ["outcome"]],
 ]);
 
 function projectExactSafeFields(type: string, payload: unknown): unknown {
@@ -923,6 +971,7 @@ function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("worker.")) return `worker:${payloadString(event.payload, "workerId")!}`;
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
+  if (event.type.startsWith("pod.")) return `pod:${event.streamId}`;
   if (event.type.startsWith("milestone.task_")) {
     const taskId = payloadString(event.payload, "taskId");
     if (taskId !== null) return `milestone:${event.streamId}:task:${taskId}`;
@@ -976,6 +1025,7 @@ function actorFor(event: StoredEvent): AgentTailActor {
   if (event.type.startsWith("run.") || event.type.startsWith("preflight.")) {
     return { id: "zentra-run-service", role: "orchestrator" };
   }
+  if (event.type.startsWith("pod.")) return { id: "zentra-pod-coordinator", role: "subordinate_coordinator" };
   if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
   if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
   if (event.type.startsWith("web_research.")) {
