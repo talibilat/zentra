@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -8,12 +8,13 @@ const packageRoot = path.join(root, "agenttrail", "package", "darwin-arm64");
 const executable = path.join(packageRoot, "agenttrail");
 const manifestPath = path.join(packageRoot, "manifest.json");
 const attestationPath = path.join(packageRoot, "attestation.json");
-const reviewedManifestSha256 = "c2c1e2aded2399cf9bde5808824b930bd437857be561eab8c2c917d651b4a74d";
-const reviewedExecutableSha256 = "c1469d5feb7d6a6a4e79db6d1446014205255ea88dcdcb5fb59d40ca4f773e49";
-const reviewedBuildInputsSha256 = "04248f5801b8b18b7533be6ae186e7d2a00d29302b01d211599a92fce7e68fb9";
+const reviewedManifestSha256 = "3236995259bdf7ad61925d0e61a2887b5bbaa79c20ff224278bd7e4e6efe89c7";
+const reviewedExecutableSha256 = "bd379e002704e52d8a5211e6a204bbe0d09e8da49dfa4787b074dc56c1cdd36b";
+const reviewedBuildInputsSha256 = "11494d4051fffe42bb8cba2b90e4f8d2347794faa579e30cda8bca32fa46ccf2";
 
 try {
   canonicalDirectory(packageRoot);
+  assertExactPackageFiles();
   const manifestBytes = regularFile(manifestPath, 0o644);
   const attestationBytes = regularFile(attestationPath, 0o644);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -23,7 +24,7 @@ try {
     manifest.product !== "AgentTrail" ||
     manifest.platform !== "darwin" ||
     manifest.architecture !== "arm64" ||
-    manifest.source?.treeSha256 !== "5008e9046d5767fe9e1017d81fdf3da8c4dbfc86e68ce3778fec338efb580c49" ||
+    manifest.source?.treeSha256 !== "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a" ||
     manifest.build?.inputsSha256 !== reviewedBuildInputsSha256 ||
     sha256(manifestBytes) !== reviewedManifestSha256
   ) throw new Error("manifest identity is malformed or unsupported");
@@ -40,6 +41,9 @@ try {
       throw new Error(`${relative} does not match its manifest digest`);
     }
   }
+  if (new Set(Object.values(manifest.files).map((file) => file.sha256)).size !== Object.keys(manifest.files).length) {
+    throw new Error("package contains duplicate attested payloads");
+  }
   const executableBytes = readFileSync(executable);
   if (executableBytes.readUInt32LE(0) !== 0xfeedfacf || executableBytes.readUInt32LE(4) !== 0x0100000c) {
     throw new Error("executable is not an arm64 Mach-O file");
@@ -52,6 +56,16 @@ try {
 } catch (error) {
   console.error(`AgentTrail package verification failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
+}
+
+function assertExactPackageFiles() {
+  const root = readdirSync(packageRoot).sort();
+  if (JSON.stringify(root) !== JSON.stringify(["agenttrail", "attestation.json", "manifest.json", "web"])) {
+    throw new Error("package contains an unattested or missing file");
+  }
+  if (JSON.stringify(readdirSync(path.join(packageRoot, "web")).sort()) !== JSON.stringify(["index.html"])) {
+    throw new Error("package contains an unattested web file");
+  }
 }
 
 function canonicalDirectory(directory) {

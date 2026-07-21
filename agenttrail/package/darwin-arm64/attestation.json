@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "statementType": "zentra.agenttrail.package.v1",
-  "manifestSha256": "c2c1e2aded2399cf9bde5808824b930bd437857be561eab8c2c917d651b4a74d",
-  "sourceTreeSha256": "5008e9046d5767fe9e1017d81fdf3da8c4dbfc86e68ce3778fec338efb580c49"
+  "manifestSha256": "3236995259bdf7ad61925d0e61a2887b5bbaa79c20ff224278bd7e4e6efe89c7",
+  "sourceTreeSha256": "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a"
 }

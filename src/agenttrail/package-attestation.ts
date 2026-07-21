@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { access, lstat, open, realpath, type FileHandle } from "node:fs/promises";
+import { access, lstat, open, readdir, realpath, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-const IMPORTED_SOURCE_TREE_SHA256 = "5008e9046d5767fe9e1017d81fdf3da8c4dbfc86e68ce3778fec338efb580c49";
-const REVIEWED_MANIFEST_SHA256 = "c2c1e2aded2399cf9bde5808824b930bd437857be561eab8c2c917d651b4a74d";
-const REVIEWED_EXECUTABLE_SHA256 = "c1469d5feb7d6a6a4e79db6d1446014205255ea88dcdcb5fb59d40ca4f773e49";
-const REVIEWED_BUILD_INPUTS_SHA256 = "04248f5801b8b18b7533be6ae186e7d2a00d29302b01d211599a92fce7e68fb9";
+const IMPORTED_SOURCE_TREE_SHA256 = "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a";
+const REVIEWED_MANIFEST_SHA256 = "3236995259bdf7ad61925d0e61a2887b5bbaa79c20ff224278bd7e4e6efe89c7";
+const REVIEWED_EXECUTABLE_SHA256 = "bd379e002704e52d8a5211e6a204bbe0d09e8da49dfa4787b074dc56c1cdd36b";
+const REVIEWED_BUILD_INPUTS_SHA256 = "11494d4051fffe42bb8cba2b90e4f8d2347794faa579e30cda8bca32fa46ccf2";
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MACH_O_64_MAGIC = 0xfeedfacf;
 const CPU_TYPE_ARM64 = 0x0100000c;
@@ -108,6 +108,7 @@ export async function verifyAgentTrailPackageRoot(
     throw new Error("AgentTrail package root must be absolute");
   }
   const packageRoot = await canonicalDirectory(candidateRoot, "AgentTrail package root");
+  await assertExactPackageFiles(packageRoot);
   const executablePath = path.join(packageRoot, "agenttrail");
   if (candidateExecutablePath !== undefined && candidateExecutablePath !== executablePath) {
     throw new Error("AgentTrail alternate executable identity is forbidden");
@@ -130,6 +131,9 @@ export async function verifyAgentTrailPackageRoot(
     attestation = AttestationSchema.parse(JSON.parse(attestationBytes.toString("utf8")));
   } catch {
     throw new Error("AgentTrail manifest or package attestation is unsigned or malformed");
+  }
+  if (new Set(Object.values(manifest.files).map((file) => file.sha256)).size !== Object.keys(manifest.files).length) {
+    throw new Error("AgentTrail package contains duplicate attested payloads");
   }
   if (attestation.manifestSha256 !== manifestSha256) {
     throw new Error("AgentTrail package attestation does not sign the current manifest");
@@ -155,6 +159,22 @@ export async function verifyAgentTrailPackageRoot(
     manifestSha256,
     architecture: "arm64",
   };
+}
+
+async function assertExactPackageFiles(packageRoot: string): Promise<void> {
+  const rootEntries = await readdir(packageRoot, { withFileTypes: true });
+  const expectedRoot = ["agenttrail", "attestation.json", "manifest.json", "web"];
+  if (JSON.stringify(rootEntries.map((entry) => entry.name).sort()) !== JSON.stringify(expectedRoot)) {
+    throw new Error("AgentTrail package contains an unattested or missing file");
+  }
+  const web = rootEntries.find((entry) => entry.name === "web");
+  if (web === undefined || !web.isDirectory() || web.isSymbolicLink()) {
+    throw new Error("AgentTrail package web directory identity is invalid");
+  }
+  const webEntries = await readdir(path.join(packageRoot, "web"), { withFileTypes: true });
+  if (webEntries.length !== 1 || webEntries[0]!.name !== "index.html" || !webEntries[0]!.isFile() || webEntries[0]!.isSymbolicLink()) {
+    throw new Error("AgentTrail package contains an unattested web file");
+  }
 }
 
 async function canonicalDirectory(candidate: string, label: string): Promise<string> {

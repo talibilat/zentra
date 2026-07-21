@@ -23,7 +23,7 @@ describe("resolvePackagedAgentTrail", () => {
     expect(resolved.executablePath).toBe(path.join(await packagedAgentTrailRoot(), "agenttrail"));
     expect(resolved.webAssetPath).toBe(path.join(await packagedAgentTrailRoot(), "web", "index.html"));
     expect(resolved.webAssetByteLength).toBe(resolved.webAssetBytes.byteLength);
-    expect(resolved.webAssetSha256).toBe("0016d4baa63c11617c3ee69b78410c847591e6cbf021d91259d71f1e756a8020");
+    expect(resolved.webAssetSha256).toBe("e292c91f29f4f931e7808afbcd8ebcc661d8e4c90de16edfa7964cea340a0351");
     expect(resolved.executableSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(resolved.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(resolved.architecture).toBe("arm64");
@@ -46,7 +46,13 @@ describe("resolvePackagedAgentTrail", () => {
     await import("node:fs/promises").then(({ rename }) => rename(executable, alternate));
     await symlink(alternate, executable);
 
-    await expect(verifyAgentTrailPackageRoot(root)).rejects.toThrow(/symlink/);
+    await expect(verifyAgentTrailPackageRoot(root)).rejects.toThrow(/symlink|unattested/);
+  });
+
+  it("rejects every extra unattested packaged file", async () => {
+    const root = await copyPackage();
+    await writeFile(path.join(root, "duplicate-agenttrail"), await readFile(path.join(root, "agenttrail")));
+    await expect(verifyAgentTrailPackageRoot(root)).rejects.toThrow(/unattested/);
   });
 
   it("rejects relative and alternate executable identities", async () => {

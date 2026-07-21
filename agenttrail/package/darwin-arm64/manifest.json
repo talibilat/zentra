@@ -7,7 +7,7 @@
   "source": {
     "repository": "https://github.com/talibilat/agent-trail.git",
     "commit": "f7d3e20ac1c7a8be3b572161058480df10ab4ffb",
-    "treeSha256": "5008e9046d5767fe9e1017d81fdf3da8c4dbfc86e68ce3778fec338efb580c49",
+    "treeSha256": "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a",
     "license": "MIT"
   },
   "build": {
@@ -26,18 +26,18 @@
       "pyinstaller-hooks-contrib": "2025.5",
       "setuptools": "80.9.0"
     },
-    "inputsSha256": "04248f5801b8b18b7533be6ae186e7d2a00d29302b01d211599a92fce7e68fb9"
+    "inputsSha256": "11494d4051fffe42bb8cba2b90e4f8d2347794faa579e30cda8bca32fa46ccf2"
   },
   "files": {
     "agenttrail": {
-      "bytes": 8135344,
+      "bytes": 8152240,
       "mode": "100755",
-      "sha256": "c1469d5feb7d6a6a4e79db6d1446014205255ea88dcdcb5fb59d40ca4f773e49"
+      "sha256": "bd379e002704e52d8a5211e6a204bbe0d09e8da49dfa4787b074dc56c1cdd36b"
     },
     "web/index.html": {
-      "bytes": 159234,
+      "bytes": 171488,
       "mode": "100644",
-      "sha256": "0016d4baa63c11617c3ee69b78410c847591e6cbf021d91259d71f1e756a8020"
+      "sha256": "e292c91f29f4f931e7808afbcd8ebcc661d8e4c90de16edfa7964cea340a0351"
     }
   }
 }

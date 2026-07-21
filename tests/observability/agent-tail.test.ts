@@ -59,6 +59,47 @@ describe("Agent Tail event envelope export", () => {
     }))).toThrow(/projection policy does not recognize/i);
   });
 
+  it("projects scheduler fleet identities and resources without workspace or acceptance text", () => {
+    const projected = storedEventToAgentTailEvent(storedEvent({
+      type: "scheduler.task_submitted",
+      streamId: "scheduler:installed",
+      payload: {
+        task: {
+          taskId: "task-fleet", projectId: "project-fleet", workerId: "worker-fleet",
+          effect: "potentially_effectful", requiredCapabilities: ["write_worktree"],
+          platform: "darwin-arm64", workspace: { path: "/private/worktree", available: true },
+          admission: { dependencies: [], decisionsApproved: true, pathsAvailable: true,
+            capabilitySupported: true, platformSupported: true, policyPermits: true,
+            budgetAvailable: true, workspaceValid: true, acceptanceCriteria: ["SECRET_ACCEPTANCE"],
+            evidenceRequirements: ["SECRET_EVIDENCE"] },
+          resources: { reasoning: 1, writers: 1, heavyValidation: 0, review: 0, integration: 0 },
+          budget: { seconds: 60, inputTokens: 100, outputTokens: 50, costUsdNano: 1_000 },
+          grantId: "grant-fleet",
+        },
+        submittedAtMs: 1,
+      },
+    }));
+
+    expect(projected.identities).toMatchObject({ project_id: "project-fleet", task_id: "task-fleet", worker_id: "worker-fleet" });
+    expect(projected.actor).toEqual({ id: "zentra-daemon-scheduler", role: "scheduler" });
+    expect(projected.operation).toEqual({ name: "scheduling", status: "waiting" });
+    expect(projected.payload).toMatchObject({ taskId: "task-fleet", projectId: "project-fleet",
+      workerId: "worker-fleet", resources: { writers: 1 }, budget: { seconds: 60 } });
+    expect(JSON.stringify(projected)).not.toMatch(/private\/worktree|SECRET_ACCEPTANCE|SECRET_EVIDENCE/);
+  });
+
+  it("projects lease heartbeat health as non-authority without end reasons", () => {
+    const projected = storedEventToAgentTailEvent(storedEvent({
+      type: "lease.expired", streamId: "lease:lease-1",
+      payload: { schemaVersion: 1, leaseId: "lease-1", occurredAtMs: 120_000,
+        reason: "SECRET_LEASE_REASON" },
+    }));
+    expect(projected).toMatchObject({ actor: { role: "scheduler" },
+      operation: { name: "lease_health", status: "timed_out" },
+      payload: { leaseId: "lease-1", state: "expired", authority: false } });
+    expect(JSON.stringify(projected)).not.toContain("SECRET_LEASE_REASON");
+  });
+
   it("fails closed for an unknown task event carrying credentials", () => {
     const secret = "ghp_must_not_leave_the_journal";
     expect(() => storedEventToAgentTailEvent(storedEvent({

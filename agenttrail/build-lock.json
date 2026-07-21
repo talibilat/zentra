@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "sourceDateEpoch": 1767225600,
   "inputs": {
-    "importManifestSha256": "381a82b35880255aff2f969b242fc31742002a9fcc86a45bf179e602f17fa3fb",
+    "importManifestSha256": "271256c6b884f47f19f9eb0af178a18b9ed62bb3470076a6ea4357534883bb67",
     "buildRequirementsSha256": "f1e46aafaa2cfa92e4daa0ef0ef98cd740fc777704f20ecb58cbab8376e6d033",
     "entrypointSha256": "17bbef375ca12278414d4437cd439dd5c135efec86087860e261975c0e382a6d"
   },
