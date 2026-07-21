@@ -580,3 +580,68 @@ export {
   createHttpWorkflowClient,
 } from "./surfaces/http-workflow-client.js";
 export type { PendingSubmissionCommand } from "./surfaces/http-workflow-client.js";
+export {
+  POD_SCHEMA_VERSION,
+  PodAssignmentSchema,
+  PodAttentionSchema,
+  PodBudgetSchema,
+  PodBudgetUsageSchema,
+  PodCapabilitySchema,
+  PodCharterSchema,
+  PodCheckpointSchema,
+  PodCheckpointDefinitionSchema,
+  PodEvidenceSchema,
+  PodLeaseSchema,
+  PodWorkspaceLeaseSchema,
+  PodLifecycleSchema,
+  PodOwnershipIntentSchema,
+  PodOwnershipSchema,
+  PodParentGrantSchema,
+  PodRevisionSchema,
+  PodReconciliationSchema,
+  PodReconciliationResolutionSchema,
+  PodTaskReferenceSchema,
+  PodTaskRelationshipsSchema,
+  PodTaskSchema,
+  PodTaskTerminalProjectionSchema,
+  PodTerminalProjectionSchema,
+  normalizeHeadRef,
+  parsePodEventPayload,
+} from "./pods/pod-contracts.js";
+export type {
+  PodAssignment,
+  PodAttention,
+  PodBudget,
+  PodBudgetUsage,
+  PodCapability,
+  PodCharter,
+  PodCheckpoint,
+  PodEvidence,
+  PodLease,
+  PodWorkspaceLease,
+  PodLifecycle,
+  PodReconciliation,
+  PodReconciliationResolution,
+  PodOwnershipIntent,
+  PodParentGrant,
+  PodRevision,
+  PodTask,
+  PodTerminalProjection,
+} from "./pods/pod-contracts.js";
+export { projectPod } from "./pods/pod-projection.js";
+export type { PodAssignmentView, PodRevisionView, PodView } from "./pods/pod-projection.js";
+export { PodRegistry } from "./pods/pod-registry.js";
+export type { RegisterPodInput, RevisePodInput } from "./pods/pod-registry.js";
+export { PodCoordinator, PodDispatchResultSchema, authorizePodUsageMeter } from "./pods/pod-coordinator.js";
+export type {
+  PodDispatchAdapter,
+  PodDispatchPacket,
+  PodDispatchResult,
+  PodCoordinatorTimers,
+  PodExecutionHandle,
+  PodExecutionIdentity,
+  PodExecutionReservation,
+  PodUsageMeter,
+  PodUsageMeterSession,
+  PodProposal,
+} from "./pods/pod-coordinator.js";
