@@ -17,6 +17,7 @@ import { GatewayLifecycleService } from "../gateway/gateway-events.js";
 import { LoopbackGateway } from "../gateway/loopback-gateway.js";
 import type { AgentTrailAddress, GatewaySession, LoopbackGatewayOptions } from "../gateway/loopback-gateway.js";
 import { ProjectingEventJournal, type StoredEventSink } from "../journal/projecting-journal.js";
+import type { EventJournal } from "../journal/journal.js";
 import { openAuthoritativeJournal, type ArchivedEventJournal } from "../journal/retention.js";
 import { SQLITE_JOURNAL_SCHEMA_VERSION, SqliteEventJournal } from "../journal/sqlite-journal.js";
 import { AgentTailJsonlFileSink } from "../observability/agent-tail-file-sink.js";
@@ -40,6 +41,7 @@ import {
   ProductionRunAdvancer,
   type FirstDeliveryConfiguration,
 } from "../first-delivery/production-run-advancer.js";
+import { createRepositorySchedulerLifecycle, type InstalledSchedulerLifecycle } from "./scheduler-composition.js";
 
 const DEFAULT_AGENTTRAIL_STARTUP_TIMEOUT_MS = 60_000;
 
@@ -69,6 +71,12 @@ export interface StartZentraServiceDependencies {
   readonly runAdvancer?: RunAdvancer;
   readonly firstDelivery?: FirstDeliveryConfiguration;
   readonly observeAgentTrailEvidence?: (evidence: AgentTrailEvidence) => void | Promise<void>;
+  readonly createScheduler?: (input: {
+    readonly journal: EventJournal;
+    readonly projectRoot: string;
+    readonly process: RuntimeClaim;
+    readonly schedulerId: string;
+  }) => InstalledSchedulerLifecycle | Promise<InstalledSchedulerLifecycle>;
 }
 
 export interface GatewayService {
@@ -160,6 +168,7 @@ export async function startZentraService(
   let session: GatewaySession | null = null;
   let shutdownPromise: Promise<void> | null = null;
   let runAdvancer: RunAdvancer | null = null;
+  let scheduler: InstalledSchedulerLifecycle | null = null;
   let resolveClosed!: () => void;
   let rejectClosed!: (error: unknown) => void;
   const closed = new Promise<void>((resolve, reject) => {
@@ -208,6 +217,7 @@ export async function startZentraService(
       await attemptCleanup(() => {
         if (session !== null) gateway.setReadiness("stopping");
       });
+      await attemptCleanup(() => scheduler?.shutdown());
       await attemptCleanup(() => runAdvancer?.shutdown?.());
       if (lifecycle !== null && claim !== null) {
         try {
@@ -295,6 +305,12 @@ export async function startZentraService(
       observation: ownership.evidence[0].observation,
       commandId: `start-${randomUUID()}`,
     });
+    assertProjectionHealthy();
+    const schedulerInput = { journal, projectRoot: layout.projectRoot, process: claim,
+      schedulerId: "installed" };
+    scheduler = await (dependencies.createScheduler?.(schedulerInput) ??
+      createRepositorySchedulerLifecycle({ ...schedulerInput, now: () => now().getTime() }));
+    await scheduler.start();
     assertProjectionHealthy();
     const tracePathSha256 = createHash("sha256").update(tracePath, "utf8").digest("hex");
     const agentTrailStream = agentTrailStreamId(
