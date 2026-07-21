@@ -402,6 +402,25 @@ export {
 } from "./routing/routing-events.js";
 export { RoutedOpenCodeExecution } from "./routing/routed-opencode-execution.js";
 export type { OpenCodeCapabilityProbe } from "./routing/routed-opencode-execution.js";
+export {
+  NATIVE_SUBAGENT_CONTRACTS,
+  OpenCodeSubagentCapabilityProbe,
+  OpenCodeSubagentConformanceJournal,
+  OpenCodeSubagentProbeEventPayloadSchema,
+  createFixtureSubagentProbeReport,
+  evaluateNativeSubagentConformance,
+  publicKeySha256,
+  projectOpenCodeSubagentDenial,
+  verifyOpenCodeSubagentProbeReport,
+} from "./harnesses/opencode-subagent-capability.js";
+export type {
+  NativeSubagentConformance,
+  NativeSubagentObservation,
+  OpenCodeSubagentProbeReport,
+  OpenCodeSubagentProbeRequest,
+  OpenCodeTrustedIdentity,
+  OpenCodeCommandEvidence,
+} from "./harnesses/opencode-subagent-capability.js";
 export type {
   OutcomeHistoryRecord,
   RoutingSelection,

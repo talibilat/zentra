@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "fixtures": [
+    { "contract": "parent_child_identity", "status": "not_observable", "evidenceRefs": ["fixture:missing-parent"], "reason": "Parent identity is not observable." },
+    { "contract": "zentra_task_worker_incarnation_mapping", "status": "unsupported", "evidenceRefs": ["fixture:missing-incarnation"], "reason": "Zentra identity mapping is unsupported." },
+    { "contract": "authority_path_containment", "status": "unsupported", "evidenceRefs": ["fixture:expanded-path"], "reason": "Authority containment is unsupported." },
+    { "contract": "shared_budget_resource_accounting", "status": "unsupported", "evidenceRefs": ["fixture:unshared-budget"], "reason": "Shared accounting is unsupported." },
+    { "contract": "journal_agenttrail_attribution", "status": "not_observable", "evidenceRefs": ["fixture:missing-attribution"], "reason": "Attribution is not observable." },
+    { "contract": "heartbeat_lte_60s", "status": "unsupported", "evidenceRefs": ["fixture:late-heartbeat"], "reason": "Heartbeat is unsupported." },
+    { "contract": "cancellation_propagation", "status": "not_observable", "evidenceRefs": ["fixture:child-survived-cancel"], "reason": "Cancellation is not observable." },
+    { "contract": "process_descendant_cleanup", "status": "not_observable", "evidenceRefs": ["fixture:descendant-survived"], "reason": "Cleanup is not observable." },
+    { "contract": "restart_reconciliation", "status": "unsupported", "evidenceRefs": ["fixture:redispatch"], "reason": "Restart reconciliation is unsupported." },
+    { "contract": "canonical_terminal_outcome", "status": "unsupported", "evidenceRefs": ["fixture:duplicate-terminal"], "reason": "Canonical terminal outcome is unsupported." },
+    { "contract": "uncertain_effect_no_retry", "status": "unsupported", "evidenceRefs": ["fixture:uncertain-retry"], "reason": "Uncertain no-retry is unsupported." }
+  ]
+}
