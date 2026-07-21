@@ -232,6 +232,10 @@ export const ProjectConfigSchema = z.object({
   integrationBranch: z.string().default(DEFAULT_INTEGRATION_BRANCH).refine(isSafeBranchName, {
     message: "Integration branch must be a safe Git branch name",
   }),
+  defaultBranch: z.string().refine(isSafeBranchName, {
+    message: "Default branch must be a safe Git branch name",
+  }).optional(),
+  protectedBranches: z.array(z.string().refine(isSafeBranchName)).max(128).optional(),
   worktreeRoot: z.string().refine(path.isAbsolute),
   validations: z.object({
     focused: CommandSchema,
@@ -244,10 +248,29 @@ export const ProjectConfigSchema = z.object({
     ),
   }),
   releasePreparation: ReleasePreparationConfigSchema.optional(),
+}).superRefine((project, context) => {
+  const protectedBranches = new Set(["main", "master", project.defaultBranch,
+    ...(project.protectedBranches ?? [])].filter((value): value is string => value !== undefined));
+  if (project.integrationBranch === project.defaultBranch) {
+    context.addIssue({ code: "custom", path: ["integrationBranch"],
+      message: "Integration branch must differ from the configured default branch" });
+  } else if (protectedBranches.has(project.integrationBranch)) {
+    context.addIssue({ code: "custom", path: ["integrationBranch"],
+      message: "Integration branch must be a dedicated non-protected branch" });
+  }
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ReleasePreparationConfig = z.infer<typeof ReleasePreparationConfigSchema>;
+
+export function assertDedicatedIntegrationBranch(project: Pick<ProjectConfig,
+  "integrationBranch" | "defaultBranch" | "protectedBranches">): void {
+  const protectedBranches = new Set(["main", "master", project.defaultBranch,
+    ...(project.protectedBranches ?? [])].filter((value): value is string => value !== undefined));
+  if (protectedBranches.has(project.integrationBranch)) {
+    throw new Error("integration branch must be dedicated and must not target a default or protected branch");
+  }
+}
 
 export function createValidationIdentitySnapshot(
   project: ProjectConfig,

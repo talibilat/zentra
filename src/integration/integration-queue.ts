@@ -10,6 +10,7 @@ import {
   ValidationReportSchema,
 } from "../capabilities/validation-runner.js";
 import type { ProjectConfig } from "../projects/project-config.js";
+import { assertDedicatedIntegrationBranch } from "../projects/project-config.js";
 import type { ReviewDecision } from "../reviews/reviewer-adapter.js";
 import {
   canonicalValidationDigest,
@@ -49,11 +50,29 @@ export interface IntegrationReceipt {
   readonly taskId: string;
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly sourceCommits?: readonly string[];
   readonly originalIntegrationCommit: string | null;
   readonly resultCommit: string | null;
   readonly review: ReviewDecision;
+  readonly reviews?: readonly ReviewDecision[];
   readonly validation: ValidationReport;
   readonly outcome: "completed" | "cancelled" | "timed_out" | "failed";
+}
+
+export interface IntegrationUnitSource {
+  readonly lease: WorkspaceLease;
+  readonly review: ReviewDecision;
+  readonly durableAdmissionDigest?: string;
+}
+
+export interface DurableIntegrationAdmissionView {
+  readonly digest: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly branch: string;
+  readonly sourceCommit: string;
+  readonly diffSha256: string;
+  readonly review: ReviewDecision;
 }
 
 export function isVerifiedIntegrationReceipt(
@@ -128,6 +147,8 @@ export class IntegrationQueue {
   private readonly integrationLeaseMs: number;
   private readonly integrationLeaseRenewalMs: number;
   private readonly integrationLeaseRetryMs: number;
+  private admissionVerifier: ((projectId: string, digest: string) => DurableIntegrationAdmissionView | null) | null = null;
+  private cancellationVerifier: ((projectId: string) => boolean) | null = null;
 
   constructor(
     private readonly git: GitClient,
@@ -143,6 +164,18 @@ export class IntegrationQueue {
 
   getCleanupFailures(): readonly CleanupFailure[] {
     return [...this.cleanupFailures];
+  }
+
+  bindAdmissionVerifier(
+    verifier: (projectId: string, digest: string) => DurableIntegrationAdmissionView | null,
+  ): void {
+    if (this.admissionVerifier !== null) throw new Error("integration admission verifier is already bound");
+    this.admissionVerifier = verifier;
+  }
+
+  bindCancellationVerifier(verifier: (projectId: string) => boolean): void {
+    if (this.cancellationVerifier !== null) throw new Error("integration cancellation verifier is already bound");
+    this.cancellationVerifier = verifier;
   }
 
   async getCleanupFailuresFor(input: {
@@ -221,19 +254,116 @@ export class IntegrationQueue {
     return [...this.leaseAnomalies];
   }
 
+  async reconcileIntegrationRef<T>(input: {
+    readonly project: ProjectConfig;
+    readonly signal: AbortSignal;
+    readonly observeUnderLease: (actualCommit: string) => T;
+  }): Promise<T> {
+    assertDedicatedIntegrationBranch(input.project);
+    const integrationRef = `refs/heads/${input.project.integrationBranch}`;
+    const commonDirectory = await canonicalGitCommonDirectory(this.git, input.project.repositoryPath);
+    const key = { commonDirectory, integrationRef };
+    return withIntegrationLease(key, input.signal, async (assertLease) => {
+      assertLease();
+      const observed = await this.git.run(input.project.repositoryPath,
+        ["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", "--count=2", integrationRef],
+        { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      assertLease();
+      const lines = observed.stdout.split(/\r?\n/).filter(Boolean);
+      if (observed.termination !== null || observed.exitCode !== 0 || observed.truncated || lines.length !== 1) {
+        throw new IntegrationUncertainError("integration reconciliation could not read exact ref under lease",
+          Object.freeze({ integrationRef }));
+      }
+      const fields = lines[0]!.split("\t");
+      if (fields.length !== 3 || fields[0] !== integrationRef || fields[2] !== "" ||
+        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(fields[1]!)) {
+        throw new IntegrationUncertainError("integration reconciliation found malformed or symbolic ref",
+          Object.freeze({ integrationRef }));
+      }
+      // The synchronous observer appends the reconciliation event before lease release.
+      return input.observeUnderLease(fields[1]!);
+    }, undefined, { leaseMs: this.integrationLeaseMs, renewalMs: this.integrationLeaseRenewalMs,
+      retryMs: this.integrationLeaseRetryMs });
+  }
+
+  async serializeRepositoryCancellation<T>(input: {
+    readonly project: ProjectConfig;
+    readonly signal: AbortSignal;
+    readonly appendUnderLease: () => T;
+  }): Promise<T> {
+    assertDedicatedIntegrationBranch(input.project);
+    const key = await this.integrationLeaseKey(input.project);
+    return withIntegrationLease(key, input.signal, async (assertLease) => {
+      assertLease();
+      return input.appendUnderLease();
+    }, undefined, { leaseMs: this.integrationLeaseMs, renewalMs: this.integrationLeaseRenewalMs,
+      retryMs: this.integrationLeaseRetryMs });
+  }
+
   async integrate(input: {
     project: ProjectConfig;
     lease: WorkspaceLease;
     review: ReviewDecision;
     signal: AbortSignal;
     onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
+    onCommitted?: (receipt: IntegrationReceipt) => void | Promise<void>;
   }): Promise<IntegrationReceipt> {
-    const integrationRef = `refs/heads/${input.project.integrationBranch}`;
-    const commonDirectory = await canonicalGitCommonDirectory(
-      this.git,
-      input.project.repositoryPath,
-    );
-    const key = { commonDirectory, integrationRef };
+    return this.integrateUnitInternal({
+      project: input.project,
+      unitId: input.lease.taskId,
+      sources: [{ lease: input.lease, review: input.review }],
+      historyMode: "merge",
+      signal: input.signal,
+      ...(input.onPrepared === undefined ? {} : { onPrepared: input.onPrepared }),
+      ...(input.onCommitted === undefined ? {} : { onCommitted: input.onCommitted }),
+    }, true);
+  }
+
+  async integrateUnit(input: {
+    project: ProjectConfig;
+    unitId: string;
+    sources: readonly IntegrationUnitSource[];
+    historyMode?: "merge" | "rebase";
+    signal: AbortSignal;
+    onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
+    onCommitted?: (receipt: IntegrationReceipt) => void | Promise<void>;
+  }): Promise<IntegrationReceipt> {
+    return this.integrateUnitInternal(input, false);
+  }
+
+  private async integrateUnitInternal(input: {
+    project: ProjectConfig;
+    unitId: string;
+    sources: readonly IntegrationUnitSource[];
+    historyMode?: "merge" | "rebase";
+    signal: AbortSignal;
+    onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
+    onCommitted?: (receipt: IntegrationReceipt) => void | Promise<void>;
+  }, allowLegacy: boolean): Promise<IntegrationReceipt> {
+    assertDedicatedIntegrationBranch(input.project);
+    if (input.sources.length === 0 || input.sources.length > 256) {
+      throw new IntegrationExecutionError("failed", "unit requires a bounded nonempty source list");
+    }
+    if (new Set(input.sources.map((source) => source.lease.taskId)).size !== input.sources.length) {
+      throw new IntegrationExecutionError("failed", "unit source task identities must be unique");
+    }
+    if (!allowLegacy && input.sources.some((source) =>
+      !/^[a-f0-9]{64}$/.test(source.durableAdmissionDigest ?? ""))) {
+      throw new IntegrationExecutionError("failed", "unit source requires an exact durable admission receipt digest");
+    }
+    if (!allowLegacy) {
+      const verifier = this.admissionVerifier;
+      if (verifier === null) throw new IntegrationExecutionError("failed", "durable admission verifier is not bound");
+      for (const source of input.sources) {
+        const admission = verifier(input.project.projectId, source.durableAdmissionDigest!);
+        if (admission === null || admission.taskId !== source.lease.taskId ||
+          admission.branch !== source.lease.branch || admission.review.diffSha256 !== source.review.diffSha256 ||
+          admission.review.validationSha256 !== source.review.validationSha256) {
+          throw new IntegrationExecutionError("failed", "unit source does not match its exact durable admission receipt");
+        }
+      }
+    }
+    const key = await this.integrationLeaseKey(input.project);
     return withIntegrationLease(
       key,
       input.signal,
@@ -263,16 +393,33 @@ export class IntegrationQueue {
   private async integrateUnderLock(
     input: {
       project: ProjectConfig;
-      lease: WorkspaceLease;
-      review: ReviewDecision;
+      unitId: string;
+      sources: readonly IntegrationUnitSource[];
+      historyMode?: "merge" | "rebase";
       signal: AbortSignal;
       onPrepared?: (receipt: IntegrationReceipt) => void | Promise<void>;
+      onCommitted?: (receipt: IntegrationReceipt) => void | Promise<void>;
     },
     assertLease: () => void,
     key: IntegrationLeaseKey,
     currentLease: () => IntegrationLease,
   ): Promise<IntegrationReceipt> {
-    const { project, lease, review, signal } = input;
+    const project = input.project;
+    const durableCancellation = new AbortController();
+    const pollCancellation = (): void => {
+      try {
+        if (this.cancellationVerifier?.(project.projectId) === true) durableCancellation.abort();
+      } catch {
+        // Cancellation authority uncertainty fails closed before any shared-ref update.
+        durableCancellation.abort();
+      }
+    };
+    const cancellationPoll = setInterval(pollCancellation, 25);
+    cancellationPoll.unref();
+    pollCancellation();
+    const signal = AbortSignal.any([input.signal, durableCancellation.signal]);
+    const lease = { ...input.sources[0]!.lease, taskId: input.unitId };
+    const review = input.sources[0]!.review;
     const integrationRef = `refs/heads/${project.integrationBranch}`;
     let candidatePath: string | null = null;
     let candidateOwned = false;
@@ -281,47 +428,65 @@ export class IntegrationQueue {
     let preserveCandidate = false;
     let originalIntegrationCommit: string | null = null;
 
-    let source: CommandResult;
-    try {
-      assertLease();
-      await assertNoGitObjectSubstitution(
-        this.git,
-        project.repositoryPath,
-        GIT_OPERATION_TIMEOUT_MS,
-      );
-      source = await this.git.run(
-        project.repositoryPath,
-        ["rev-parse", "--verify", `refs/heads/${lease.branch}^{commit}`],
-        { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
-      );
-    } catch (error) {
-      throw new IntegrationExecutionError("failed", `source identity read: ${errorMessage(error)}`);
+    const sourceCommits: string[] = [];
+    for (const sourceInput of input.sources) {
+      let source: CommandResult;
+      try {
+        assertLease();
+        await assertNoGitObjectSubstitution(this.git, project.repositoryPath, GIT_OPERATION_TIMEOUT_MS);
+        source = await this.git.run(project.repositoryPath,
+          ["rev-parse", "--verify", `refs/heads/${sourceInput.lease.branch}^{commit}`],
+          { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+      } catch (error) {
+        throw new IntegrationExecutionError("failed", `source identity read: ${errorMessage(error)}`);
+      }
+      if (source.termination !== null) throw new IntegrationExecutionError(source.termination, "source identity read");
+      if (source.exitCode !== 0 || source.truncated) {
+        throw new IntegrationExecutionError("failed", gitFailure("read source commit", source));
+      }
+      const sourceCommit = source.stdout.trim();
+      if (sourceCommit === "") throw new IntegrationExecutionError("failed", "source identity read returned empty identity");
+      if (sourceInput.durableAdmissionDigest !== undefined &&
+        sourceCommit !== this.admissionVerifier!(project.projectId, sourceInput.durableAdmissionDigest)!.sourceCommit) {
+        throw new IntegrationExecutionError("failed", "unit source commit moved from durable admission");
+      }
+      sourceCommits.push(sourceCommit);
     }
-    if (source.termination !== null) {
-      throw new IntegrationExecutionError(source.termination, "source identity read");
-    }
-    if (source.exitCode !== 0 || source.truncated) {
-      throw new IntegrationExecutionError("failed", gitFailure("read source commit", source));
-    }
-    const sourceCommit = source.stdout.trim();
-    if (sourceCommit === "") {
-      throw new IntegrationExecutionError("failed", "source identity read returned empty identity");
-    }
+    const sourceCommit = sourceCommits[0]!;
 
     const receipt = (
       outcome: IntegrationReceipt["outcome"],
       validation: ValidationReport,
       resultCommit: string | null = null,
     ): IntegrationReceipt => ({
-      taskId: lease.taskId,
+      taskId: input.unitId,
       projectId: project.projectId,
       sourceCommit,
+      ...(sourceCommits.length > 1 ? { sourceCommits: Object.freeze([...sourceCommits]) } : {}),
       originalIntegrationCommit,
       resultCommit,
       review,
+      ...(input.sources.length > 1
+        ? { reviews: Object.freeze(input.sources.map((source) => source.review)) }
+        : {}),
       validation,
       outcome,
     });
+    const retainCommitted = async (prepared: IntegrationReceipt): Promise<IntegrationReceipt> => {
+      const completed = registerCompletedReceipt(prepared);
+      if (input.onCommitted !== undefined) {
+        try {
+          await input.onCommitted(completed);
+        } catch (error) {
+          throw new IntegrationUncertainError(
+            "integration commit succeeded but durable commit evidence could not be appended",
+            Object.freeze({ taskId: input.unitId, projectId: project.projectId,
+              resultCommit: completed.resultCommit, reason: errorMessage(error) }),
+          );
+        }
+      }
+      return completed;
+    };
     const terminationReceipt = (
       operation: string,
       result: CommandResult,
@@ -338,7 +503,8 @@ export class IntegrationQueue {
     };
 
     try {
-      if (!isVerifiedReviewDecision(review)) {
+      if (input.sources.some((source) => !isVerifiedReviewDecision(source.review) &&
+        !/^[a-f0-9]{64}$/.test(source.durableAdmissionDigest ?? ""))) {
         return receipt(
           "failed",
           unavailableValidation(project, "failed", "integration requires a verified review decision"),
@@ -397,45 +563,35 @@ export class IntegrationQueue {
       }
       originalIntegrationCommit = original.stdout.trim();
 
-      const mergeBase = await this.git.run(
-        project.repositoryPath,
-        ["merge-base", originalIntegrationCommit, sourceCommit],
-        { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS },
-      );
-      const mergeBaseTermination = terminationReceipt("merge-base read", mergeBase);
-      if (mergeBaseTermination !== null) return mergeBaseTermination;
-      if (mergeBase.exitCode !== 0 || mergeBase.truncated) {
-        return receipt(
-          "failed",
-          unavailableValidation(project, "failed", gitFailure("find merge base", mergeBase)),
-        );
-      }
-
-      const committedDiff = await this.git.run(project.repositoryPath, [
-        "-c",
-        "core.quotepath=off",
-        "diff",
-        "--binary",
-        "--no-ext-diff",
-        "--no-textconv",
-        mergeBase.stdout.trim(),
-        sourceCommit,
-      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
-      const diffTermination = terminationReceipt("committed diff read", committedDiff);
-      if (diffTermination !== null) return diffTermination;
-      if (committedDiff.exitCode !== 0 || committedDiff.truncated) {
-        const reason = committedDiff.truncated
-          ? "committed branch diff exceeded the Git output capture limit"
-          : gitFailure("read committed branch diff", committedDiff);
-        return receipt("failed", unavailableValidation(project, "failed", reason));
-      }
-
-      const diffSha256 = sha256(committedDiff.stdout);
-      if (!review.approved || review.diffSha256 !== diffSha256) {
-        const reason = !review.approved
-          ? `review was not approved: ${review.reason}`
-          : `review digest mismatch: reviewed ${review.diffSha256}, committed ${diffSha256}`;
-        return receipt("failed", unavailableValidation(project, "failed", reason));
+      for (const [index, source] of input.sources.entries()) {
+        const memberCommit = sourceCommits[index]!;
+        const mergeBase = await this.git.run(project.repositoryPath,
+          ["merge-base", originalIntegrationCommit, memberCommit],
+          { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+        const mergeBaseTermination = terminationReceipt("merge-base read", mergeBase);
+        if (mergeBaseTermination !== null) return mergeBaseTermination;
+        if (mergeBase.exitCode !== 0 || mergeBase.truncated) {
+          return receipt("failed", unavailableValidation(project, "failed", gitFailure("find merge base", mergeBase)));
+        }
+        const committedDiff = await this.git.run(project.repositoryPath, [
+          "-c", "core.quotepath=off", "diff", "--binary", "--no-ext-diff", "--no-textconv",
+          mergeBase.stdout.trim(), memberCommit,
+        ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+        const diffTermination = terminationReceipt("committed diff read", committedDiff);
+        if (diffTermination !== null) return diffTermination;
+        if (committedDiff.exitCode !== 0 || committedDiff.truncated) {
+          const reason = committedDiff.truncated
+            ? "committed branch diff exceeded the Git output capture limit"
+            : gitFailure("read committed branch diff", committedDiff);
+          return receipt("failed", unavailableValidation(project, "failed", reason));
+        }
+        const diffSha256 = sha256(committedDiff.stdout);
+        if (!source.review.approved || source.review.diffSha256 !== diffSha256) {
+          const reason = !source.review.approved
+            ? `review was not approved: ${source.review.reason}`
+            : `review digest mismatch: reviewed ${source.review.diffSha256}, committed ${diffSha256}`;
+          return receipt("failed", unavailableValidation(project, "failed", reason));
+        }
       }
 
       const externalPrograms = await this.git.run(project.repositoryPath, [
@@ -579,28 +735,30 @@ export class IntegrationQueue {
         );
       }
 
-      const merge = await this.git.run(candidatePath, [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "commit.gpgSign=false",
-        "-c",
-        "merge.gpgSign=false",
-        "-c",
-        "core.fsmonitor=false",
-        "merge",
-        "--no-ff",
-        "--no-edit",
-        "--no-verify",
-        sourceCommit,
-      ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
-      const mergeTermination = terminationReceipt("candidate merge", merge);
-      if (mergeTermination !== null) return mergeTermination;
-      if (merge.exitCode !== 0 || merge.truncated) {
-        return receipt(
-          "failed",
-          unavailableValidation(project, "failed", gitFailure("merge conflict", merge)),
-        );
+      for (const memberCommit of sourceCommits) {
+        const merge = await this.git.run(candidatePath, [
+          "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+          "-c", "merge.gpgSign=false", "-c", "core.fsmonitor=false",
+          "merge", ...(input.historyMode === "rebase"
+            ? ["--squash", "--no-commit"]
+            : ["--no-ff", "--no-edit", "--no-verify"]), memberCommit,
+        ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+        const mergeTermination = terminationReceipt("candidate merge", merge);
+        if (mergeTermination !== null) return mergeTermination;
+        if (merge.exitCode !== 0 || merge.truncated) {
+          return receipt("failed", unavailableValidation(project, "failed", gitFailure("merge conflict", merge)));
+        }
+        if (input.historyMode === "rebase") {
+          const commit = await this.git.run(candidatePath, [
+            "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+            "commit", "--no-verify", "-m", `zentra: integrate ${input.unitId}`,
+          ], { signal, timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+          const commitTermination = terminationReceipt("rebased candidate commit", commit);
+          if (commitTermination !== null) return commitTermination;
+          if (commit.exitCode !== 0 || commit.truncated) {
+            return receipt("failed", unavailableValidation(project, "failed", gitFailure("commit rebased candidate", commit)));
+          }
+        }
       }
 
       const candidateHead = await this.git.run(candidatePath, ["rev-parse", "HEAD"], {
@@ -702,20 +860,29 @@ export class IntegrationQueue {
       }
       assertLease();
       const preparedReceipt = prepareCompletedReceipt({
-        taskId: lease.taskId,
+        taskId: input.unitId,
         projectId: project.projectId,
         sourceCommit,
+        sourceCommits,
         originalIntegrationCommit,
         resultCommit,
         review,
+        reviews: input.sources.map((source) => source.review),
+        durableAdmissionDigests: input.sources.map((source) => source.durableAdmissionDigest ?? null),
         validation,
       });
+      if (signal.aborted || this.cancellationVerifier?.(project.projectId) === true) {
+        return receipt("cancelled", validation);
+      }
       if (input.onPrepared !== undefined) {
         try {
           await input.onPrepared(preparedReceipt);
         } catch (error) {
           throw new IntegrationPreparationError(errorMessage(error));
         }
+      }
+      if (signal.aborted || this.cancellationVerifier?.(project.projectId) === true) {
+        return receipt("cancelled", validation);
       }
 
       let update: CommandResult;
@@ -811,7 +978,7 @@ export class IntegrationQueue {
           reconciliationIssue = gitFailure("read integration ref metadata", reconciled);
         }
         if (reconciledHead === resultCommit) {
-          return registerCompletedReceipt(preparedReceipt);
+          return retainCommitted(preparedReceipt);
         }
         const uncertainOutcome = update.termination ?? "failed";
         if (reconciledHead === originalIntegrationCommit) {
@@ -850,7 +1017,7 @@ export class IntegrationQueue {
         return receipt("failed", validation);
       }
 
-      return registerCompletedReceipt(preparedReceipt);
+      return retainCommitted(preparedReceipt);
     } catch (error) {
       if (
         error instanceof IntegrationExecutionError ||
@@ -870,6 +1037,7 @@ export class IntegrationQueue {
         ),
       );
     } finally {
+      clearInterval(cancellationPoll);
       if (candidatePath !== null && candidateOwned && !preserveCandidate) {
         try {
           const cleanup = await this.git.run(project.repositoryPath, [
@@ -994,15 +1162,23 @@ export class IntegrationQueue {
       scope,
     };
   }
+
+  private async integrationLeaseKey(project: ProjectConfig): Promise<IntegrationLeaseKey> {
+    const commonDirectory = await canonicalGitCommonDirectory(this.git, project.repositoryPath);
+    return { commonDirectory, integrationRef: `refs/heads/${project.integrationBranch}` };
+  }
 }
 
 function prepareCompletedReceipt(input: {
   readonly taskId: string;
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly sourceCommits: readonly string[];
   readonly originalIntegrationCommit: string;
   readonly resultCommit: string;
   readonly review: ReviewDecision;
+  readonly reviews: readonly ReviewDecision[];
+  readonly durableAdmissionDigests: readonly (string | null)[];
   readonly validation: ValidationReport;
 }): IntegrationReceipt {
   if (input.taskId === "" || input.projectId === "") {
@@ -1016,7 +1192,10 @@ function prepareCompletedReceipt(input: {
     throw new Error("completed receipt commit identities are invalid");
   }
   ReviewDecisionSchema.parse(input.review);
-  if (!isVerifiedReviewDecision(input.review)) {
+  if (input.reviews.length !== input.sourceCommits.length ||
+    input.durableAdmissionDigests.length !== input.reviews.length || input.reviews.some((review, index) =>
+      !ReviewDecisionSchema.safeParse(review).success || (!isVerifiedReviewDecision(review) &&
+        !/^[a-f0-9]{64}$/.test(input.durableAdmissionDigests[index] ?? "")))) {
     throw new Error("completed receipt review lacks provenance");
   }
   const command = Object.freeze([...input.validation.command]);
@@ -1026,9 +1205,13 @@ function prepareCompletedReceipt(input: {
     taskId: input.taskId,
     projectId: input.projectId,
     sourceCommit: input.sourceCommit,
+    ...(input.sourceCommits.length > 1
+      ? { sourceCommits: Object.freeze([...input.sourceCommits]) }
+      : {}),
     originalIntegrationCommit: input.originalIntegrationCommit,
     resultCommit: input.resultCommit,
     review: input.review,
+    ...(input.reviews.length > 1 ? { reviews: Object.freeze([...input.reviews]) } : {}),
     validation,
     outcome: "completed",
   });

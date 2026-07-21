@@ -87,6 +87,7 @@ export const ValidationReportSchema = z.strictObject({
 });
 
 const verifiedValidationReports = new WeakMap<ValidationReport, DurableValidationProvenance>();
+const verifiedCompletedValidationProcesses = new WeakSet<ValidationReport>();
 const activeInvocationIds = new Set<string>();
 
 export function activeValidationInvocationCount(): number {
@@ -112,6 +113,10 @@ export function isVerifiedValidationSubject(
   subjectSha256: string,
 ): boolean {
   return verifiedValidationReports.get(report)?.subjectSha256 === subjectSha256;
+}
+
+export function isVerifiedCompletedValidationProcess(report: ValidationReport): boolean {
+  return verifiedCompletedValidationProcesses.has(report);
 }
 
 export class ValidationRunner {
@@ -204,6 +209,7 @@ export class ValidationRunner {
         provenance: Object.freeze({ ...parsed.provenance }),
       });
       verifiedValidationReports.set(frozen, frozen.provenance);
+      if (result.processExitObserved === true) verifiedCompletedValidationProcesses.add(frozen);
       return frozen;
     } finally {
       activeInvocationIds.delete(invocationId);

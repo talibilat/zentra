@@ -338,6 +338,7 @@ function buildResult(
           return {
             outcome: "failed",
             exitCode: 0,
+            processExitObserved: true,
             events: [],
             stdout: rawStdout,
             rawStdout,
@@ -347,6 +348,7 @@ function buildResult(
         return {
           outcome: "completed",
           exitCode: 0,
+          processExitObserved: true,
           events,
           stdout: plain,
           rawStdout,
@@ -356,6 +358,7 @@ function buildResult(
       return {
         outcome: "failed",
         exitCode: decision.code,
+        processExitObserved: true,
         events: [],
         stdout: rawStdout,
         rawStdout,

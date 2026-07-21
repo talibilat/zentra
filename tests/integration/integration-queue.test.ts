@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { digestCanonical } from "../../src/contracts/authority-attention.js";
 import {
   ValidationRunner,
   type ValidationReport,
@@ -25,7 +26,14 @@ import {
   IntegrationQueue,
   isVerifiedIntegrationReceipt,
 } from "../../src/integration/integration-queue.js";
+import { ReadOnlyGitConflictAnalyzer } from "../../src/integration/conflict-analyzer.js";
+import { IntegrationSubmissionSchema, RepositoryOrchestrator } from "../../src/integration/repository-orchestrator.js";
 import { IntegrationLeaseStore } from "../../src/integration/integration-lease.js";
+import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { PodRegistry } from "../../src/pods/pod-registry.js";
+import { JournalScheduler } from "../../src/scheduling/journal-scheduler.js";
+import { DispatchGrantService } from "../../src/scheduling/dispatch-grant-service.js";
+import { dispatchIntentSha256 } from "../../src/scheduling/scheduler-contracts.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ReviewGate } from "../../src/reviews/review-gate.js";
 import {
@@ -42,6 +50,7 @@ import {
   WorktreeManager,
   type WorkspaceLease,
 } from "../../src/workspaces/worktree-manager.js";
+import { PathClaimService } from "../../src/workspaces/path-claims.js";
 
 const git = new GitClient();
 
@@ -172,7 +181,8 @@ describe("IntegrationQueue", () => {
     taskId: string,
     file: string,
     content: string,
-  ): Promise<{ lease: WorkspaceLease; sourceCommit: string; review: ReviewDecision }> {
+  ): Promise<{ lease: WorkspaceLease; sourceCommit: string; review: ReviewDecision;
+    focusedValidation: ValidationReport }> {
     const lease = await worktrees.create(project, taskId);
     writeFileSync(path.join(lease.path, file), content, "utf8");
     const { diff } = await worktrees.inspect(lease);
@@ -203,6 +213,7 @@ describe("IntegrationQueue", () => {
     return {
       lease,
       sourceCommit,
+      focusedValidation,
       review: reviewGate.verify(
         {
           workerId: "worker-1",
@@ -213,6 +224,124 @@ describe("IntegrationQueue", () => {
         decision,
       ),
     };
+  }
+
+  async function admitDurably(controller: RepositoryOrchestrator, journal: SqliteEventJournal,
+    reviewed: Awaited<ReturnType<typeof ticket>>, input: { readonly suffix: string; readonly podId: string;
+      readonly claimId: string; readonly claimLeaseToken: string; readonly contractKey: string;
+      readonly baseCommit?: string; readonly changedPath: string; readonly batchKey?: string;
+      readonly assignmentCapability?: "write_worktree" | "run_validation";
+      readonly schedulerEffect?: "computation" | "potentially_effectful";
+      readonly schedulerWriters?: number; readonly focusedValidation?: ValidationReport;
+      readonly review?: ReviewDecision; readonly candidateValidation?: ValidationReport;
+      readonly correction?: { readonly unitId: string; readonly acceptanceRejectionSha256: string;
+        readonly attempt: number; readonly maxAttempts: number; readonly paths: readonly string[] } }) {
+    const baseCommit = input.baseCommit ?? originalIntegrationHead;
+    const now = new Date().toISOString();
+    const later = new Date(Date.now() + 60_000).toISOString();
+    const focusedValidation = input.focusedValidation ?? reviewed.focusedValidation;
+    const review = input.review ?? reviewed.review;
+    const pod = new PodRegistry(journal);
+    const charter = { schemaVersion: 1 as const, podId: input.podId, projectId: project.projectId, revision: 1,
+      outcome: "Produce one reviewed integration source.", sourceRefs: [{ kind: "ticket" as const, value: input.suffix }],
+      tasks: [{ milestoneId: `milestone-${input.suffix}`, taskId: reviewed.lease.taskId, title: "Implement",
+        dependencies: [], acceptanceCriteria: ["Reviewed diff is ready."], evidenceRequirements: ["review"] }],
+      roles: [{ roleId: "implementer", agentId: "worker-1", taskIds: [reviewed.lease.taskId] }],
+      requiredCapabilities: ["run_validation" as const, "write_worktree" as const],
+      ownership: { ownedPaths: [input.changedPath], forbiddenPaths: ["refs/**"] },
+      budget: { maxSeconds: 60, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1000,
+        maxOutputTokens: 1000, maxExternalEffects: 0 as const }, checkpoints: [],
+      acceptanceCriteria: ["Source is reviewed."], evidenceRequirements: ["review"],
+      forbiddenChanges: ["shared refs"], securityBoundary: "Bounded fixture authority.",
+      escalationConditions: ["conflict"], completionRules: ["Reviewed source exists."],
+      cleanupRules: ["Preserve on failure."],
+      execution: { mode: "local_process" as const, nativeSubagents: false as const, distributed: false as const } };
+    pod.register({ charter, correlationId: `run-${input.suffix}` });
+    const parentGrant = { schemaVersion: 1 as const, grantId: `pod-grant-${input.suffix}`,
+      parentAuthorityId: "repository-controller", podId: input.podId, projectId: project.projectId,
+      repositoryPath: project.repositoryPath, worktreeRoot: project.worktreeRoot, charterRevision: 1,
+      charterDigest: digestCanonical(charter), agentIds: ["worker-1"],
+      capabilities: ["run_validation" as const, "write_worktree" as const],
+      ownedPaths: [input.changedPath], forbiddenPaths: ["refs/**"], budget: charter.budget,
+      sharedIntegrationRefs: [`refs/heads/${project.integrationBranch}`], issuedAt: now, expiresAt: later,
+      executionMode: "local_process" as const, nativeSubagents: false as const, distributed: false as const };
+    pod.admit(input.podId, parentGrant, now);
+    const assignmentId = `assignment-${input.suffix}`;
+    const podLease = { schemaVersion: 1 as const, leaseId: `pod-lease-${input.suffix}`,
+      grantId: parentGrant.grantId, podId: input.podId, assignmentId,
+      workspaceLeaseId: `workspace-${input.suffix}`, taskId: reviewed.lease.taskId, agentId: "worker-1",
+      charterRevision: 1, capabilities: ["run_validation" as const, "write_worktree" as const],
+      ownedPaths: [input.changedPath],
+      budget: charter.budget, issuedAt: now, expiresAt: later, status: "active" as const };
+    pod.receiveLease(input.podId, podLease);
+    pod.receiveWorkspaceLease(input.podId, { schemaVersion: 1, workspaceLeaseId: podLease.workspaceLeaseId,
+      podLeaseId: podLease.leaseId, podId: input.podId, projectId: project.projectId,
+      taskId: reviewed.lease.taskId, repositoryPath: project.repositoryPath, path: reviewed.lease.path,
+      branch: reviewed.lease.branch, baseCommit, status: "active" });
+    pod.start(input.podId);
+    const assignment = { assignmentId, taskId: reviewed.lease.taskId, roleId: "implementer",
+      agentId: "worker-1", charterRevision: 1,
+      capabilities: [input.assignmentCapability ?? "write_worktree"],
+      ownedPaths: [input.changedPath], budget: charter.budget };
+    const leaseDigest = digestCanonical(podLease); const grantDigest = digestCanonical(parentGrant);
+    const assignmentDigest = digestCanonical(assignment); const charterDigest = digestCanonical(charter);
+    const proposalId = digestCanonical({ podId: input.podId, charterRevision: 1,
+      workspaceLeaseId: podLease.workspaceLeaseId, assignmentDigest, charterDigest, grantDigest, leaseDigest });
+    pod.assign(input.podId, assignment, { proposalId, assignmentDigest, charterDigest, grantDigest, leaseDigest });
+    const podDispatchId = randomUUID();
+    pod.claimDispatch(input.podId, { assignmentId, proposalId, dispatchId: podDispatchId });
+    const executionId = randomUUID();
+    pod.startReservedInvocation(input.podId, { assignmentId, dispatchId: podDispatchId,
+      authorizedAt: now, executionId, charterRevision: 1 });
+    pod.bindExecution(input.podId, { assignmentId, dispatchId: podDispatchId, executionId,
+      processId: `process-${input.suffix}`, processIncarnation: `incarnation-${input.suffix}` });
+    const evidenceId = `review-${input.suffix}`;
+    pod.recordEvidence(input.podId, { evidenceId, taskId: reviewed.lease.taskId, kind: "review",
+      sha256: digestCanonical(review), sourceEventId: null });
+    pod.observeDispatch(input.podId, { assignmentId, dispatchId: podDispatchId, outcome: "completed",
+      evidenceIds: [evidenceId], usage: { elapsedMs: 1, retries: 0, costUsd: 0, inputTokens: 1,
+        outputTokens: 1, externalEffects: 0 }, terminationAcknowledged: true });
+
+    const schedulerId = `scheduler-${input.suffix}`;
+    const controlIdentity = { controlPlaneId: schedulerId, repositoryIdentity: project.repositoryPath };
+    const grants = new DispatchGrantService(journal, controlIdentity, "policy", () => Date.now());
+    const scheduler = new JournalScheduler(journal, { schedulerId, processIncarnation: `daemon-${input.suffix}`,
+      pid: process.pid, processStartIdentity: `start-${input.suffix}`, platform: "darwin-arm64",
+      capabilities: ["run_validation", "write_worktree"], limits: { resources: { reasoning: 1, writers: 1,
+        heavyValidation: 1, review: 1, integration: 1 }, budget: { seconds: 1000, inputTokens: 10000,
+        outputTokens: 10000, costUsdNano: 1000000 } }, controlIdentity, grants, now: () => Date.now() });
+    scheduler.start();
+    const scheduled = { taskId: reviewed.lease.taskId, projectId: project.projectId, workerId: "worker-1",
+      effect: input.schedulerEffect ?? "potentially_effectful",
+      requiredCapabilities: [input.assignmentCapability ?? "write_worktree"],
+      platform: "darwin-arm64" as const, workspace: { path: reviewed.lease.path, available: true },
+      admission: { dependencies: [], decisionsApproved: true, pathsAvailable: true,
+        capabilitySupported: true, platformSupported: true, policyPermits: true, budgetAvailable: true,
+        workspaceValid: true, acceptanceCriteria: ["reviewed"], evidenceRequirements: ["receipt"] },
+      resources: { reasoning: input.schedulerWriters === 0 ? 1 : 0,
+        writers: input.schedulerWriters ?? 1, heavyValidation: 0, review: 0, integration: 0 },
+      budget: { seconds: 10, inputTokens: 100, outputTokens: 100, costUsdNano: 1000 },
+      grantId: `scheduler-grant-${input.suffix}` };
+    grants.issue({ grantId: scheduled.grantId, audience: scheduled.workerId,
+      dispatchIntentSha256: dispatchIntentSha256(scheduled), expiresAtMs: Date.now() + 60_000 });
+    scheduler.submit(scheduled);
+    const intent = scheduler.tick()[0]!;
+    scheduler.started(intent.dispatchId, process.pid, `worker-incarnation-${input.suffix}`, `worker-start-${input.suffix}`);
+    scheduler.complete(intent.dispatchId, "completed");
+    const candidateValidation = input.candidateValidation ??
+      await new ValidationRunner(new ProcessSupervisor()).run(project, "full",
+        reviewed.lease.path, AbortSignal.timeout(10_000), {
+          invocationId: `candidate-${input.suffix}-${randomUUID()}`, subjectSha256: reviewed.sourceCommit });
+    return controller.admitSubmission({ project, projectRevision: baseCommit, podId: input.podId,
+      assignmentId, schedulerId, schedulerTaskId: scheduled.taskId,
+      claimId: input.claimId, claimLeaseToken: input.claimLeaseToken, baseCommit,
+      branch: reviewed.lease.branch, workspacePath: reviewed.lease.path,
+      focusedValidation, review,
+      contract: { scope: input.batchKey === undefined ? [input.changedPath] : ["coupled-a.txt", "coupled-b.txt"],
+        behavior: { key: input.contractKey }, authority: ["worker-1"],
+        batchKey: input.batchKey ?? null, candidateValidation },
+      ...(input.correction === undefined ? {} : { correction: input.correction }),
+      correlationId: `run-${input.suffix}` });
   }
 
   async function integrate(
@@ -247,6 +376,460 @@ describe("IntegrationQueue", () => {
         `${project.integrationBranch}:feature.txt`,
       ]),
     ).toBe("integrated");
+  });
+
+  it("rebases a tightly coupled unit into one validated CAS without changing main", async () => {
+    const first = await ticket("task-coupled-a", "coupled-a.txt", "a\n");
+    const second = await ticket("task-coupled-b", "coupled-b.txt", "b\n");
+    const mainBefore = await gitOk(repositoryPath, ["rev-parse", "refs/heads/main"]);
+
+    const integrationQueue = queue();
+    integrationQueue.bindAdmissionVerifier((_projectId, digest) => {
+      const source = digest === "a".repeat(64) ? first : digest === "b".repeat(64) ? second : null;
+      return source === null ? null : { digest, projectId: project.projectId, taskId: source.lease.taskId,
+        branch: source.lease.branch, sourceCommit: source.sourceCommit,
+        diffSha256: source.review.diffSha256, review: source.review };
+    });
+    const receipt = await integrationQueue.integrateUnit({
+      project,
+      unitId: "unit-coupled",
+      sources: [
+        { lease: first.lease, review: first.review, durableAdmissionDigest: "a".repeat(64) },
+        { lease: second.lease, review: second.review, durableAdmissionDigest: "b".repeat(64) },
+      ],
+      historyMode: "rebase",
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    expect(receipt).toMatchObject({
+      outcome: "completed",
+      taskId: "unit-coupled",
+      sourceCommits: [first.sourceCommit, second.sourceCommit],
+    });
+    expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-a.txt`])).toBe("a");
+    expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-b.txt`])).toBe("b");
+    expect(await gitOk(repositoryPath, ["rev-parse", "refs/heads/main"])).toBe(mainBefore);
+    expect((await gitOk(repositoryPath, ["rev-list", "--parents", "--max-count=1", receipt.resultCommit!]))
+      .split(" ")).toHaveLength(2);
+  });
+
+  it("leaves no coupled member integrated when unit validation fails", async () => {
+    const first = await ticket("task-coupled-fail-a", "fail-a.txt", "a\n");
+    const second = await ticket("task-coupled-fail-b", "fail-b.txt", "b\n");
+    project.validations.full = [process.execPath, "-e", "process.exit(9)"];
+
+    const integrationQueue = queue();
+    integrationQueue.bindAdmissionVerifier((_projectId, digest) => {
+      const source = digest === "a".repeat(64) ? first : digest === "b".repeat(64) ? second : null;
+      return source === null ? null : { digest, projectId: project.projectId, taskId: source.lease.taskId,
+        branch: source.lease.branch, sourceCommit: source.sourceCommit,
+        diffSha256: source.review.diffSha256, review: source.review };
+    });
+    const receipt = await integrationQueue.integrateUnit({
+      project,
+      unitId: "unit-coupled-fail",
+      sources: [
+        { lease: first.lease, review: first.review, durableAdmissionDigest: "a".repeat(64) },
+        { lease: second.lease, review: second.review, durableAdmissionDigest: "b".repeat(64) },
+      ],
+      historyMode: "rebase",
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    expect(receipt).toMatchObject({ outcome: "failed", resultCommit: null });
+    expect(await integrationHead()).toBe(originalIntegrationHead);
+    await expect(git.run(repositoryPath, ["show", `${project.integrationBranch}:fail-a.txt`]))
+      .resolves.toMatchObject({ exitCode: 128 });
+    await expect(git.run(repositoryPath, ["show", `${project.integrationBranch}:fail-b.txt`]))
+      .resolves.toMatchObject({ exitCode: 128 });
+  });
+
+  it("rejects raw unit integration without a durable admission lookup", async () => {
+    const reviewed = await ticket("task-raw-unit", "raw-unit.txt", "blocked\n");
+    await expect(queue().integrateUnit({ project, unitId: "unit-raw", sources: [{
+      lease: reviewed.lease, review: reviewed.review, durableAdmissionDigest: "a".repeat(64),
+    }], historyMode: "rebase", signal: AbortSignal.timeout(10_000) }))
+      .rejects.toThrow(/verifier/i);
+    expect(await integrationHead()).toBe(originalIntegrationHead);
+  });
+
+  it.each([
+    ["assignment without write_worktree", { assignmentCapability: "run_validation" as const }],
+    ["computational scheduler effect", { schedulerEffect: "computation" as const }],
+    ["scheduler without a writer reservation", { schedulerWriters: 0 }],
+  ])("rejects admission with %s", async (_label, override) => {
+    const suffix = `negative-${Object.keys(override)[0]}`;
+    const changedPath = `${suffix}.txt`;
+    const reviewed = await ticket(`task-${suffix}`, changedPath, "blocked\n");
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: reviewed.lease.taskId, claimId: `claim-${suffix}`, revision: originalIntegrationHead,
+        paths: [changedPath], leaseMs: 60_000, correlationId: suffix });
+      await expect(admitDurably(controller, journal, reviewed, { suffix, podId: `pod-${suffix}`,
+        claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: suffix,
+        changedPath, ...override })).rejects.toThrow(/assignment|scheduler|writer/i);
+      expect(controller.inspect(project.projectId).admissions).toEqual({});
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("rejects focused validation from a stale configured argv", async () => {
+    const reviewed = await ticket("task-stale-focused-admission", "stale-focused-admission.txt", "blocked\n");
+    project.validations.focused = [process.execPath, "-e", "process.exit(0)", "changed-argv"];
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: reviewed.lease.taskId, claimId: "claim-stale-focused-admission", revision: originalIntegrationHead,
+        paths: ["stale-focused-admission.txt"], leaseMs: 60_000, correlationId: "stale-focused" });
+      await expect(admitDurably(controller, journal, reviewed, { suffix: "stale-focused-admission",
+        podId: "pod-stale-focused-admission", claimId: claim.claimId,
+        claimLeaseToken: claim.leaseToken, contractKey: "stale-focused",
+        changedPath: "stale-focused-admission.txt" })).rejects.toThrow(/validation evidence/i);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("rejects focused validation submitted from another canonical workspace and subject", async () => {
+    const reviewed = await ticket("task-cwd-admission", "cwd-admission.txt", "candidate\n");
+    const other = await ticket("task-other-cwd-admission", "other-cwd-admission.txt", "other\n");
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: reviewed.lease.taskId, claimId: "claim-cwd-admission", revision: originalIntegrationHead,
+        paths: ["cwd-admission.txt"], leaseMs: 60_000, correlationId: "cwd-admission" });
+      await expect(admitDurably(controller, journal, reviewed, { suffix: "cwd-admission",
+        podId: "pod-cwd-admission", claimId: claim.claimId, claimLeaseToken: claim.leaseToken,
+        contractKey: "cwd-admission", changedPath: "cwd-admission.txt",
+        focusedValidation: other.focusedValidation }))
+        .rejects.toThrow(/validation evidence/i);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it.each(["cancelled", "timed_out", "failed", "failed_nonzero_without_completed_process"] as const)(
+    "rejects inconclusive %s candidate validation instead of batching it",
+    async (outcome) => {
+      const suffix = `inconclusive-${outcome}`;
+      const changedPath = `${suffix}.txt`;
+      const reviewed = await ticket(`task-${suffix}`, changedPath, "blocked\n");
+      let signal: AbortSignal = AbortSignal.timeout(10_000);
+      let supervisor = new ProcessSupervisor();
+      let expectedOutcome: ValidationReport["outcome"] = outcome === "failed_nonzero_without_completed_process"
+        ? "failed" : outcome;
+      let expectedExitCode: number | null = null;
+      if (outcome === "cancelled") {
+        const aborted = new AbortController();
+        aborted.abort();
+        signal = aborted.signal;
+      } else if (outcome === "timed_out") {
+        project.validations.full = [process.execPath, "-e", "setInterval(() => {}, 1000)"];
+        project.validations.fullTimeoutMs = 100;
+      } else if (outcome === "failed") {
+        supervisor = new ProcessSupervisor({ maxOutputBytes: 1 });
+      } else {
+        expectedExitCode = 9;
+        supervisor = new class extends ProcessSupervisor {
+          override execute(): ReturnType<ProcessSupervisor["execute"]> {
+            return Promise.resolve({ outcome: "failed", exitCode: 9, events: [], stdout: "",
+              rawStdout: "", stderr: "uncertain process failure" });
+          }
+        }();
+      }
+      const candidateValidation = await new ValidationRunner(supervisor).run(project, "full",
+        reviewed.lease.path, signal, { invocationId: `candidate-${suffix}`,
+          subjectSha256: reviewed.sourceCommit });
+      expect(candidateValidation).toMatchObject({ outcome: expectedOutcome, exitCode: expectedExitCode });
+
+      const journal = new SqliteEventJournal(":memory:");
+      try {
+        const claims = new PathClaimService(journal);
+        const controller = new RepositoryOrchestrator(journal, claims, queue(),
+          new ReadOnlyGitConflictAnalyzer(git), git);
+        const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+          taskId: reviewed.lease.taskId, claimId: `claim-${suffix}`, revision: originalIntegrationHead,
+          paths: [changedPath], leaseMs: 60_000, correlationId: suffix });
+        await expect(admitDurably(controller, journal, reviewed, { suffix, podId: `pod-${suffix}`,
+          claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: "coupled",
+          batchKey: "coupled", changedPath, candidateValidation }))
+          .rejects.toThrow(/inconclusive/i);
+        expect(controller.inspect(project.projectId).admissions).toEqual({});
+      } finally {
+        journal.close();
+      }
+    },
+  );
+
+  it("batches only durable partial candidate failures and validates the combined candidate", async () => {
+    const first = await ticket("task-durable-coupled-a", "coupled-a.txt", "a\n");
+    const second = await ticket("task-durable-coupled-b", "coupled-b.txt", "b\n");
+    project.validations.full = [process.execPath, "-e", [
+      'const fs = require("node:fs");',
+      'process.exit(fs.existsSync("coupled-a.txt") && fs.existsSync("coupled-b.txt") ? 0 : 9);',
+    ].join(" ")];
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const firstClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: first.lease.taskId, claimId: "claim-durable-coupled-a", revision: originalIntegrationHead,
+        paths: ["coupled-a.txt"], leaseMs: 60_000, correlationId: "run-durable-coupled" });
+      const secondClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: second.lease.taskId, claimId: "claim-durable-coupled-b", revision: originalIntegrationHead,
+        paths: ["coupled-b.txt"], leaseMs: 60_000, correlationId: "run-durable-coupled" });
+      const firstAdmission = await admitDurably(controller, journal, first, { suffix: "durable-coupled-a",
+        podId: "pod-durable-coupled-a", claimId: firstClaim.claimId,
+        claimLeaseToken: firstClaim.leaseToken, contractKey: "durable-coupled",
+        batchKey: "durable-coupled", changedPath: "coupled-a.txt" });
+      const secondAdmission = await admitDurably(controller, journal, second, { suffix: "durable-coupled-b",
+        podId: "pod-durable-coupled-b", claimId: secondClaim.claimId,
+        claimLeaseToken: secondClaim.leaseToken, contractKey: "durable-coupled",
+        batchKey: "durable-coupled", changedPath: "coupled-b.txt" });
+      expect(firstAdmission.contract.candidateOutcome).toBe("non_green");
+      expect(secondAdmission.contract.candidateOutcome).toBe("non_green");
+      const [unit] = controller.formUnits(project.projectId,
+        [firstAdmission.receiptId, secondAdmission.receiptId], "run-durable-coupled");
+      expect(unit).toMatchObject({ tightlyCoupled: true });
+      await expect(controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-durable-coupled" }))
+        .resolves.toMatchObject({ kind: "integrated" });
+      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-a.txt`])).toBe("a");
+      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-b.txt`])).toBe("b");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("runs central ownership, stale rebase, durable acceptance, restart, and cancellation end to end", async () => {
+    const reviewed = await ticket("task-central", "central.txt", "central\n");
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const integrationQueue = queue();
+      const controller = new RepositoryOrchestrator(journal, claims, integrationQueue,
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: reviewed.lease.taskId, claimId: "claim-central", revision: originalIntegrationHead,
+        paths: ["central.txt"], leaseMs: 60_000, correlationId: "run-central" });
+      expect(claim.ownerId).toBe("worker-1");
+
+      const advancePath = path.join(worktreeRoot, "central-advance");
+      await gitOk(repositoryPath, ["worktree", "add", "-b", "central-advance",
+        advancePath, project.integrationBranch]);
+      writeFileSync(path.join(advancePath, "advanced.txt"), "advanced\n");
+      await gitOk(advancePath, ["add", "--", "advanced.txt"]);
+      await gitOk(advancePath, ["commit", "-m", "advance integration"]);
+      const advanced = await gitOk(advancePath, ["rev-parse", "HEAD"]);
+      await gitOk(repositoryPath, ["update-ref", `refs/heads/${project.integrationBranch}`,
+        advanced, originalIntegrationHead]);
+
+      const admission = await admitDurably(controller, journal, reviewed, { suffix: "central", podId: "pod-central",
+        claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: "central",
+        changedPath: "central.txt" });
+      const [unit] = controller.formUnits(project.projectId, [admission.receiptId], "run-central");
+      const result = await controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-central" });
+      expect(result.kind).toBe("integrated");
+      expect(controller.inspect(project.projectId).units[unit!.unitId]).toMatchObject({
+        status: "integrated", expectedCommit: advanced, resultCommit: await integrationHead(),
+      });
+      expect(journal.readStream(`repository-orchestration:${project.projectId}`).map((event) => event.type))
+        .toEqual(["repository.submission_admitted", "integration.unit_formed", "rebase.started", "integration.candidate_created",
+          "integration.candidate_validated", "rebase.completed", "integration.committed"]);
+
+      controller.requestFinalAcceptance(project.projectId, unit!.unitId, "f".repeat(64), "run-central");
+      const rejection = controller.decideFinalAcceptance(project.projectId, { unitId: unit!.unitId, accepted: false,
+        decidedBy: "operator", reason: "One bounded correction is required." }, "run-central");
+      const correctionBase = await integrationHead();
+      claims.release({ projectId: project.projectId, claimId: claim.claimId, ownerId: "worker-1",
+        revision: originalIntegrationHead, leaseToken: claim.leaseToken, correlationId: "run-central" });
+      const corrected = await ticket("task-central-correction", "central.txt", "corrected\n");
+      const correctionClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: corrected.lease.taskId, claimId: "claim-central-correction", revision: correctionBase,
+        paths: ["central.txt"], leaseMs: 60_000, correlationId: "run-central" });
+      const correctionAdmission = await admitDurably(controller, journal, corrected, {
+        suffix: "central-correction", podId: "pod-central-correction", claimId: correctionClaim.claimId,
+        claimLeaseToken: correctionClaim.leaseToken, contractKey: "central", changedPath: "central.txt",
+        baseCommit: correctionBase, correction: { unitId: unit!.unitId,
+          acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!, attempt: 1,
+          maxAttempts: 1, paths: ["central.txt"] } });
+      expect(() => controller.planCorrection(project.projectId, { unitId: unit!.unitId, attempt: 2,
+        maxAttempts: 2, paths: ["central.txt"], acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!,
+        replacementAdmissionReceiptIds: [correctionAdmission.receiptId], behaviorChanges: [], authorityChanges: [],
+        rationale: "Invalid non-monotonic correction." }, "run-central")).toThrow(/monotonic/i);
+      const correction = controller.planCorrection(project.projectId, { unitId: unit!.unitId, attempt: 1,
+        maxAttempts: 1, paths: ["central.txt"], acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!,
+        replacementAdmissionReceiptIds: [correctionAdmission.receiptId], behaviorChanges: [], authorityChanges: [],
+        rationale: "Apply the exact final-acceptance correction." }, "run-central");
+      expect(correction.requiresApproval).toBe(true);
+      expect(() => controller.decideCorrection(project.projectId, { unitId: unit!.unitId,
+        approvalDigest: "0".repeat(64), approved: true, decidedBy: "operator" }, "run-central"))
+        .toThrow(/exact/i);
+      expect(controller.decideCorrection(project.projectId, { unitId: unit!.unitId,
+        approvalDigest: correction.approvalDigest, approved: true, decidedBy: "operator" },
+      "run-central").status).toBe("formed");
+      await expect(controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-central" }))
+        .resolves.toMatchObject({ kind: "integrated" });
+      controller.requestFinalAcceptance(project.projectId, unit!.unitId, "e".repeat(64), "run-central");
+      controller.decideFinalAcceptance(project.projectId, { unitId: unit!.unitId, accepted: true,
+        decidedBy: "operator", reason: "Correction accepted." }, "run-central");
+      await controller.cancel(project, "operator", "stop remaining units", "run-central");
+      const restarted = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git).inspect(project.projectId);
+      expect(restarted).toMatchObject({ cancelled: true });
+      expect(restarted.units[unit!.unitId]).toMatchObject({
+        status: "accepted", correctionCount: 1,
+      });
+      expect(restarted.integratedCommits).toHaveLength(2);
+      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:central.txt`])).toBe("corrected");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("durably replaces a conflicted source after exact approval and integrates the replacement", async () => {
+    const first = await ticket("task-conflict-a", "shared.txt", "first\n");
+    const competingPath = path.join(worktreeRoot, "replan-competing");
+    await gitOk(repositoryPath, ["worktree", "add", "-b", "replan-competing", competingPath,
+      project.integrationBranch]);
+    writeFileSync(path.join(competingPath, "shared.txt"), "integration\n");
+    await gitOk(competingPath, ["commit", "-am", "advance shared"]);
+    const advanced = await gitOk(competingPath, ["rev-parse", "HEAD"]);
+    await gitOk(repositoryPath, ["update-ref", `refs/heads/${project.integrationBranch}`, advanced,
+      originalIntegrationHead]);
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const firstClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: first.lease.taskId, claimId: "claim-conflict-a", revision: originalIntegrationHead,
+        paths: ["shared.txt"], leaseMs: 60_000, correlationId: "run-conflict" });
+      const firstAdmission = await admitDurably(controller, journal, first, { suffix: "conflict-a", podId: "pod-conflict-a",
+        claimId: firstClaim.claimId, claimLeaseToken: firstClaim.leaseToken,
+        contractKey: "shared-contract", changedPath: "shared.txt" });
+      const streamId = `repository-orchestration:${project.projectId}`;
+      const [unit] = controller.formUnits(project.projectId, [firstAdmission.receiptId], "run-conflict");
+      const result = await controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-conflict" });
+
+      expect(result).toMatchObject({ kind: "conflict" });
+      expect(await integrationHead()).toBe(advanced);
+      const conflict = journal.readStream(streamId)
+        .find((event) => event.type === "conflict.observed")!.payload as { conflictId: string };
+      claims.release({ projectId: project.projectId, claimId: firstClaim.claimId, ownerId: "worker-1",
+        revision: originalIntegrationHead, leaseToken: firstClaim.leaseToken, correlationId: "run-conflict" });
+      const replacement = await ticket("task-conflict-replacement", "shared.txt", "resolved\n");
+      const replacementClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: replacement.lease.taskId, claimId: "claim-conflict-replacement", revision: advanced,
+        paths: ["shared.txt"], leaseMs: 60_000, correlationId: "run-conflict" });
+      const replacementAdmission = await admitDurably(controller, journal, replacement, { suffix: "conflict-replacement",
+        podId: "pod-conflict-replacement", claimId: replacementClaim.claimId,
+        claimLeaseToken: replacementClaim.leaseToken,
+        contractKey: "shared-contract", baseCommit: advanced, changedPath: "shared.txt" });
+      const proposal = controller.proposeReplan(project.projectId, { projectId: project.projectId,
+        unitId: unit!.unitId, conflictId: conflict.conflictId, attempt: 1, maxAttempts: 1,
+        changedPaths: ["shared.txt"], behaviorChanges: [], authorityChanges: [],
+        rationale: "Resolve the exact conflict.",
+        replacementAdmissionReceiptIds: [replacementAdmission.receiptId] }, "run-conflict");
+      expect(() => controller.decideReplan(project.projectId, { unitId: unit!.unitId,
+        approvalDigest: "0".repeat(64), approved: true, decidedBy: "operator" }, "run-conflict"))
+        .toThrow(/exact/i);
+      expect(controller.decideReplan(project.projectId, { unitId: unit!.unitId,
+        approvalDigest: proposal.approvalDigest, approved: true, decidedBy: "operator" },
+      "run-conflict").status).toBe("formed");
+      await expect(controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-conflict" }))
+        .resolves.toMatchObject({ kind: "integrated" });
+      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:shared.txt`])).toBe("resolved");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("serializes durable cancellation behind the exact CAS lease and records it after a winning commit", async () => {
+    const reviewed = await ticket("task-controller-cancel", "controller-cancel.txt", "candidate\n");
+    let casReached!: () => void;
+    let releaseCas!: () => void;
+    const casBarrier = new Promise<void>((resolve) => { casReached = resolve; });
+    const releaseBarrier = new Promise<void>((resolve) => { releaseCas = resolve; });
+    class BarrierGitClient extends GitClient {
+      override async run(cwd: string, args: readonly string[], options?: GitRunOptions): Promise<CommandResult> {
+        if (args.includes("update-ref") && args.includes(`refs/heads/${project.integrationBranch}`)) {
+          casReached();
+          await releaseBarrier;
+        }
+        return super.run(cwd, args, options);
+      }
+    }
+    const barrierGit = new BarrierGitClient();
+    const journal = new SqliteEventJournal(":memory:");
+    try {
+      const claims = new PathClaimService(journal);
+      const controller = new RepositoryOrchestrator(journal, claims,
+        new IntegrationQueue(barrierGit, new ValidationRunner(new ProcessSupervisor())),
+        new ReadOnlyGitConflictAnalyzer(barrierGit), barrierGit);
+      const cancellingController = new RepositoryOrchestrator(journal, claims, queue(),
+        new ReadOnlyGitConflictAnalyzer(git), git);
+      const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
+        taskId: reviewed.lease.taskId, claimId: "claim-controller-cancel", revision: originalIntegrationHead,
+        paths: ["controller-cancel.txt"], leaseMs: 60_000, correlationId: "run-cancel" });
+      const admission = await admitDurably(controller, journal, reviewed, { suffix: "controller-cancel", podId: "pod-controller-cancel",
+        claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: "cancel",
+        changedPath: "controller-cancel.txt" });
+      const [unit] = controller.formUnits(project.projectId, [admission.receiptId], "run-cancel");
+      const pending = controller.integrate({ project, unitId: unit!.unitId,
+        signal: AbortSignal.timeout(10_000), correlationId: "run-cancel" });
+      await casBarrier;
+
+      let cancellationSettled = false;
+      const cancellation = cancellingController.cancel(project, "operator", "cancel active candidate", "run-cancel")
+        .finally(() => { cancellationSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(cancellationSettled).toBe(false);
+      expect(controller.inspect(project.projectId).cancelled).toBe(false);
+
+      releaseCas();
+      await expect(pending).resolves.toMatchObject({ kind: "integrated" });
+      await expect(cancellation).resolves.toMatchObject({ cancelled: true });
+      expect(await integrationHead()).not.toBe(originalIntegrationHead);
+      const terminalOrder = journal.readStream(`repository-orchestration:${project.projectId}`)
+        .map((event) => event.type).filter((type) =>
+          type === "integration.committed" || type === "repository.cancellation_requested");
+      expect(terminalOrder).toEqual(["integration.committed", "repository.cancellation_requested"]);
+    } finally {
+      releaseCas();
+      journal.close();
+    }
+  });
+
+  it("aborts integration when durable cancellation wins the canonical repository lease", async () => {
+    const reviewed = await ticket("task-cancellation-wins", "cancellation-wins.txt", "candidate\n");
+    let cancelled = false;
+    const cancellationQueue = queue();
+    await cancellationQueue.serializeRepositoryCancellation({ project,
+      signal: AbortSignal.timeout(10_000), appendUnderLease() { cancelled = true; } });
+    const integrationQueue = queue();
+    integrationQueue.bindCancellationVerifier(() => cancelled);
+
+    await expect(integrationQueue.integrate({ project, lease: reviewed.lease, review: reviewed.review,
+      signal: AbortSignal.timeout(10_000) }))
+      .resolves.toMatchObject({ outcome: "cancelled", resultCommit: null });
+    expect(await integrationHead()).toBe(originalIntegrationHead);
   });
 
   it("invokes the prepared sink exactly once before update-ref", async () => {
@@ -295,6 +878,22 @@ describe("IntegrationQueue", () => {
         throw new Error("journal unavailable");
       },
     })).rejects.toThrow("journal unavailable");
+    expect(await integrationHead()).toBe(originalIntegrationHead);
+  });
+
+  it("honors cancellation that races prepared evidence before CAS", async () => {
+    const reviewed = await ticket("task-prepared-cancel", "prepared-cancel.txt", "prepared\n");
+    const controller = new AbortController();
+    let prepared!: () => void;
+    let release!: () => void;
+    const preparedSignal = new Promise<void>((resolve) => { prepared = resolve; });
+    const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+    const pending = queue().integrate({ project, lease: reviewed.lease, review: reviewed.review,
+      signal: controller.signal, async onPrepared() { prepared(); await releaseSignal; } });
+    await preparedSignal;
+    controller.abort();
+    release();
+    await expect(pending).resolves.toMatchObject({ outcome: "cancelled", resultCommit: null });
     expect(await integrationHead()).toBe(originalIntegrationHead);
   });
 
@@ -809,6 +1408,16 @@ describe("IntegrationQueue", () => {
     expect(existsSync(path.join(worktreeRoot, ".integration-candidates"))).toBe(false);
   });
 
+  it.each(["main", "master"])("rejects protected integration branch %s before Git effects", async (branch) => {
+    const reviewed = await ticket(`task-protected-${branch}`, `protected-${branch}.txt`, "blocked\n");
+    const mainBefore = await gitOk(repositoryPath, ["rev-parse", "refs/heads/main"]);
+    await expect(new IntegrationQueue(git, new ValidationRunner(new ProcessSupervisor())).integrate({
+      project: { ...project, integrationBranch: branch }, lease: reviewed.lease,
+      review: reviewed.review, signal: AbortSignal.timeout(10_000),
+    })).rejects.toThrow(/dedicated|protected/i);
+    expect(await gitOk(repositoryPath, ["rev-parse", "refs/heads/main"])).toBe(mainBefore);
+  });
+
   it("does not execute repository hooks during candidate checkout or merge", async () => {
     const reviewed = await ticket("task-hooks", "hooks.txt", "hooks\n");
     const checkoutMarker = path.join(baseDir, "post-checkout-ran");
@@ -912,6 +1521,23 @@ describe("IntegrationQueue", () => {
         `${project.integrationBranch}:second.txt`,
       ]),
     ).toBe("second");
+  });
+
+  it("reconciles the exact integration ref only while holding the durable integration lease", async () => {
+    const store = new IntegrationLeaseStore(await leaseDatabasePath());
+    const held = store.acquire(leaseKeyFor(), 10_000)!;
+    let observed = false;
+    try {
+      const pending = queue().reconcileIntegrationRef({ project, signal: AbortSignal.timeout(10_000),
+        observeUnderLease(actualCommit) { observed = true; return actualCommit; } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(observed).toBe(false);
+      expect(store.release(held)).toBe(true);
+      await expect(pending).resolves.toBe(originalIntegrationHead);
+      expect(observed).toBe(true);
+    } finally {
+      store.close();
+    }
   });
 
   it("does not serialize a reused project ID across canonical repositories", async () => {

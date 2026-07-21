@@ -38,6 +38,19 @@ function withCaseVariant(executable: string): string {
 }
 
 describe("ProjectConfigSchema", () => {
+  it.each(["main", "master", "refs/heads/main"])(
+    "rejects protected integration branch %s",
+    (integrationBranch) => {
+      expect(() => ProjectConfigSchema.parse({ ...validConfig, integrationBranch })).toThrow();
+    },
+  );
+
+  it("rejects the configured default branch and protected branch set", () => {
+    expect(() => ProjectConfigSchema.parse({ ...validConfig,
+      integrationBranch: "release", defaultBranch: "release" })).toThrow(/default/i);
+    expect(() => ProjectConfigSchema.parse({ ...validConfig,
+      integrationBranch: "production", protectedBranches: ["production"] })).toThrow(/protected/i);
+  });
   it("defaults the integration branch when omitted", () => {
     const { integrationBranch: _omitted, ...withoutIntegrationBranch } = validConfig;
 

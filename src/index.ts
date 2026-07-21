@@ -713,3 +713,23 @@ export type {
   PodUsageMeterSession,
   PodProposal,
 } from "./pods/pod-coordinator.js";
+export { ReadOnlyGitConflictAnalyzer } from "./integration/conflict-analyzer.js";
+export type { ConflictAnalysis } from "./integration/conflict-analyzer.js";
+export {
+  IntegrationSubmissionSchema,
+  IntegrationUnitSchema,
+  RepositoryOrchestrator,
+  buildReplanProposal,
+  projectRepositoryOrchestration,
+  repositoryOrchestrationStreamId,
+} from "./integration/repository-orchestrator.js";
+export type {
+  IntegrationSubmission,
+  IntegrationUnit,
+  ReplanProposal,
+  RepositoryIntegrationResult,
+  RepositoryIntegrationSource,
+  RepositoryOrchestrationView,
+  RepositoryUnitView,
+} from "./integration/repository-orchestrator.js";
+export type { IntegrationUnitSource } from "./integration/integration-queue.js";
