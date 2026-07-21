@@ -94,6 +94,7 @@ describe("createInstalledMilestonePlan", () => {
     writeFileSync(fakeOpenCode, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") { writeFileSync(${JSON.stringify(probeObservation)}, JSON.stringify({ home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null })); process.stdout.write("fixture-opencode 1\\n"); process.exit(0); }
 const workspace = args[9];
@@ -101,8 +102,18 @@ const packet = JSON.parse(args[10]);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
 writeFileSync(${JSON.stringify(writerObservation)}, JSON.stringify({ brief: packet.brief, home: process.env.HOME, ambient: process.env.ZENTRA_AMBIENT_SECRET ?? null, packet, permission: config.agent["zentra-writer"].permission }));
 const target = path.join(workspace, packet.ownedPaths[0]);
-writeFileSync(target, readFileSync(target, "utf8").replace("hello", "hello installed"));
-process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+const before = readFileSync(target, "utf8");
+const content = before.replace("hello", "hello installed");
+const operation = { path: packet.ownedPaths[0], expectedSha256: createHash("sha256").update(before).digest("hex"),
+  content, contentSha256: createHash("sha256").update(content).digest("hex") };
+const body = { schemaVersion: 1, kind: "zentra.patch_proposal", proposalId: "installed-proposal",
+  baseRevision: packet.pathClaim.revision, operations: [operation] };
+const canonical = (value) => value === null || typeof value !== "object" ? JSON.stringify(value) : Array.isArray(value)
+  ? "[" + value.map(canonical).join(",") + "]"
+  : "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+const proposal = { ...body, digest: createHash("sha256").update(canonical(body)).digest("hex") };
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: JSON.stringify(proposal) } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-finish", tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } } }) + "\\n");
 `, { mode: 0o755 });
     const executable = realpathSync.native(fakeOpenCode);
     const hostAttestation = {
@@ -342,10 +353,11 @@ process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
         capabilityEnvelopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
       permission: expect.objectContaining({
-        read: { "*": "deny", "src/**": "allow" },
-        glob: { "*": "deny", "src/**": "allow" },
-        grep: { "*": "deny", "src/**": "allow" },
-        edit: { "*": "deny", "src/greeting.mjs": "allow" }, bash: "deny", webfetch: "deny",
+        read: { "*": "deny", "src/**": "allow", ".env": "deny", ".git/**": "deny" },
+        glob: { "*": "deny", "src/**": "allow", ".env": "deny", ".git/**": "deny" },
+        grep: { "*": "deny", "src/**": "allow", ".env": "deny", ".git/**": "deny" },
+        edit: "deny",
+        bash: "deny", webfetch: "deny",
       }),
     });
     expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });

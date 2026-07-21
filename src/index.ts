@@ -580,3 +580,21 @@ export {
   createHttpWorkflowClient,
 } from "./surfaces/http-workflow-client.js";
 export type { PendingSubmissionCommand } from "./surfaces/http-workflow-client.js";
+export {
+  MultiFileWriterRequestSchema,
+  WriterCheckpointSchema,
+  assertCorrectionWithinWriterEnvelope,
+} from "./contracts/writer-request.js";
+export type { MultiFileWriterRequest, WriterCheckpoint } from "./contracts/writer-request.js";
+export { WriterPatchProposalSchema, buildWriterPatchProposal } from "./contracts/writer-patch.js";
+export type { WriterPatchProposal } from "./contracts/writer-patch.js";
+export {
+  PathClaimConflictError,
+  PathClaimService,
+  canonicalDarwinClaimPath,
+  pathClaimContains,
+  pathClaimStreamId,
+} from "./workspaces/path-claims.js";
+export type { PathClaim, PathClaimAggregate, PathClaimReconciliation } from "./workspaces/path-claims.js";
+export { OpenCodeMultiFileWriter } from "./orchestration/opencode-multi-file-writer.js";
+export type { OpenCodeMultiFileWriterRequest } from "./orchestration/opencode-multi-file-writer.js";

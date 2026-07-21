@@ -51,6 +51,7 @@ import { MilestoneRegistry, type MilestoneRecord } from "../../src/milestones/mi
 import { TwoAgentMilestoneCoordinator } from "../../src/orchestration/two-agent-milestone.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import { projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
+import { buildWriterPatchProposal } from "../../src/contracts/writer-patch.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 import { WorkspaceOwnershipGate } from "../../src/workspaces/workspace-ownership.js";
 import { WorktreeManager } from "../../src/workspaces/worktree-manager.js";
@@ -91,6 +92,11 @@ describe("OpenCodeSingleFileTracerBullet", () => {
       "task.validation_completed",
       "task.completed",
     ]));
+    const singleFileClaim = result.allEvents.find((event) => event.type === "path_claim.acquired")?.payload as
+      { acquiredAt: string; expiresAt: string } | undefined;
+    expect(Date.parse(singleFileClaim!.expiresAt) - Date.parse(singleFileClaim!.acquiredAt))
+      .toBeGreaterThanOrEqual(35_000);
+    expect(result.allEvents.map((event) => event.type)).toContain("path_claim.released");
     expect(Object.values(projectWorkerLifecycle(result.allEvents).workers)[0]).toMatchObject({
       taskId: "writer-tracer", harness: "opencode", role: "implementer",
       status: "terminal", terminalOutcome: "completed", cleanup: "completed",
@@ -149,21 +155,14 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     expect(await gitOutput(fixture.repository, ["status", "--porcelain"])).toBe("");
   });
 
-  it("pauses nonterminal for out-of-envelope changed paths after worker settlement", async () => {
+  it("rejects an out-of-envelope proposal without mutating the worktree", async () => {
     const fixture = await fixtureProject("hello");
     const result = await runTracer(fixture, "__OUTSIDE__", true, new ApprovingReviewer(), true);
     expect(result.view).toMatchObject({ lifecycle: "running", terminalOutcome: null, paused: true,
-      capabilityBoundary: { phase: "post_worker", status: "replan", reason: "path_not_owned", workerSettlement: { cleanup: "completed", terminalOutcome: "completed" } },
-    });
-    expect(result.events.find((event) => event.type === "task.capability_boundary_paused")?.payload).toMatchObject({
-      occurrence: { status: "replan", reason: "path_not_owned" },
-      evidence: { ownership: { outcome: "rejected" }, workspace: result.worktree },
+      capabilityBoundary: null, uncertainEffect: { boundary: "worker" },
     });
     expect(result.events.map((event) => event.type)).not.toContain("task.validation_started");
-    expect(result.allEvents.filter((event) => event.type === "capability_envelope.evaluated")
-      .some((event) => JSON.stringify(event.payload).includes('"reason":"path_not_owned"'))).toBe(true);
-    expect(result.allEvents.find((event) => event.type === "milestone.capability_boundary_paused")!.globalPosition)
-      .toBeLessThan(result.allEvents.find((event) => event.type === "task.capability_boundary_paused")!.globalPosition);
+    expect(existsSync(path.join(result.worktree, "README.md"))).toBe(false);
   });
 
   it("maps an OpenCode denied tool event to nonterminal durable attention", async () => {
@@ -179,17 +178,17 @@ describe("OpenCodeSingleFileTracerBullet", () => {
     expect(result.events.map((event) => event.type)).not.toContain("task.validation_started");
   });
 
-  it("pauses the milestone, retains ownership, and does not redispatch after post-writer replanning", async () => {
+  it("keeps the milestone nonterminal after an out-of-envelope proposal is rejected pre-effect", async () => {
     const fixture = await fixtureProject("hello");
     const first = await runTracer(fixture, "__OUTSIDE__", true, new ApprovingReviewer(), true);
     expect(first.milestone).toMatchObject({
-      lifecycle: "paused", terminalOutcome: null,
-      capabilityBoundary: { status: "replan", phase: "post_worker" },
+      lifecycle: "running", terminalOutcome: null,
+      capabilityBoundary: null,
       tasks: { "writer-tracer": { status: "running", terminalOutcome: null }, "review-tracer": { status: "planned" } },
     });
     expect(existsSync(first.worktree)).toBe(true);
     expect(first.events.map((event) => event.type)).not.toContain("task.validation_started");
-    expect(Object.values(projectWorkerLifecycle(first.allEvents).workers)[0]).toMatchObject({ status: "terminal", cleanup: "completed" });
+    expect(Object.values(projectWorkerLifecycle(first.allEvents).workers)[0]).toMatchObject({ status: "uncertain", cleanup: "uncertain" });
     expect(first.milestone?.writerOwnership["writer-tracer"]).toBeUndefined();
   });
 
@@ -369,7 +368,8 @@ async function runTracer(
   milestone: MilestoneRecord | null;
   worktree: string;
 }> {
-  const executable = fakeOpenCode(fixture.root, replacement);
+  const executable = fakeOpenCode(fixture.root, replacement,
+    (await gitOutput(fixture.repository, ["rev-parse", "HEAD"])).trim());
   const databasePath = path.join(fixture.root, "run.sqlite");
   const tracePath = path.join(fixture.root, "agent-tail.jsonl");
   const sink = AgentTailJsonlFileSink.open(
@@ -671,25 +671,31 @@ async function fixtureProject(expected: string, fullFails = false): Promise<Fixt
   };
 }
 
-function fakeOpenCode(root: string, replacement: string): string {
+function fakeOpenCode(root: string, replacement: string, baseRevision: string): string {
   const executable = path.join(root, `fake-opencode-${Math.random().toString(16).slice(2)}.mjs`);
+  const original = "export const greeting = 'hello';\n";
+  const content = replacement === "__DENIED_TOOL__" ? original : `export const greeting = ${JSON.stringify(replacement)};\n`;
+  const operation = replacement === "__OUTSIDE__"
+    ? { path: "README.md", expectedSha256: null, content: "outside scope\n",
+      contentSha256: createHash("sha256").update("outside scope\n").digest("hex") }
+    : { path: "src/greeting.mjs", expectedSha256: createHash("sha256").update(original).digest("hex"),
+      content, contentSha256: createHash("sha256").update(content).digest("hex") };
+  const proposal = buildWriterPatchProposal({ schemaVersion: 1, kind: "zentra.patch_proposal",
+    proposalId: `proposal-${Math.random().toString(16).slice(2)}`, baseRevision, operations: [operation] });
+  const output = replacement === "__PLAIN_PROTOCOL__"
+    ? 'process.stdout.write("plain protocol output\\n");'
+    : `${replacement === "__DENIED_TOOL__" ? 'process.stdout.write(JSON.stringify({ type: "tool.denied", tool: "webfetch", status: "denied" }) + "\\n");' : ""}
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: ${JSON.stringify(JSON.stringify(proposal))} } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-finish", tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } } }) + "\\n");`;
   writeFileSync(executable, `#!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") {
   process.stdout.write("OpenCode fixture 1.0\\n");
   process.exit(0);
 }
-const workspace = args[9];
 const packet = JSON.parse(args[10]);
 if (!packet.brief.includes("greeting")) process.exit(9);
-const source = path.join(workspace, packet.ownedPaths[0]);
-const current = readFileSync(source, "utf8");
-writeFileSync(source, current.replace("hello", ${JSON.stringify(replacement)}));
-${replacement === "__OUTSIDE__" ? 'writeFileSync(path.join(workspace, "README.md"), "outside scope\\n");' : ""}
-${replacement === "__DENIED_TOOL__" ? 'process.stdout.write(JSON.stringify({ type: "tool.denied", tool: "webfetch", status: "denied" }) + "\\n");' : ""}
-${replacement === "__PLAIN_PROTOCOL__" ? 'process.stdout.write("plain protocol output\\n");' : 'process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");'}
+${output}
 `, { mode: 0o755 });
   return realpathSync.native(executable);
 }

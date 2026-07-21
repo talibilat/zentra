@@ -72,6 +72,7 @@ import {
   buildRoleCapabilityBinding,
 } from "../workers/role-capability-envelope.js";
 import type { UntrustedEvidenceHandoff } from "./untrusted-evidence-handoff.js";
+import { PathClaimService } from "../workspaces/path-claims.js";
 
 export interface OpenCodeSingleFileTracerRequest {
   readonly project: ProjectConfig;
@@ -275,6 +276,15 @@ export class OpenCodeSingleFileTracerBullet {
       capsule = await this.capsule.run({
         ...request,
         signal: capsuleSignal,
+        writeClaim: {
+          service: new PathClaimService(this.tasks.eventJournal()),
+          claimId: `writer:${request.task.taskId}`,
+          ownerId: request.model.id,
+          paths: [changedPath],
+          leaseMs: Math.min(request.task.budget.maxSeconds * 1_000 + 30_000, 24 * 60 * 60 * 1_000),
+          maxToolCalls: 1,
+          correlationId: request.correlationId ?? request.task.taskId,
+        },
         ...(request.guidance === undefined ? {} : { guidance: request.guidance }),
         capabilityBinding: roleBinding,
       executable: request.probe!.executable!,

@@ -1,13 +1,13 @@
-function canonicalDarwinPath(scope: string): string {
-  const normalized = scope.normalize("NFD").toLowerCase();
+export function canonicalDarwinPathIdentity(scope: string): string {
+  const normalized = scope.normalize("NFD").toUpperCase().toLowerCase().normalize("NFD");
   if (normalized === "**") return "";
   const recursive = normalized.indexOf("/**");
   return recursive === -1 ? normalized : normalized.slice(0, recursive);
 }
 
 export function logicalPathScopesOverlap(first: string, second: string): boolean {
-  const left = canonicalDarwinPath(first);
-  const right = canonicalDarwinPath(second);
+  const left = canonicalDarwinPathIdentity(first);
+  const right = canonicalDarwinPathIdentity(second);
   if (left === "" || right === "") return true;
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
