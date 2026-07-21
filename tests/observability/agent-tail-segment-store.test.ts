@@ -119,6 +119,40 @@ describe("AgentTailSegmentStore", () => {
     reopenedJournal.close();
   });
 
+  it("converges live and reopened segmented projection beyond ten thousand updates", () => {
+    const root = fixture();
+    const database = path.join(root, "large-cursor.sqlite");
+    const journal = new SqliteEventJournal(database);
+    const total = 10_050;
+    let version = 0;
+    for (const count of [5_000, 5_000, 50]) {
+      journal.append("task-large", version, Array.from({ length: count }, () => ({
+        streamId: "task-large", type: "task.started", payload: { workerId: "worker-large" },
+        causationId: null, correlationId: "trace-large",
+      })));
+      version += count;
+    }
+    const directory = path.join(root, "large-trace");
+    const first = AgentTailSegmentStore.create({ trustedRoot: root, traceDirectory: directory,
+      traceId: "trace-large", limits: { maxEvents: 250, maxBytes: 1024 * 1024 } });
+    const projected = new ProjectingEventJournal(journal, first);
+    expect(projected.projectionFailed).toBe(false);
+    expect(first.report()).toMatchObject({ eventCount: total, throughPosition: total });
+    expect(journal.inspectProjectionCursor(first.projectionCursorName)).toMatchObject({ position: total, lag: 0 });
+    first.close();
+    journal.close();
+
+    const reopenedJournal = new SqliteEventJournal(database);
+    const reopened = AgentTailSegmentStore.reopen({ trustedRoot: root, traceDirectory: directory,
+      expectedTraceId: "trace-large" });
+    const resumed = new ProjectingEventJournal(reopenedJournal, reopened);
+    expect(resumed.projectionFailed).toBe(false);
+    expect(reopened.report()).toMatchObject({ eventCount: total, throughPosition: total });
+    expect(reopenedJournal.inspectProjectionCursor(reopened.projectionCursorName)).toMatchObject({ position: total, lag: 0 });
+    reopened.close();
+    reopenedJournal.close();
+  }, 30_000);
+
   it("recovers publication after cursor commit loss exactly once", () => {
     const root = fixture();
     const database = path.join(root, "commit-loss.sqlite");

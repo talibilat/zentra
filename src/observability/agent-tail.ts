@@ -111,6 +111,14 @@ import {
 import { WriterCheckpointSchema } from "../contracts/writer-request.js";
 import { WriterReceiptSchema } from "../workspaces/path-claims.js";
 import { parsePodEventPayload } from "../pods/pod-contracts.js";
+import {
+  BlockedReasonSchema,
+  SchedulerBudgetSchema,
+  SchedulerLimitsSchema,
+  SchedulerOutcomeSchema,
+  SchedulerResourceSchema,
+  SchedulerTaskSchema,
+} from "../scheduling/scheduler-contracts.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -187,6 +195,14 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "pod.checkpointed", "pod.evidence_recorded", "pod.revised",
   "pod.reconciliation_required", "pod.reconciliation_resolved", "pod.cancel_requested", "pod.completed", "pod.cancelled",
   "pod.denied", "pod.timed_out", "pod.failed",
+  "scheduler.daemon_started", "scheduler.daemon_stale", "scheduler.task_submitted",
+  "scheduler.task_ready", "scheduler.task_blocked", "scheduler.backpressure",
+  "scheduler.grant_consumed", "scheduler.resources_acquired", "scheduler.budget_acquired",
+  "scheduler.dispatch_intended", "scheduler.dispatch_started", "scheduler.worker_heartbeat",
+  "scheduler.cancellation_requested", "scheduler.cancellation_signalled", "scheduler.worker_outcome",
+  "scheduler.usage_recorded", "scheduler.dispatch_reconciliation_required",
+  "scheduler.resources_released", "scheduler.budget_released",
+  "lease.granted", "lease.heartbeat", "lease.renewed", "lease.expired", "lease.released", "lease.reconciled",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -483,6 +499,31 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "pod.denied": parseWith((payload) => parsePodEventPayload("pod.denied", payload)),
   "pod.timed_out": parseWith((payload) => parsePodEventPayload("pod.timed_out", payload)),
   "pod.failed": parseWith((payload) => parsePodEventPayload("pod.failed", payload)),
+  "scheduler.daemon_started": parseWith((payload) => parseSchedulerPayload("scheduler.daemon_started", payload)),
+  "scheduler.daemon_stale": parseWith((payload) => parseSchedulerPayload("scheduler.daemon_stale", payload)),
+  "scheduler.task_submitted": parseWith((payload) => parseSchedulerPayload("scheduler.task_submitted", payload)),
+  "scheduler.task_ready": parseWith((payload) => parseSchedulerPayload("scheduler.task_ready", payload)),
+  "scheduler.task_blocked": parseWith((payload) => parseSchedulerPayload("scheduler.task_blocked", payload)),
+  "scheduler.backpressure": parseWith((payload) => parseSchedulerPayload("scheduler.backpressure", payload)),
+  "scheduler.grant_consumed": parseWith((payload) => parseSchedulerPayload("scheduler.grant_consumed", payload)),
+  "scheduler.resources_acquired": parseWith((payload) => parseSchedulerPayload("scheduler.resources_acquired", payload)),
+  "scheduler.budget_acquired": parseWith((payload) => parseSchedulerPayload("scheduler.budget_acquired", payload)),
+  "scheduler.dispatch_intended": parseWith((payload) => parseSchedulerPayload("scheduler.dispatch_intended", payload)),
+  "scheduler.dispatch_started": parseWith((payload) => parseSchedulerPayload("scheduler.dispatch_started", payload)),
+  "scheduler.worker_heartbeat": parseWith((payload) => parseSchedulerPayload("scheduler.worker_heartbeat", payload)),
+  "scheduler.cancellation_requested": parseWith((payload) => parseSchedulerPayload("scheduler.cancellation_requested", payload)),
+  "scheduler.cancellation_signalled": parseWith((payload) => parseSchedulerPayload("scheduler.cancellation_signalled", payload)),
+  "scheduler.worker_outcome": parseWith((payload) => parseSchedulerPayload("scheduler.worker_outcome", payload)),
+  "scheduler.usage_recorded": parseWith((payload) => parseSchedulerPayload("scheduler.usage_recorded", payload)),
+  "scheduler.dispatch_reconciliation_required": parseWith((payload) => parseSchedulerPayload("scheduler.dispatch_reconciliation_required", payload)),
+  "scheduler.resources_released": parseWith((payload) => parseSchedulerPayload("scheduler.resources_released", payload)),
+  "scheduler.budget_released": parseWith((payload) => parseSchedulerPayload("scheduler.budget_released", payload)),
+  "lease.granted": parseWith((payload) => parseLeasePayload("lease.granted", payload)),
+  "lease.heartbeat": parseWith((payload) => parseLeasePayload("lease.heartbeat", payload)),
+  "lease.renewed": parseWith((payload) => parseLeasePayload("lease.renewed", payload)),
+  "lease.expired": parseWith((payload) => parseLeasePayload("lease.expired", payload)),
+  "lease.released": parseWith((payload) => parseLeasePayload("lease.released", payload)),
+  "lease.reconciled": parseWith((payload) => parseLeasePayload("lease.reconciled", payload)),
 };
 
 export interface AgentTailActor {
@@ -606,8 +647,12 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
     : event.type.startsWith("run.") || event.type.startsWith("preflight.") || event.type.startsWith("service.") ||
       event.type.startsWith("agenttrail.") || event.type.startsWith("gateway.")
       ? AGENT_TAIL_PAYLOAD_SCHEMAS[event.type as AgentTailEventType].parse(event.payload)
+    : event.type.startsWith("scheduler.")
+      ? redactedSchedulerPayload(event.type, event.payload)
+    : event.type.startsWith("lease.")
+      ? redactedLeasePayload(event.type, event.payload)
     : event.type.startsWith("pod.")
-      ? projectExactSafeFields(event.type, event.payload)
+      ? redactedPodPayload(event.type, event.payload)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -848,16 +893,22 @@ function identitiesFor(event: StoredEvent, payload: unknown): AgentTailIdentitie
     if (value !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) identities[target] = value;
   };
   assign("project_id", payloadString(payload, "projectId"));
+  const schedulerTask = payloadRecord(payload, "task");
+  const podCharter = payloadRecord(payload, "charter");
+  assign("project_id", payloadString(schedulerTask, "projectId"));
+  assign("project_id", payloadString(podCharter, "projectId"));
   assign("run_id", payloadString(payload, "runId") ??
     (event.type.startsWith("run.") || event.type.startsWith("preflight.")
       ? event.streamId.replace(/^run:/, "") : null));
   assign("milestone_id", payloadString(payload, "milestoneId") ??
     (event.type.startsWith("milestone.") ? event.streamId : null));
   assign("task_id", payloadString(payload, "taskId") ??
-    (event.type.startsWith("task.") || event.type.startsWith("artifact.") ? event.streamId : null));
+      (event.type.startsWith("task.") || event.type.startsWith("artifact.") ? event.streamId : null));
+  assign("task_id", payloadString(schedulerTask, "taskId"));
   assign("pod_id", payloadString(payload, "podId"));
   if (event.type.startsWith("pod.")) assign("pod_id", event.streamId);
   assign("worker_id", payloadString(payload, "workerId") ?? payloadString(payload, "actorId"));
+  assign("worker_id", payloadString(schedulerTask, "workerId"));
   assign("process_incarnation", payloadString(payload, "processIncarnation") ??
     payloadString(payloadRecord(payload, "process"), "processIncarnation"));
   return identities as unknown as AgentTailIdentities;
@@ -960,6 +1011,181 @@ function redactedClaimWriterReceipt(payload: unknown): unknown {
   };
 }
 
+const SchedulerId = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/);
+const SchedulerTime = z.number().int().nonnegative();
+const SchedulerTaskId = z.strictObject({ taskId: SchedulerId });
+
+function parseSchedulerPayload(type: string, payload: unknown): Readonly<Record<string, unknown>> {
+  const process = z.strictObject({
+    taskId: SchedulerId, dispatchId: z.string().uuid(), processIncarnation: SchedulerId,
+  });
+  switch (type) {
+    case "scheduler.daemon_started":
+      return z.strictObject({ schemaVersion: z.literal(1), schedulerId: SchedulerId,
+        processIncarnation: SchedulerId, pid: z.number().int().positive(), platform: z.literal("darwin-arm64"),
+        capabilities: z.array(z.string().min(1).max(2_048)).min(1).max(256), limits: SchedulerLimitsSchema,
+        startedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.daemon_stale":
+      return z.strictObject({ schemaVersion: z.literal(1), staleProcessIncarnation: SchedulerId,
+        replacementProcessIncarnation: SchedulerId, detectedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.task_submitted":
+      return z.strictObject({ task: SchedulerTaskSchema, submittedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.task_ready": return SchedulerTaskId.parse(payload);
+    case "scheduler.task_blocked":
+      return SchedulerTaskId.extend({ reasons: z.array(BlockedReasonSchema).min(1) }).parse(payload);
+    case "scheduler.backpressure":
+      return SchedulerTaskId.extend({ kind: z.enum(["resources", "budget"]), observedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.grant_consumed":
+      return SchedulerTaskId.extend({ grantId: SchedulerId, intentSha256: Digest, audience: SchedulerId,
+        expiresAtMs: z.number().int().positive() }).parse(payload);
+    case "scheduler.resources_acquired":
+      return SchedulerTaskId.extend({ resources: SchedulerResourceSchema }).parse(payload);
+    case "scheduler.budget_acquired":
+      return SchedulerTaskId.extend({ budget: SchedulerBudgetSchema }).parse(payload);
+    case "scheduler.dispatch_intended":
+      return process.extend({ projectId: SchedulerId, workerId: SchedulerId, taskLeaseId: SchedulerId,
+        workerLeaseId: SchedulerId, grantId: SchedulerId, intentSha256: Digest,
+        effect: z.enum(["computation", "potentially_effectful"]),
+        workspace: z.strictObject({ path: z.string().min(1).max(4_096).startsWith("/"), available: z.boolean() }),
+        resources: SchedulerResourceSchema, budget: SchedulerBudgetSchema, intendedAtMs: SchedulerTime,
+        deadlineAtMs: z.number().int().positive() }).parse(payload);
+    case "scheduler.dispatch_started":
+      return process.extend({ workerPid: z.number().int().positive(), workerIncarnation: SchedulerId,
+        workerProcessStartIdentity: z.string().min(1).max(4_096), startedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.worker_heartbeat":
+      return process.extend({ workerIncarnation: SchedulerId, observedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.cancellation_requested":
+      return SchedulerTaskId.extend({ reason: z.string().min(1).max(1_024), requestedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.cancellation_signalled":
+      return process.extend({ signalledAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.worker_outcome":
+      return SchedulerTaskId.extend({ dispatchId: z.string().uuid(), outcome: SchedulerOutcomeSchema,
+        observedAtMs: SchedulerTime, reconciliation: z.string().min(1).optional() }).parse(payload);
+    case "scheduler.usage_recorded":
+      return SchedulerTaskId.extend({ dispatchId: z.string().uuid(), delta: SchedulerBudgetSchema,
+        observedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.dispatch_reconciliation_required":
+      return SchedulerTaskId.extend({ dispatchId: z.string().uuid(), reason: z.string().min(1),
+        workspace: z.enum(["valid", "missing", "dirty"]), detectedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.resources_released":
+      return SchedulerTaskId.extend({ resources: SchedulerResourceSchema, releasedAtMs: SchedulerTime }).parse(payload);
+    case "scheduler.budget_released":
+      return SchedulerTaskId.extend({ reservedBudget: SchedulerBudgetSchema, usedBudget: SchedulerBudgetSchema,
+        unusedBudget: SchedulerBudgetSchema, releasedAtMs: SchedulerTime }).parse(payload);
+    default: throw new Error(`unknown Agent Tail scheduler event type ${type}`);
+  }
+}
+
+function redactedSchedulerPayload(type: string, payload: unknown): unknown {
+  const parsed = parseSchedulerPayload(type, payload);
+  if (type === "scheduler.task_submitted") {
+    const task = parsed["task"] as z.infer<typeof SchedulerTaskSchema>;
+    return { taskId: task.taskId, projectId: task.projectId, workerId: task.workerId,
+      effect: task.effect, platform: task.platform, requiredCapabilities: task.requiredCapabilities,
+      workspaceAvailable: task.workspace.available,
+      dependencies: task.admission.dependencies.map((dependency) => ({ taskId: dependency.taskId, state: dependency.state })),
+      admission: { decisionsApproved: task.admission.decisionsApproved, pathsAvailable: task.admission.pathsAvailable,
+        capabilitySupported: task.admission.capabilitySupported, platformSupported: task.admission.platformSupported,
+        policyPermits: task.admission.policyPermits, budgetAvailable: task.admission.budgetAvailable,
+        workspaceValid: task.admission.workspaceValid, acceptanceDeclared: task.admission.acceptanceCriteria.length > 0,
+        evidenceDeclared: task.admission.evidenceRequirements.length > 0 },
+      resources: task.resources, budget: task.budget, grantId: task.grantId,
+      submittedAtMs: parsed["submittedAtMs"] };
+  }
+  const safe: Record<string, unknown> = {};
+  for (const key of ["schemaVersion", "schedulerId", "processIncarnation", "staleProcessIncarnation",
+    "replacementProcessIncarnation", "pid", "platform", "capabilities", "limits", "startedAtMs",
+    "detectedAtMs", "taskId", "projectId", "workerId", "dispatchId", "workerIncarnation", "workerPid",
+    "kind", "outcome", "resources", "budget", "delta", "reservedBudget", "usedBudget", "unusedBudget",
+    "observedAtMs", "requestedAtMs", "signalledAtMs", "releasedAtMs", "intendedAtMs", "deadlineAtMs",
+    "effect", "grantId", "intentSha256", "taskLeaseId", "workerLeaseId", "audience", "expiresAtMs",
+    "workspace"] as const) {
+    if (parsed[key] === undefined) continue;
+    if (key === "workspace") {
+      safe["workspaceState"] = typeof parsed[key] === "string"
+        ? parsed[key]
+        : (parsed[key] as { readonly available: boolean }).available ? "available" : "unavailable";
+    }
+    else safe[key] = parsed[key];
+  }
+  return safe;
+}
+
+function redactedPodPayload(type: string, payload: unknown): unknown {
+  parsePodEventPayload(type, payload);
+  const source = payload as Readonly<Record<string, unknown>>;
+  if (type === "pod.registered") {
+    const charter = source["charter"] as Readonly<Record<string, unknown>>;
+    const tasks = charter["tasks"] as readonly Readonly<Record<string, unknown>>[];
+    const ownership = charter["ownership"] as Readonly<Record<string, unknown>>;
+    const digestPaths = (value: unknown): readonly string[] => {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        throw new Error("Agent Tail pod ownership projection is invalid");
+      }
+      return Object.freeze(value.map((item) => digestCanonical(item)).sort());
+    };
+    return {
+      podId: charter["podId"], projectId: charter["projectId"], revision: charter["revision"],
+      tasks: tasks.map((task) => ({ taskId: task["taskId"], dependencies: (task["dependencies"] as
+        readonly Readonly<Record<string, unknown>>[]).map((dependency) => ({ taskId: dependency["taskId"], state: dependency["state"] })),
+        budget: task["budget"] })),
+      budget: charter["budget"],
+      ownership: { ownedPathDigests: digestPaths(ownership["ownedPaths"]),
+        forbiddenPathDigests: digestPaths(ownership["forbiddenPaths"]) },
+    };
+  }
+  if (type === "pod.ownership_intent_observed") {
+    const paths = source["ownedPaths"];
+    if (!Array.isArray(paths) || paths.some((item) => typeof item !== "string")) {
+      throw new Error("Agent Tail pod ownership intent projection is invalid");
+    }
+    return { assignmentId: source["assignmentId"], taskId: source["taskId"],
+      ownerId: source["ownerId"], ownedPathDigests: paths.map((item) => digestCanonical(item)).sort() };
+  }
+  const assignment = payloadRecord(payload, "assignment");
+  const lease = payloadRecord(payload, "lease");
+  const safe = projectExactSafeFields(type, payload) as Record<string, unknown>;
+  for (const [key, value] of [
+    ["assignmentId", payloadString(assignment, "assignmentId")],
+    ["taskId", payloadString(assignment, "taskId")],
+    ["agentId", payloadString(assignment, "agentId")],
+    ["leaseId", payloadString(lease, "leaseId")],
+    ["workerId", payloadString(payload, "workerId")],
+    ["processIncarnation", payloadString(payload, "processIncarnation")],
+  ] as const) if (value !== null) safe[key] = value;
+  return safe;
+}
+
+function parseLeasePayload(type: string, payload: unknown): Readonly<Record<string, unknown>> {
+  const base = z.strictObject({ schemaVersion: z.literal(1), leaseId: SchedulerId });
+  if (type === "lease.granted") return base.extend({ taskId: SchedulerId, workerId: SchedulerId,
+    schedulerId: SchedulerId, processIncarnation: SchedulerId, scope: z.enum(["task", "worker"]),
+    grantedAtMs: SchedulerTime, expiresAtMs: z.number().int().positive() }).parse(payload);
+  if (type === "lease.heartbeat") return base.extend({ processIncarnation: SchedulerId,
+    workerIncarnation: SchedulerId, observedAtMs: SchedulerTime,
+    expiresAtMs: z.number().int().positive() }).parse(payload);
+  if (type === "lease.renewed") return base.extend({ processIncarnation: SchedulerId,
+    workerIncarnation: SchedulerId, renewedAtMs: SchedulerTime,
+    expiresAtMs: z.number().int().positive() }).parse(payload);
+  if (["lease.expired", "lease.released", "lease.reconciled"].includes(type)) return base.extend({
+    occurredAtMs: SchedulerTime, reason: z.string().min(1).max(1_024),
+  }).parse(payload);
+  throw new Error(`unknown Agent Tail lease event type ${type}`);
+}
+
+function redactedLeasePayload(type: string, payload: unknown): unknown {
+  const parsed = parseLeasePayload(type, payload);
+  const safe: Record<string, unknown> = {};
+  for (const key of ["schemaVersion", "leaseId", "taskId", "workerId", "schedulerId",
+    "processIncarnation", "workerIncarnation", "scope", "grantedAtMs", "observedAtMs",
+    "renewedAtMs", "occurredAtMs", "expiresAtMs"] as const) {
+    if (parsed[key] !== undefined) safe[key] = parsed[key];
+  }
+  safe["state"] = type.slice("lease.".length);
+  safe["authority"] = false;
+  return safe;
+}
+
 function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("source.") || event.type === "intake.snapshot_closed") return `intake:${event.streamId}`;
   if (isAttentionEventType(event.type)) return `attention:${event.streamId}`;
@@ -972,6 +1198,11 @@ function spanIdFor(event: StoredEvent): string {
   if (event.type.startsWith("release.")) return `release:${event.streamId}`;
   if (event.type.startsWith("routing.")) return `routing:${event.streamId}`;
   if (event.type.startsWith("pod.")) return `pod:${event.streamId}`;
+  if (event.type.startsWith("lease.")) return event.streamId;
+  if (event.type.startsWith("scheduler.")) {
+    const taskId = payloadString(event.payload, "taskId") ?? payloadString(payloadRecord(event.payload, "task"), "taskId");
+    return taskId === null ? `scheduler:${event.streamId}` : `scheduler:${event.streamId}:task:${taskId}`;
+  }
   if (event.type.startsWith("milestone.task_")) {
     const taskId = payloadString(event.payload, "taskId");
     if (taskId !== null) return `milestone:${event.streamId}:task:${taskId}`;
@@ -1026,6 +1257,8 @@ function actorFor(event: StoredEvent): AgentTailActor {
     return { id: "zentra-run-service", role: "orchestrator" };
   }
   if (event.type.startsWith("pod.")) return { id: "zentra-pod-coordinator", role: "subordinate_coordinator" };
+  if (event.type.startsWith("lease.")) return { id: "zentra-daemon-scheduler", role: "scheduler" };
+  if (event.type.startsWith("scheduler.")) return { id: "zentra-daemon-scheduler", role: "scheduler" };
   if (event.type.includes("capability_boundary_")) return { id: "zentra-capability-boundary", role: "policy" };
   if (event.type.startsWith("capability_envelope.")) return { id: "zentra-capability-policy", role: "policy" };
   if (event.type.startsWith("web_research.")) {
@@ -1136,6 +1369,8 @@ function operationName(event: StoredEvent): string {
   if (event.type.startsWith("capability_envelope.")) return "capability_envelope";
   if (event.type.startsWith("web_research.")) return "web_research";
   if (event.type.startsWith("worker.")) return "worker";
+  if (event.type.startsWith("lease.")) return "lease_health";
+  if (event.type.startsWith("scheduler.")) return "scheduling";
   if (event.type === "milestone.plan_revised" || event.type === "milestone.replanning_resolved") return "milestone_replanning";
   if (event.type === "milestone.release_operation_bound") return "release_preparation";
   if (event.type === "milestone.paused") {
@@ -1207,6 +1442,14 @@ function operationStatus(event: StoredEvent): string {
     return payloadString(event.payload, "outcome") === "completed" ? "completed" : "waiting";
   }
   if (type === "worker.terminal") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "lease.expired") return "timed_out";
+  if (type === "lease.released" || type === "lease.reconciled") return "completed";
+  if (type.startsWith("lease.")) return "running";
+  if (type === "scheduler.task_submitted" || type === "scheduler.task_ready" || type === "scheduler.task_blocked" || type === "scheduler.backpressure") return "waiting";
+  if (type === "scheduler.worker_outcome") return payloadString(event.payload, "outcome") ?? "failed";
+  if (type === "scheduler.dispatch_reconciliation_required") return "waiting";
+  if (type === "scheduler.cancellation_requested" || type === "scheduler.cancellation_signalled") return "cancelling";
+  if (type.startsWith("scheduler.")) return type.endsWith("released") || type === "scheduler.daemon_stale" ? "completed" : "running";
   if (type === "release.step_started" || type === "release.worktree_intent") return "running";
   if (type === "release.step_observed") return payloadString(event.payload, "outcome") ?? "failed";
   if (type === "release.failed") return "failed";

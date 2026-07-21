@@ -235,6 +235,18 @@ export {
   AgentTailTraceService,
   createSegmentedAgentTailProjection,
 } from "./observability/agent-tail-trace.js";
+export {
+  coalesceAgentTrailHeartbeats,
+  projectAgentTrailFleet,
+  rankAgentTrailWarnings,
+} from "./observability/agent-trail-fleet.js";
+export type {
+  AgentTrailAdvisoryWarningInput,
+  AgentTrailFleetProjection,
+  RankedAgentTrailWarning,
+} from "./observability/agent-trail-fleet.js";
+export { AgentTrailAttentionBridge } from "./observability/agenttrail-attention-bridge.js";
+export type { AgentTrailWarningObservation } from "./observability/agenttrail-attention-bridge.js";
 export type {
   AgentTailEvent,
   AgentTailIdentities,

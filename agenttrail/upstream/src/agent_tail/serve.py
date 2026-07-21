@@ -24,6 +24,114 @@ from .security import security_projection
 from .warning_policy import WarningPolicy
 
 
+class FleetProjectionStore:
+    """Bounded compact state rebuilt from every canonical source event."""
+
+    def __init__(self, *, max_entries: int = 50_000) -> None:
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries <= 0:
+            raise ValueError("fleet projection max_entries must be a positive integer")
+        self._max_entries = max_entries
+        self._events: dict[str, dict[str, Event]] = {}
+        self._usage: dict[str, dict[str, dict[str, int]]] = {}
+        self._heads: dict[str, int] = {}
+        self._dropped: dict[str, int] = {}
+        self._global_gaps = 0
+        self._entry_count = 0
+
+    def add(self, event: Event) -> None:
+        self._heads[event.trace_id] = max(self._heads.get(event.trace_id, 0), event.sequence)
+        key = self._key(event)
+        if key is None:
+            return
+        payload = event.raw.get("payload")
+        if event.kind == "scheduler.usage_recorded" and isinstance(payload, dict):
+            task_id = payload.get("taskId")
+            delta = payload.get("delta")
+            if isinstance(task_id, str) and isinstance(delta, dict):
+                trace_usage = self._usage.setdefault(event.trace_id, {})
+                if task_id not in trace_usage and not self._reserve(event.trace_id):
+                    return
+                if task_id not in trace_usage:
+                    self._entry_count += 1
+                current = trace_usage.setdefault(task_id, _zero_budget())
+                trace_usage[task_id] = _add_numbers(current, _bounded_numbers(delta, _zero_budget()))
+            return
+        trace = self._events.setdefault(event.trace_id, {})
+        if key not in trace and not self._reserve(event.trace_id):
+            return
+        if key not in trace:
+            self._entry_count += 1
+        trace[key] = event
+
+    def mark_gap(self) -> None:
+        self._global_gaps += 1
+
+    def events(self, trace_id: str) -> tuple[Event, ...]:
+        return tuple(sorted(self._events.get(trace_id, {}).values(), key=lambda event: event.sequence))
+
+    def usage(self, trace_id: str) -> Mapping[str, Mapping[str, int]]:
+        return self._usage.get(trace_id, {})
+
+    def metadata(self, trace_id: str) -> dict[str, object]:
+        dropped = self._dropped.get(trace_id, 0)
+        return {
+            "source_high_water_position": self._heads.get(trace_id, 0),
+            "history_complete": dropped == 0 and self._global_gaps == 0,
+            "dropped_projection_entries": dropped,
+            "ingestion_gap_count": self._global_gaps,
+            "retention_independent": True,
+        }
+
+    def _reserve(self, trace_id: str) -> bool:
+        if self._entry_count < self._max_entries:
+            return True
+        self._dropped[trace_id] = self._dropped.get(trace_id, 0) + 1
+        return False
+
+    @staticmethod
+    def _key(event: Event) -> str | None:
+        payload = event.raw.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        kind = event.kind
+        task_id = payload.get("taskId")
+        lease_id = payload.get("leaseId")
+        pod_id = event.raw.get("identities", {}).get("pod_id")
+        if kind == "scheduler.daemon_started":
+            return f"daemon:{payload.get('processIncarnation')}"
+        if kind == "scheduler.daemon_stale":
+            return f"daemon-stale:{payload.get('staleProcessIncarnation')}"
+        if kind == "scheduler.task_submitted":
+            return f"task:{task_id}:submitted"
+        if kind in {"scheduler.task_ready", "scheduler.task_blocked", "scheduler.dispatch_intended",
+                    "scheduler.dispatch_started", "scheduler.cancellation_requested",
+                    "scheduler.dispatch_reconciliation_required", "scheduler.worker_outcome"}:
+            return f"task:{task_id}:state"
+        if kind == "scheduler.backpressure":
+            return f"task:{task_id}:backpressure"
+        if kind in {"scheduler.resources_acquired", "scheduler.resources_released"}:
+            return f"task:{task_id}:resources"
+        if kind in {"scheduler.budget_acquired", "scheduler.budget_released"}:
+            return f"task:{task_id}:budget"
+        if kind == "scheduler.worker_heartbeat":
+            return f"task:{task_id}:heartbeat"
+        if kind == "scheduler.usage_recorded":
+            return f"task:{task_id}:usage"
+        if kind == "lease.granted":
+            return f"lease:{lease_id}:grant"
+        if kind.startswith("lease."):
+            return f"lease:{lease_id}:state"
+        if kind == "pod.registered":
+            return f"pod:{pod_id}:registered"
+        if kind == "pod.ownership_intent_observed":
+            return f"pod:{pod_id}:ownership:{payload.get('assignmentId')}"
+        if kind.startswith("pod."):
+            return f"pod:{pod_id}:state"
+        if kind.startswith("gateway."):
+            return "gateway:state"
+        return None
+
+
 @dataclass(frozen=True)
 class ServeConfig:
     host: str = "127.0.0.1"
@@ -68,6 +176,7 @@ class RunStore:
         metadata_only: bool = False,
         max_live_updates: int = 10_000,
         warning_policy: WarningPolicy | None = None,
+        fleet_max_entries: int = 50_000,
     ) -> None:
         if (
             not isinstance(max_live_updates, int)
@@ -103,6 +212,7 @@ class RunStore:
                 "detected_at": _epoch().isoformat(),
             })
         self._payload_details: dict[tuple[str, str], object] = {}
+        self._fleet_projection = FleetProjectionStore(max_entries=fleet_max_entries)
         self._last_eviction_count = 0
         self._warning_history: dict[tuple[str, str, str], dict[str, object]] = {}
         self._terminal_traces: dict[str, str] = {}
@@ -190,6 +300,7 @@ class RunStore:
                 )
                 self._payload_details[(safe.trace_id, safe.event_id)] = _payload_preview(retained)
             prior_terminal_state = self._terminal_traces.get(safe.trace_id)
+            self._fleet_projection.add(safe)
             self._index.add(safe)
             self._trace_by_event_id[safe.event_id] = safe.trace_id
             eviction_count = self._index.eviction_count
@@ -349,6 +460,15 @@ class RunStore:
             runtime_warnings = self._warnings_for_trace(
                 trace_id, now, security["findings"]
             )
+            fleet = _fleet_projection(
+                self._fleet_projection.events(trace_id),
+                runtime_warnings + projection["warnings"],
+                source=self._source_status,
+                cursor=self._cursor,
+                now=now,
+                usage_overrides=self._fleet_projection.usage(trace_id),
+                projection_metadata=self._fleet_projection.metadata(trace_id),
+            )
             outcome_cost = _outcome_cost(
                 view,
                 evidence_map,
@@ -396,6 +516,7 @@ class RunStore:
                     for actor_id, actor in view.actors.items()
                 ],
                 "warnings": runtime_warnings + projection["warnings"],
+                "fleet": fleet,
                 "links": projection["links"],
                 "unresolved_endpoints": projection["unresolved_endpoints"],
                 "evidence_map": evidence_map,
@@ -548,6 +669,7 @@ class RunStore:
             else:
                 code = "INVALID_EVENT"
             self.add_finding("ingestion", code, message, line=error.line)
+            self._fleet_projection.mark_gap()
         self._errors = tuple(errors)
 
     def _publish(self, message_type: str, data: dict[str, object]) -> None:
@@ -974,6 +1096,358 @@ def _duration_seconds(events: Iterable[Event]) -> float | None:
         max(event.timestamp for event in event_list)
         - min(event.timestamp for event in event_list)
     ).total_seconds()
+
+
+def _fleet_projection(
+    source_events: Iterable[Event],
+    warnings: Iterable[Mapping[str, object]],
+    *,
+    source: Mapping[str, object],
+    cursor: int,
+    now: datetime,
+    usage_overrides: Mapping[str, Mapping[str, int]] = {},
+    projection_metadata: Mapping[str, object] = {},
+) -> dict[str, object]:
+    events = list(source_events)
+    tasks: dict[str, dict[str, object]] = {}
+    pods: dict[str, dict[str, object]] = {}
+    leases: dict[str, dict[str, object]] = {}
+    incarnations: dict[str, str] = {}
+    capacity = _zero_resources()
+    budget_capacity = _zero_budget()
+    observability = "healthy"
+    heartbeat_groups: dict[tuple[str, int], dict[str, object]] = {}
+    backfill_high_water = 0
+
+    for event in events:
+        payload = event.raw.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        kind = event.kind
+        if kind == "scheduler.daemon_started":
+            incarnation = payload.get("processIncarnation")
+            if isinstance(incarnation, str):
+                incarnations[incarnation] = "active"
+            limits = payload.get("limits")
+            if isinstance(limits, dict):
+                capacity = _bounded_numbers(limits.get("resources"), capacity)
+                budget_capacity = _bounded_numbers(limits.get("budget"), budget_capacity)
+        elif kind == "scheduler.daemon_stale":
+            stale = payload.get("staleProcessIncarnation")
+            replacement = payload.get("replacementProcessIncarnation")
+            if isinstance(stale, str):
+                incarnations[stale] = "stale"
+            if isinstance(replacement, str):
+                incarnations[replacement] = "active"
+        elif kind == "scheduler.task_submitted":
+            task_id = payload.get("taskId")
+            project_id = payload.get("projectId")
+            worker_id = payload.get("workerId")
+            if all(isinstance(value, str) for value in (task_id, project_id, worker_id)):
+                tasks[str(task_id)] = {
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "worker_id": worker_id,
+                    "state": "queued",
+                    "backpressure": None,
+                    "resources": _bounded_numbers(payload.get("resources"), _zero_resources()),
+                    "budget": _bounded_numbers(payload.get("budget"), _zero_budget()),
+                    "used_budget": _zero_budget(),
+                    "integration": bool(
+                        isinstance(payload.get("resources"), dict)
+                        and payload["resources"].get("integration", 0) > 0
+                    ),
+                    "process_incarnation": None,
+                    "worker_incarnation": None,
+                    "last_heartbeat_at_ms": None,
+                    "submitted_sequence": event.sequence,
+                    "acquired_resources": _zero_resources(),
+                    "acquired_budget": _zero_budget(),
+                    "daemon_stale": False,
+                    "heartbeat_mismatch": False,
+                }
+        elif kind.startswith("scheduler."):
+            task_id = payload.get("taskId")
+            task = tasks.get(str(task_id)) if isinstance(task_id, str) else None
+            if task is not None:
+                if kind == "scheduler.task_ready":
+                    task["state"] = "ready"
+                elif kind == "scheduler.task_blocked":
+                    task["state"] = "blocked"
+                elif kind == "scheduler.backpressure":
+                    task["backpressure"] = payload.get("kind")
+                elif kind == "scheduler.resources_acquired":
+                    task["acquired_resources"] = _bounded_numbers(payload.get("resources"), _zero_resources())
+                elif kind == "scheduler.resources_released":
+                    task["acquired_resources"] = _zero_resources()
+                    task["backpressure"] = None
+                elif kind == "scheduler.budget_acquired":
+                    task["acquired_budget"] = _bounded_numbers(payload.get("budget"), _zero_budget())
+                elif kind == "scheduler.budget_released":
+                    task["acquired_budget"] = _zero_budget()
+                    task["used_budget"] = _bounded_numbers(payload.get("usedBudget"), _zero_budget())
+                    task["backpressure"] = None
+                elif kind == "scheduler.dispatch_intended":
+                    task["state"] = "dispatched"
+                    task["process_incarnation"] = payload.get("processIncarnation")
+                    task["backpressure"] = None
+                elif kind == "scheduler.dispatch_started":
+                    task["state"] = "running"
+                    task["process_incarnation"] = payload.get("processIncarnation")
+                    task["worker_incarnation"] = payload.get("workerIncarnation")
+                elif kind == "scheduler.worker_heartbeat":
+                    process_matches = payload.get("processIncarnation") == task["process_incarnation"]
+                    worker_matches = payload.get("workerIncarnation") == task["worker_incarnation"]
+                    if not process_matches or not worker_matches or task["daemon_stale"]:
+                        task["heartbeat_mismatch"] = True
+                        continue
+                    observed = payload.get("observedAtMs")
+                    if isinstance(observed, int) and not isinstance(observed, bool):
+                        task["last_heartbeat_at_ms"] = observed
+                        key = (str(task["worker_id"]), observed // 60_000)
+                        group = heartbeat_groups.setdefault(key, {
+                            "worker_id": task["worker_id"], "minute": observed // 60_000,
+                            "count": 0, "latest_event_id": event.event_id,
+                        })
+                        group["count"] = int(group["count"]) + 1
+                        group["latest_event_id"] = event.event_id
+                elif kind == "scheduler.cancellation_requested":
+                    task["state"] = "cancelling" if task["state"] in {
+                        "dispatched", "running", "cancelling", "reconciling"
+                    } else "cancelled"
+                elif kind == "scheduler.dispatch_reconciliation_required":
+                    task["state"] = "reconciling"
+                elif kind == "scheduler.worker_outcome":
+                    task["state"] = payload.get("outcome", "failed")
+                    task["backpressure"] = None
+                elif kind == "scheduler.usage_recorded":
+                    task["used_budget"] = _add_numbers(
+                        task["used_budget"],
+                        _bounded_numbers(payload.get("delta"), _zero_budget()),
+                    )
+        if kind == "scheduler.daemon_stale":
+            stale_incarnation = payload.get("staleProcessIncarnation")
+            for task in tasks.values():
+                if task["process_incarnation"] == stale_incarnation:
+                    task["daemon_stale"] = True
+        if kind == "gateway.degraded":
+            observability = "degraded"
+        elif kind == "gateway.backfill_target":
+            observability = "backfilling"
+            target = payload.get("target")
+            if isinstance(target, dict) and isinstance(target.get("throughPosition"), int):
+                backfill_high_water = max(backfill_high_water, int(target["throughPosition"]))
+        elif kind == "gateway.recovered":
+            observability = "healthy"
+        if kind == "pod.registered":
+            pod_id = event.raw.get("identities", {}).get("pod_id")
+            if not isinstance(pod_id, str):
+                pod_id = event.span_id.removeprefix("pod:")
+            pods[pod_id] = {
+                "pod_id": pod_id,
+                "project_id": payload.get("projectId") or event.raw.get("identities", {}).get("project_id"),
+                "state": "registered",
+                "tasks": [{
+                    "task_id": task.get("taskId"),
+                    "dependencies": [dependency.get("taskId") for dependency in task.get("dependencies", [])
+                        if isinstance(dependency, dict)],
+                } for task in payload.get("tasks", []) if isinstance(task, dict)],
+                "ownership_claim_digests": list(
+                    payload.get("ownership", {}).get("ownedPathDigests", [])
+                    if isinstance(payload.get("ownership"), dict) else []
+                ),
+            }
+        elif kind.startswith("pod."):
+            pod_id = event.raw.get("identities", {}).get("pod_id")
+            pod = pods.get(str(pod_id)) if isinstance(pod_id, str) else None
+            if pod is not None:
+                pod["state"] = _pod_display_state(kind, str(pod["state"]))
+                if kind == "pod.ownership_intent_observed" and isinstance(payload.get("ownedPathDigests"), list):
+                    pod["ownership_claim_digests"] = sorted(set(
+                        [*pod["ownership_claim_digests"], *payload["ownedPathDigests"]]
+                    ))
+        if kind == "lease.granted" and isinstance(payload.get("leaseId"), str):
+            leases[str(payload["leaseId"])] = {
+                "lease_id": payload["leaseId"], "task_id": payload.get("taskId"),
+                "worker_id": payload.get("workerId"), "scope": payload.get("scope"),
+                "process_incarnation": payload.get("processIncarnation"),
+                "worker_incarnation": None, "last_heartbeat_at_ms": None,
+                "expires_at_ms": payload.get("expiresAtMs"), "state": "active",
+                "authority": False,
+            }
+        elif kind.startswith("lease.") and isinstance(payload.get("leaseId"), str):
+            lease = leases.get(str(payload["leaseId"]))
+            if lease is not None:
+                if kind in {"lease.heartbeat", "lease.renewed"}:
+                    lease["worker_incarnation"] = payload.get("workerIncarnation")
+                    lease["last_heartbeat_at_ms"] = payload.get("observedAtMs", payload.get("renewedAtMs"))
+                    lease["expires_at_ms"] = payload.get("expiresAtMs")
+                elif kind in {"lease.expired", "lease.released", "lease.reconciled"}:
+                    lease["state"] = kind.removeprefix("lease.")
+
+    active_states = {"dispatched", "running", "cancelling", "reconciling"}
+    terminal_states = {"completed", "cancelled", "denied", "timed_out", "failed"}
+    workers = []
+    now_ms = int(now.timestamp() * 1_000)
+    for worker_id in sorted({str(task["worker_id"]) for task in tasks.values()}):
+        worker_tasks = sorted((task for task in tasks.values() if task["worker_id"] == worker_id),
+            key=lambda item: int(item["submitted_sequence"]))
+        active_tasks = [task for task in worker_tasks if task["state"] in active_states]
+        active = bool(active_tasks)
+        current = (active_tasks or worker_tasks)[-1]
+        heartbeat_values = [int(task["last_heartbeat_at_ms"]) for task in active_tasks
+            if isinstance(task["last_heartbeat_at_ms"], int)]
+        heartbeat = max(heartbeat_values, default=None)
+        daemon_state = incarnations.get(str(current["process_incarnation"]), "unknown")
+        stale_identity = daemon_state == "stale" or any(task["heartbeat_mismatch"] for task in active_tasks)
+        health = "stale" if stale_identity else "inactive" if not active else "unknown" if heartbeat is None else (
+            "stale" if now_ms - int(heartbeat) > 120_000 else "healthy"
+        )
+        workers.append({
+            "worker_id": worker_id, "task_ids": [task["task_id"] for task in worker_tasks],
+            "project_id": current["project_id"], "registered": True, "active": active,
+            "process_incarnation": current["worker_incarnation"],
+            "daemon_incarnation": current["process_incarnation"], "daemon_state": daemon_state,
+            "health": health,
+            "last_heartbeat_at_ms": heartbeat,
+            "lease_health": next((
+                "expired" if lease["state"] == "active" and isinstance(lease["expires_at_ms"], int)
+                    and int(lease["expires_at_ms"]) < now_ms else lease["state"]
+                for lease in leases.values() if lease["worker_id"] == task["worker_id"]
+            ), "unassigned"),
+        })
+    projects = []
+    for project_id in sorted({str(task["project_id"]) for task in tasks.values()}):
+        items = [task for task in tasks.values() if task["project_id"] == project_id]
+        projects.append({
+            "project_id": project_id,
+            "queued": sum(task["state"] not in active_states | terminal_states for task in items),
+            "active": sum(task["state"] in active_states for task in items),
+            "backpressured": sum(task["backpressure"] is not None for task in items),
+            "dispatches": sum(task["process_incarnation"] is not None for task in items),
+        })
+    ranked = _rank_advisory_warnings(warnings)
+    for worker in workers:
+        if worker["health"] == "stale":
+            ranked.append({
+                "code": "STALE_HEARTBEAT", "summary": "Worker heartbeat is stale.",
+                "event_id": next((group["latest_event_id"] for group in heartbeat_groups.values()
+                    if group["worker_id"] == worker["worker_id"]), None),
+                "actor_id": worker["worker_id"], "evidence_event_ids": [
+                    group["latest_event_id"] for group in heartbeat_groups.values()
+                    if group["worker_id"] == worker["worker_id"]
+                ], "classification": "advisory", "authority": "none",
+            })
+    ranked.sort(key=lambda item: (_warning_priority(str(item["code"])), str(item.get("event_id"))))
+    for rank, warning in enumerate(ranked, 1):
+        warning["rank"] = rank
+    latest_sequence = max((event.sequence for event in events), default=0)
+    source_high_water = int(projection_metadata.get("source_high_water_position", latest_sequence))
+    history_complete = projection_metadata.get("history_complete", True) is True
+    projection_position = source_high_water if history_complete else latest_sequence
+    journal_high_water = max(projection_position, backfill_high_water, source_high_water)
+    projection_lag = journal_high_water - projection_position
+    if (projection_lag > 0 or not history_complete) and observability == "healthy":
+        observability = "degraded"
+    if observability != "healthy":
+        ranked.append({
+            "code": "DEGRADED_OBSERVABILITY", "summary": "AgentTrail observability is not fully caught up.",
+            "event_id": events[-1].event_id if events else None, "actor_id": "zentra-agenttrail-supervisor",
+            "evidence_event_ids": [events[-1].event_id] if events else [],
+            "classification": "advisory", "authority": "none", "rank": 0,
+        })
+        ranked.sort(key=lambda item: (_warning_priority(str(item["code"])), str(item.get("event_id"))))
+        for rank, warning in enumerate(ranked, 1):
+            warning["rank"] = rank
+    if source.get("state") not in {"caught_up", "disconnected"}:
+        observability = "degraded" if observability == "healthy" else observability
+
+    return {
+        "schema_version": 1,
+        "pods": sorted(pods.values(), key=lambda pod: str(pod["pod_id"])),
+        "workers": {"registered": len(workers), "active": sum(worker["active"] for worker in workers), "items": workers},
+        "process_incarnations": [
+            {"id": identity, "state": state}
+            for identity, state in sorted(incarnations.items(), key=lambda item: (item[1], item[0]))
+        ],
+        "leases": sorted(leases.values(), key=lambda lease: str(lease["lease_id"])),
+        "queue": {
+            "queued": sum(project["queued"] for project in projects),
+            "active": sum(project["active"] for project in projects),
+            "backpressured": sum(project["backpressured"] for project in projects),
+            "projects": projects,
+        },
+        "resources": {"capacity": capacity, "used": _sum_numbers(
+            (task["acquired_resources"] for task in tasks.values()),
+            _zero_resources(),
+        )},
+        "budgets": {"capacity": budget_capacity, "reserved": _sum_numbers(
+            (task["acquired_budget"] for task in tasks.values()),
+            _zero_budget(),
+        ), "used": _sum_numbers(
+            (usage_overrides.get(str(task["task_id"]), task["used_budget"]) for task in tasks.values()), _zero_budget()
+        )},
+        "integration_units": [{
+            "task_id": task["task_id"], "project_id": task["project_id"],
+            "state": "terminal" if task["state"] in terminal_states else "active" if task["state"] in active_states else "queued",
+            "placeholder": True,
+        } for task in tasks.values() if task["integration"]],
+        "heartbeat_groups": sorted(heartbeat_groups.values(), key=lambda item: (str(item["worker_id"]), int(item["minute"]))),
+        "observability": {"state": observability, "projection_position": projection_position,
+            "journal_high_water_position": journal_high_water, "projection_lag": projection_lag,
+            "live_cursor": cursor, **projection_metadata},
+        "attention": ranked,
+    }
+
+
+def _zero_resources() -> dict[str, int]:
+    return {"reasoning": 0, "writers": 0, "heavyValidation": 0, "review": 0, "integration": 0}
+
+
+def _zero_budget() -> dict[str, int]:
+    return {"seconds": 0, "inputTokens": 0, "outputTokens": 0, "costUsdNano": 0}
+
+
+def _bounded_numbers(candidate: object, shape: Mapping[str, int]) -> dict[str, int]:
+    if not isinstance(candidate, dict):
+        return dict(shape)
+    return {key: value if isinstance((value := candidate.get(key)), int) and not isinstance(value, bool) and value >= 0 else 0 for key in shape}
+
+
+def _add_numbers(left: Mapping[str, object], right: Mapping[str, object]) -> dict[str, int]:
+    return {key: int(left.get(key, 0)) + int(right.get(key, 0)) for key in left}
+
+
+def _sum_numbers(values: Iterable[Mapping[str, object]], shape: Mapping[str, int]) -> dict[str, int]:
+    result = dict(shape)
+    for value in values:
+        result = _add_numbers(result, value)
+    return result
+
+
+def _pod_display_state(kind: str, current: str) -> str:
+    return {
+        "pod.admitted": "admitted", "pod.started": "running", "pod.blocked": "blocked",
+        "pod.attention_raised": "blocked", "pod.reconciliation_required": "blocked",
+        "pod.cancel_requested": "cancel_requested", "pod.completed": "completed",
+        "pod.cancelled": "cancelled", "pod.denied": "denied", "pod.timed_out": "timed_out",
+        "pod.failed": "failed",
+    }.get(kind, current)
+
+
+def _rank_advisory_warnings(warnings: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [{
+        "code": str(warning.get("code", "OBSERVABILITY_WARNING")),
+        "summary": str(warning.get("summary", "AgentTrail warning")),
+        "event_id": warning.get("event_id"), "actor_id": warning.get("actor_id"),
+        "evidence_event_ids": [warning["event_id"]] if warning.get("event_id") else [],
+        "classification": "advisory", "authority": "none",
+    } for warning in warnings]
+
+
+def _warning_priority(code: str) -> int:
+    return {"UNCERTAIN_EFFECT": 0, "DEGRADED_OBSERVABILITY": 1, "STALE_HEARTBEAT": 2,
+        "OWNERSHIP_CONFLICT": 3, "BUDGET_PRESSURE": 4, "BACKPRESSURE": 5}.get(code, 100)
 
 
 def _relationships(view) -> dict[str, object]:

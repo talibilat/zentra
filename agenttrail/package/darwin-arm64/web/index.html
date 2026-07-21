@@ -234,6 +234,27 @@
     .playhead { position: absolute; top: 26px; bottom: 0; width: 2px; background: var(--run); box-shadow: 0 0 8px var(--run); z-index: 6; pointer-events: none; }
 
     .sequence-inner { position: relative; padding: 34px 20px 30px; min-height: 100%; }
+    .fleet-view { position: absolute; inset: 0; overflow: auto; padding: 16px; background: var(--stage); }
+    .fleet-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; max-width: 1400px; margin: 0 auto; }
+    .fleet-card { grid-column: span 4; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px; }
+    .fleet-card.wide { grid-column: span 8; }
+    .fleet-card.full { grid-column: 1 / -1; }
+    .fleet-card h3 { margin: 0 0 10px; color: var(--faint); font: 700 10px "IBM Plex Mono", monospace; letter-spacing: 1px; text-transform: uppercase; }
+    .fleet-stat { display: flex; gap: 8px; align-items: baseline; margin-bottom: 8px; }
+    .fleet-stat strong { color: var(--text); font: 700 24px "IBM Plex Mono", monospace; }
+    .fleet-stat span, .fleet-row { color: var(--dim); font: 500 10px/1.5 "IBM Plex Mono", monospace; }
+    .fleet-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+    .fleet-row:first-of-type { border-top: 0; }
+    .fleet-row .stale, .fleet-row .degraded { color: var(--err); }
+    .fleet-row .active, .fleet-row .healthy { color: var(--ok); }
+    .fleet-row .advisory { color: var(--warn); }
+    .fleet-dag { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .fleet-node { padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); font: 600 10px "IBM Plex Mono", monospace; }
+    .fleet-table { width: 100%; table-layout: fixed; border-collapse: collapse; font: 500 9.5px/1.45 "IBM Plex Mono", monospace; }
+    .fleet-table th, .fleet-table td { min-width: 0; padding: 7px 5px; border-top: 1px solid var(--line); text-align: right; overflow-wrap: anywhere; }
+    .fleet-table thead th { border-top: 0; color: var(--faint); font-weight: 600; }
+    .fleet-table th:first-child, .fleet-table td:first-child { width: 28%; text-align: left; color: var(--text); }
+    .fleet-table td[data-available="false"] { color: var(--faint); }
     .seq-col-head { position: absolute; top: 6px; transform: translateX(-50%); display: flex; align-items: center; gap: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; white-space: nowrap; }
     .seq-col-head .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
     .seq-col-head .id { font: 600 10px "IBM Plex Sans", sans-serif; color: var(--text); }
@@ -383,6 +404,8 @@
     .io-pre { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 400 11px/1.55 "IBM Plex Mono", monospace; color: var(--text); white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; margin: 0; }
     .io-truncated { font: 400 10px "IBM Plex Mono", monospace; color: var(--faint); margin-top: 6px; }
     .io-load-btn { margin-top: 6px; background: transparent; border: 1px solid var(--line); color: var(--accent); border-radius: 6px; padding: 4px 8px; cursor: pointer; font: 500 10px "IBM Plex Mono", monospace; }
+    @media (max-width: 900px) { .fleet-card, .fleet-card.wide { grid-column: span 6; } }
+    @media (max-width: 620px) { .fleet-view { padding: 10px; } .fleet-card, .fleet-card.wide, .fleet-card.full { grid-column: 1 / -1; } .fleet-row { grid-template-columns: 1fr; gap: 2px; } }
 
     .overview-desc { font: 400 12.5px/1.7 "IBM Plex Sans", sans-serif; color: var(--dim); }
     .overview-desc .em { color: var(--text); }
@@ -486,6 +509,7 @@
             <button type="button" data-view="tree" aria-label="Tree"><span class="icon">⊢</span><span>Tree</span></button>
             <button type="button" data-view="swimlane" aria-label="Swimlane"><span class="icon">▤</span><span>Swimlane</span></button>
             <button type="button" data-view="sequence" aria-label="Sequence"><span class="icon">⇄</span><span>Sequence</span></button>
+            <button type="button" data-view="fleet" aria-label="Fleet"><span class="icon">▦</span><span>Fleet</span></button>
           </div>
           <div class="stage-head-spacer"></div>
           <button type="button" id="focus-banner" class="focus-banner" data-action="clear-focus" hidden></button>
@@ -496,6 +520,7 @@
           <div id="stage" class="view-stage"></div>
           <div id="swimlane" class="swimlane" hidden></div>
           <div id="sequence" class="sequence-view" hidden></div>
+          <div id="fleet" class="fleet-view" hidden aria-label="Pod and fleet status"></div>
           <div id="legend" class="legend"></div>
         </div>
         <div class="transport">
@@ -525,6 +550,7 @@
     const stageEl = document.querySelector('#stage');
     const swimlaneEl = document.querySelector('#swimlane');
     const sequenceEl = document.querySelector('#sequence');
+    const fleetEl = document.querySelector('#fleet');
     const legendEl = document.querySelector('#legend');
     const warningButtonEl = document.querySelector('#warning-button');
     const warningCountEl = document.querySelector('#warning-count');
@@ -551,7 +577,8 @@
     const SPEEDS = [[0.5, '0.5×'], [1, '1×'], [3, '3×']];
 
     let selectedTraceId = null;
-    let selectedView = 'graph';
+    const requestedView = new URLSearchParams(window.location.search).get('view');
+    let selectedView = ['graph', 'tree', 'swimlane', 'sequence', 'fleet'].includes(requestedView) ? requestedView : 'graph';
     let selectedAgentId = null;
     let selectedEventId = null;
     let focusedAgentId = null;
@@ -573,13 +600,14 @@
     let fitDone = { view: null, trace: null };
     const accessToken = new URLSearchParams(window.location.search).get('token');
     const reviewMode = new URLSearchParams(window.location.search).get('review') === '1';
+    const snapshotMode = new URLSearchParams(window.location.search).get('snapshot') === '1';
     let reviewFinished = false;
     let reviewCancelSent = false;
     let reviewHeartbeat = null;
     const embeddedDataEl = document.querySelector('#agent-tail-export-data');
 
     class ApiDataProvider {
-      constructor() { this.live = !reviewMode; this.supportsLazyPayload = true; this.metadata = null; }
+      constructor() { this.live = !reviewMode && !snapshotMode; this.supportsLazyPayload = true; this.metadata = null; }
       async getJson(path) {
         const response = await fetch(apiPath(path), { headers: { Accept: 'application/json' } });
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -910,10 +938,11 @@
       [...viewTabsEl.querySelectorAll('button')].forEach((button) => {
         button.setAttribute('aria-current', button.dataset.view === selectedView ? 'true' : 'false');
       });
-      stageEl.hidden = selectedView === 'swimlane' || selectedView === 'sequence';
+      stageEl.hidden = selectedView === 'swimlane' || selectedView === 'sequence' || selectedView === 'fleet';
       swimlaneEl.hidden = selectedView !== 'swimlane';
       sequenceEl.hidden = selectedView !== 'sequence';
-      legendEl.hidden = selectedView === 'swimlane' || selectedView === 'sequence';
+      fleetEl.hidden = selectedView !== 'fleet';
+      legendEl.hidden = selectedView === 'swimlane' || selectedView === 'sequence' || selectedView === 'fleet';
 
       focusBannerEl.hidden = !focusedAgentId;
       if (focusedAgentId) focusBannerEl.innerHTML = `◎ focus: ${escapeHtml(focusedAgentId)} ✕`;
@@ -927,8 +956,10 @@
         renderNodeLink(detail, horizonAgents);
       } else if (selectedView === 'swimlane') {
         renderSwimlane(detail, horizonAgents);
-      } else {
+      } else if (selectedView === 'sequence') {
         renderSequence(detail, horizonAgents);
+      } else {
+        renderFleet(detail.fleet || {});
       }
       renderLegend();
     }
@@ -947,6 +978,108 @@
         node.innerHTML = `<span class="dot" style="background:${cssVar(color)}"></span><span class="label">${label}</span>`;
         return node;
       }));
+    }
+
+    function renderFleet(fleet) {
+      const grid = document.createElement('div');
+      grid.className = 'fleet-grid';
+      const card = (title, className = '') => {
+        const node = document.createElement('section');
+        node.className = `fleet-card ${className}`.trim();
+        const heading = document.createElement('h3');
+        heading.textContent = title;
+        node.append(heading);
+        grid.append(node);
+        return node;
+      };
+      const stat = (host, value, label) => {
+        const row = document.createElement('div'); row.className = 'fleet-stat';
+        const strong = document.createElement('strong'); strong.textContent = String(value ?? 0);
+        const span = document.createElement('span'); span.textContent = label;
+        row.append(strong, span); host.append(row);
+      };
+      const row = (host, values, tone = '') => {
+        const node = document.createElement('div'); node.className = 'fleet-row';
+        values.forEach((value, index) => { const item = document.createElement('span'); item.textContent = text(value); if (index === values.length - 1 && tone) item.className = tone; node.append(item); });
+        host.append(node);
+      };
+      const workerCard = card('Workers');
+      stat(workerCard, fleet.workers?.active, `active / ${fleet.workers?.registered || 0} registered`);
+      (fleet.workers?.items || []).forEach((worker) => row(workerCard, [worker.worker_id, worker.process_incarnation || 'no incarnation', `${worker.health} · lease ${worker.lease_health}`], worker.health));
+      const queueCard = card('Queue and fairness');
+      stat(queueCard, fleet.queue?.queued, `queued · ${fleet.queue?.backpressured || 0} backpressured`);
+      (fleet.queue?.projects || []).forEach((project) => row(queueCard, [project.project_id, `${project.active} active / ${project.queued} queued`, `${project.dispatches} dispatches`]));
+      const healthCard = card('Observability');
+      const observation = fleet.observability || {};
+      stat(healthCard, observation.projection_lag, 'events projection lag');
+      row(healthCard, ['source', `position ${observation.projection_position ?? 0}`, observation.state || 'unknown'], observation.state || '');
+      (fleet.process_incarnations || []).forEach((item) => row(healthCard, [item.id, 'daemon incarnation', item.state], item.state));
+      const podCard = card('Pod and task DAG', 'wide');
+      if (!(fleet.pods || []).length) row(podCard, ['No durable pods in this trace', '', '']);
+      (fleet.pods || []).forEach((pod) => {
+        row(podCard, [pod.pod_id, `${pod.project_id || 'unknown project'} · ${(pod.ownership_claim_digests || []).length} claims`, pod.state], pod.state);
+        const dag = document.createElement('div'); dag.className = 'fleet-dag';
+        (pod.tasks || []).forEach((task) => { const node = document.createElement('span'); node.className = 'fleet-node'; node.textContent = `${task.task_id}${task.dependencies?.length ? ` ← ${task.dependencies.join(', ')}` : ''}`; dag.append(node); });
+        podCard.append(dag);
+      });
+      const table = (host, label, headers) => {
+        const node = document.createElement('table'); node.className = 'fleet-table'; node.setAttribute('aria-label', label);
+        const head = document.createElement('thead'); const headingRow = document.createElement('tr');
+        headers.forEach((header, index) => { const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = header; if (index === 0) cell.scope = 'col'; headingRow.append(cell); });
+        head.append(headingRow); const body = document.createElement('tbody'); node.append(head, body); host.append(node); return body;
+      };
+      const resourceCard = card('Resource slots');
+      const resourceBody = table(resourceCard, 'Fleet resource slot usage', ['Resource', 'Used', 'Capacity', 'Units']);
+      const resourceLabels = [
+        ['reasoning', 'Reasoning'], ['writers', 'Writer'], ['heavyValidation', 'Heavy validation'],
+        ['review', 'Review'], ['integration', 'Integration'],
+      ];
+      const resourceUsed = fleet.resources?.used || {}; const resourceCapacity = fleet.resources?.capacity || {};
+      resourceLabels.forEach(([key, label]) => {
+        const usedValue = Number.isSafeInteger(resourceUsed[key]) && resourceUsed[key] >= 0 ? resourceUsed[key] : 0;
+        const capacityValue = Number.isSafeInteger(resourceCapacity[key]) && resourceCapacity[key] >= 0 ? resourceCapacity[key] : 0;
+        const resourceRow = document.createElement('tr'); resourceRow.setAttribute('aria-label', `${label} slots: ${usedValue} used of ${capacityValue} slots`);
+        [label, String(usedValue), String(capacityValue), 'slots'].forEach((value) => { const cell = document.createElement('td'); cell.textContent = value; resourceRow.append(cell); });
+        resourceBody.append(resourceRow);
+      });
+      const budgetCard = card('Budgets', 'wide');
+      const budgetBody = table(budgetCard, 'Fleet budget capacity reserved and used', ['Budget', 'Capacity', 'Reserved', 'Used', 'Units']);
+      const budgetCapacity = fleet.budgets?.capacity || {}; const budgetReserved = fleet.budgets?.reserved || {}; const budgetUsed = fleet.budgets?.used || {};
+      const budgetRows = [
+        { label: 'Time', keys: ['seconds'], unit: 'seconds', format: (value) => String(value) },
+        { label: 'Input tokens', keys: ['inputTokens'], unit: 'tokens', format: (value) => String(value) },
+        { label: 'Output tokens', keys: ['outputTokens'], unit: 'tokens', format: (value) => String(value) },
+        { label: 'Cost', keys: ['costUsdNano'], unit: 'USD', format: (value) => (value / 1000000000).toFixed(6) },
+        { label: 'Retries', keys: ['retries', 'maxRetries'], unit: 'count', format: (value) => String(value) },
+        { label: 'External effects', keys: ['externalEffects', 'maxExternalEffects'], unit: 'count', format: (value) => String(value) },
+      ];
+      const budgetValue = (source, definition, column) => {
+        const raw = definition.keys.map((key) => source[key]).find((value) => Number.isSafeInteger(value) && value >= 0);
+        const cell = document.createElement('td');
+        if (raw === undefined) { cell.textContent = 'n/a'; cell.dataset.available = 'false'; cell.setAttribute('aria-label', `${definition.label} ${column}: not available`); }
+        else { const formatted = definition.format(raw); cell.textContent = formatted; cell.dataset.available = 'true'; cell.setAttribute('aria-label', `${definition.label} ${column}: ${formatted} ${definition.unit}`); }
+        return cell;
+      };
+      budgetRows.forEach((definition) => {
+        const budgetRow = document.createElement('tr');
+        const labelCell = document.createElement('td'); labelCell.textContent = definition.label; budgetRow.append(labelCell,
+          budgetValue(budgetCapacity, definition, 'capacity'), budgetValue(budgetReserved, definition, 'reserved'),
+          budgetValue(budgetUsed, definition, 'used'));
+        const unitCell = document.createElement('td'); unitCell.textContent = definition.unit; budgetRow.append(unitCell); budgetBody.append(budgetRow);
+      });
+      const integration = card('Integration units');
+      (fleet.integration_units || []).forEach((unit) => row(integration, [unit.task_id, unit.project_id, `${unit.state} placeholder`], unit.state));
+      if (!(fleet.integration_units || []).length) row(integration, ['No integration unit reserved', '', '']);
+      const leases = card('Lease and heartbeat health');
+      (fleet.leases || []).forEach((lease) => row(leases, [lease.lease_id, lease.worker_id || lease.task_id, lease.state], lease.state));
+      if (!(fleet.leases || []).length) row(leases, ['No active leases', '', '']);
+      const attention = card('Ranked advisory attention', 'full');
+      (fleet.attention || []).forEach((warning) => row(attention, [`#${warning.rank} ${warning.code}`, warning.summary, `${warning.classification} · no authority`], 'advisory'));
+      if (!(fleet.attention || []).length) row(attention, ['No advisory warnings', '', '']);
+      fleetEl.replaceChildren(grid);
+      document.documentElement.dataset.fleetReady = 'true';
+      document.documentElement.dataset.fleetViewportWidth = String(window.innerWidth);
+      document.documentElement.dataset.fleetDocumentWidth = String(document.documentElement.scrollWidth);
     }
 
     /* ---------- FOREST / LAYOUT ---------- */
@@ -1035,7 +1168,18 @@
     }
 
     function eventsAtHorizon(detail) {
-      return detail.events.filter((event) => event.offset_seconds <= playbackTime + 0.0001);
+      const visible = detail.events.filter((event) => event.offset_seconds <= playbackTime + 0.0001);
+      const result = [];
+      const heartbeatIndex = new Map();
+      visible.forEach((event) => {
+        if (!['worker.heartbeat', 'scheduler.worker_heartbeat', 'lease.heartbeat'].includes(event.kind)) { result.push(event); return; }
+        const minute = Math.floor(new Date(event.timestamp).getTime() / 60000);
+        const key = `${event.actor?.id || event.span_id}:${minute}`;
+        const prior = heartbeatIndex.get(key);
+        if (prior === undefined) { heartbeatIndex.set(key, result.length); result.push({ ...event, coalesced_heartbeats: 1 }); }
+        else result[prior] = { ...event, coalesced_heartbeats: (result[prior].coalesced_heartbeats || 1) + 1 };
+      });
+      return result;
     }
 
     function statusColor(status) {

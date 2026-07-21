@@ -186,6 +186,30 @@ function approvalInput() {
 }
 
 describe("AttentionService", () => {
+  it("never lets AgentTrail advisory warnings pause scope admission", () => {
+    const { journal, service } = fixture();
+    service.raiseAgentTrailWarning({
+      attentionId: "warning-agenttrail-1",
+      runId: "run-1",
+      warningCode: "STALE_HEARTBEAT",
+      message: "Worker heartbeat is stale.",
+      evidenceSha256: "a".repeat(64),
+      affectedScopes: ["task:task-1"],
+      dependentScopes: ["pod:pod-1"],
+      commandId: "warning-command-1",
+    });
+
+    expect(service.pausedScopes("run-1")).toEqual([]);
+    expect(service.admitScope({
+      runId: "run-1",
+      admissionId: "admission-after-warning",
+      scopeId: "task:task-1",
+      dependencies: ["pod:pod-1"],
+      commandId: "admit-after-warning",
+      evidenceSha256: "b".repeat(64),
+    })).toMatchObject({ status: "admitted" });
+    journal.close();
+  });
   it("replays an immutable wait-forever question after crash and reopens it for polling", () => {
     const { databasePath, journal, service } = fixture();
     const requested = service.requestQuestion(questionInput());
