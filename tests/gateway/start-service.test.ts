@@ -30,6 +30,23 @@ afterEach(() => {
 });
 
 describe("startZentraService", () => {
+  it("starts the installed scheduler before readiness and shuts it down cleanly", async () => {
+    const root = repository(); const sidecar = new FakeAgentTrail();
+    const events: string[] = [];
+    const service = await startZentraService({ cwd: root }, {
+      createAgentTrail: (evidence) => sidecar.attach(evidence),
+      createScheduler: () => ({ daemon: null as never,
+        start: async () => { events.push("scheduler-started"); },
+        shutdown: async () => { events.push("scheduler-stopped"); } }),
+      createGateway: (options) => workflowGateway(new LoopbackGateway(options),
+        () => { events.push("workflow-installed"); }, () => undefined,
+        () => { events.push("gateway-ready"); }, () => undefined),
+    });
+    expect(events.indexOf("scheduler-started")).toBeLessThan(events.indexOf("workflow-installed"));
+    await service.shutdown("test_requested");
+    expect(events).toContain("scheduler-stopped");
+  });
+
   it("installs the production workflow exactly once after durable service readiness", async () => {
     const root = repository();
     let configuredSurface: WorkflowSurface | null = null;

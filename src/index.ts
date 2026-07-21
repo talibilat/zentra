@@ -27,6 +27,56 @@ export {
   isDurablePagedEventJournal,
 } from "./journal/journal.js";
 export { SqliteEventJournal } from "./journal/sqlite-journal.js";
+export { LeaseService } from "./leases/lease-service.js";
+export { MAX_LEASE_DURATION_MS, MIN_HEARTBEAT_INTERVAL_MS, leaseStreamId, projectLease } from "./leases/lease-projection.js";
+export { DAEMON_LEASE_DURATION_MS, DaemonLeaseService, daemonLeaseStreamId,
+  projectDaemonLease } from "./leases/daemon-lease.js";
+export type { DaemonLeaseOwner, DaemonLeaseView, DaemonOwnerLiveness } from "./leases/daemon-lease.js";
+export type { GrantLeaseInput } from "./leases/lease-service.js";
+export type { LeaseView } from "./leases/lease-projection.js";
+export {
+  SchedulerAdmissionSchema,
+  SchedulerBudgetSchema,
+  SchedulerLimitsSchema,
+  SchedulerResourceSchema,
+  SchedulerTaskSchema,
+  dispatchIntentSha256,
+  schedulerStreamId,
+  schedulerControlStreamId,
+} from "./scheduling/scheduler-contracts.js";
+export type {
+  BlockedReason,
+  DispatchIntent,
+  SchedulerBudget,
+  SchedulerLimits,
+  SchedulerResources,
+  SchedulerTaskInput,
+  SchedulerControlIdentity,
+} from "./scheduling/scheduler-contracts.js";
+export { DispatchGrantService, dispatchGrantStreamId, projectDispatchGrant } from "./scheduling/dispatch-grant-service.js";
+export type { DispatchGrantView } from "./scheduling/dispatch-grant-service.js";
+export { projectGlobalControl } from "./scheduling/global-control.js";
+export type { GlobalControlView } from "./scheduling/global-control.js";
+export { projectScheduler } from "./scheduling/scheduler-projection.js";
+export type { ScheduledTaskView, SchedulerView } from "./scheduling/scheduler-projection.js";
+export { JournalScheduler } from "./scheduling/journal-scheduler.js";
+export type {
+  JournalSchedulerOptions,
+  SchedulerReconciler,
+  SchedulerReconciliationCandidate,
+  SchedulerReconciliationObservation,
+} from "./scheduling/journal-scheduler.js";
+export { DaemonScheduler, InstalledProcessExecutor } from "./scheduling/daemon-scheduler.js";
+export type {
+  DispatchExecution,
+  InstalledDispatchCommand,
+  SchedulerExecutor,
+} from "./scheduling/daemon-scheduler.js";
+export { projectSchedulerDiagnostic } from "./observability/scheduler-diagnostics.js";
+export type { DiagnosticLease, SchedulerDiagnostic } from "./observability/scheduler-diagnostics.js";
+export { classifyDarwinProcessIdentity, inspectDarwinProcessStartIdentity } from "./runtime/darwin-process-identity.js";
+export { createInstalledDaemonScheduler, createRepositorySchedulerLifecycle } from "./service/scheduler-composition.js";
+export type { InstalledSchedulerLifecycle } from "./service/scheduler-composition.js";
 export { projectTaskDiagnostic } from "./tasks/task-diagnostics.js";
 export type {
   DiagnosticRecoveryAction,
