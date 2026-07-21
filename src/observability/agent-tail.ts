@@ -108,6 +108,8 @@ import {
   PlanRejectedPayloadSchema,
   PlanRevisedPayloadSchema as PlanningPlanRevisedPayloadSchema,
 } from "../planning/planning-contracts.js";
+import { WriterCheckpointSchema } from "../contracts/writer-request.js";
+import { WriterReceiptSchema } from "../workspaces/path-claims.js";
 
 export const AGENT_TAIL_SCHEMA_VERSION = "1.0";
 export const AGENT_TAIL_JOURNAL_EMITTER_ID = "zentra:event-journal";
@@ -137,6 +139,12 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "milestone.timed_out", "milestone.failed",
   "worker.bound", "worker.started", "worker.heartbeat", "worker.observed", "worker.uncertain",
   "worker.cleanup_observed", "worker.terminal",
+  "path_claim.requested", "path_claim.acquired", "path_claim.denied",
+  "path_claim.renewed", "path_claim.released", "path_claim.diff_observed",
+  "writer.dispatch_started", "writer.receipt_observed", "writer.evidence_missing",
+  "writer.patch_proposal_recorded", "writer.patch_application_intended",
+  "writer.patch_application_started", "writer.patch_file_applied", "writer.patch_apply_completed",
+  "writer.checkpointed", "writer.effect_uncertain", "writer.correction_proposed",
   "release.created", "release.worktree_intent", "release.environment_intent",
   "release.refs_snapshot", "release.refs_verified", "release.step_started",
   "release.step_observed", "release.artifact_hashed", "release.prepared_local_only",
@@ -299,6 +307,40 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "worker.uncertain": parseWith((payload) => parseWorkerEventPayload("worker.uncertain", payload)),
   "worker.cleanup_observed": parseWith((payload) => parseWorkerEventPayload("worker.cleanup_observed", payload)),
   "worker.terminal": parseWith((payload) => parseWorkerEventPayload("worker.terminal", payload)),
+  "path_claim.requested": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, paths: z.array(Id), canonicalPaths: z.array(Id), leaseToken: z.string().uuid() }),
+  "path_claim.acquired": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, paths: z.array(Id), canonicalPaths: z.array(Id), leaseToken: z.string().uuid(), acquiredAt: z.string().datetime(), expiresAt: z.string().datetime() }),
+  "path_claim.denied": mandatory({ schemaVersion: z.literal(1), projectId: Id, claimId: Id, ownerId: Id, revision: Commit, conflictingClaimIds: z.array(Id), deniedAt: z.string().datetime() }),
+  "path_claim.renewed": mandatory({ claimId: Id, ownerId: Id, revision: Commit, previousLeaseToken: z.string().uuid(), leaseToken: z.string().uuid(), expiresAt: z.string().datetime() }),
+  "path_claim.released": mandatory({ claimId: Id, ownerId: Id, revision: Commit, leaseToken: z.string().uuid(), releasedAt: z.string().datetime() }),
+  "path_claim.diff_observed": mandatory({ schemaVersion: z.literal(1), claimId: Id, ownerId: Id, revision: Commit, leaseToken: z.string().uuid(), changedPaths: z.array(Id), ownershipOutcome: z.enum(["accepted", "rejected"]), diffSha256: Digest, reconciledAt: z.string().datetime() }),
+  "writer.dispatch_started": mandatory({ schemaVersion: z.literal(1), claimId: Id, ownerId: Id, revision: Commit, leaseToken: z.string().uuid(), dispatchId: Id,
+    binding: z.object({ schemaVersion: z.literal(1), processIncarnation: z.string().uuid(), executableSha256: Digest,
+      argvSha256: Digest, packetSha256: Digest, cwdSha256: Digest,
+      dispatchId: Id.nullable(), projectId: Id.nullable(), claimId: Id.nullable(), ownerId: Id.nullable(),
+      revision: Commit.nullable(), leaseToken: z.string().uuid().nullable(), digest: Digest }).strict(),
+    startedAt: z.string().datetime() }),
+  "writer.receipt_observed": WriterReceiptSchema,
+  "writer.evidence_missing": mandatory({ schemaVersion: z.literal(1), claimId: Id, revision: Commit, dispatchId: Id,
+    missing: z.enum(["worker_event_usage_receipt", "patch_proposal_or_intent"]), observedAt: z.string().datetime() }),
+  "writer.patch_proposal_recorded": mandatory({ schemaVersion: z.literal(1), claimId: Id,
+    proposal: z.object({ schemaVersion: z.literal(1), kind: z.literal("zentra.patch_proposal"),
+      proposalId: Id, baseRevision: Commit, operations: z.array(z.unknown()), digest: Digest }).strict(),
+    recordedAt: z.string().datetime() }),
+  "writer.patch_application_intended": mandatory({ schemaVersion: z.literal(1), intentId: z.string().uuid(), claimId: Id, ownerId: Id,
+    revision: Commit, leaseToken: z.string().uuid(), proposalDigest: Digest,
+    operations: z.array(z.object({ path: Id, expectedSha256: Digest.nullable(), contentSha256: Digest }).strict()),
+    startedAt: z.string().datetime() }),
+  "writer.patch_application_started": mandatory({ schemaVersion: z.literal(1), claimId: Id,
+    intentId: z.string().uuid(), proposalDigest: Digest, applicationId: z.string().uuid(),
+    expectedStreamVersion: z.number().int().nonnegative(), startedAt: z.string().datetime() }),
+  "writer.patch_file_applied": mandatory({ schemaVersion: z.literal(1), claimId: Id,
+    proposalDigest: Digest, path: Id, expectedSha256: Digest.nullable(), contentSha256: Digest,
+    appliedAt: z.string().datetime() }),
+  "writer.patch_apply_completed": mandatory({ schemaVersion: z.literal(1), claimId: Id,
+    proposalDigest: Digest, paths: z.array(Id), completedAt: z.string().datetime() }),
+  "writer.checkpointed": WriterCheckpointSchema,
+  "writer.effect_uncertain": mandatory({ schemaVersion: z.literal(1), claimId: Id, revision: Commit, reason: Id, observedAt: z.string().datetime() }),
+  "writer.correction_proposed": mandatory({ schemaVersion: z.literal(1), claimId: Id, correctionId: Id, revision: Commit, paths: z.array(Id), reason: Id, proposedAt: z.string().datetime() }),
   "release.created": parseWith((payload) => parseReleaseEventPayload("release.created", payload)),
   "release.worktree_intent": parseWith((payload) => parseReleaseEventPayload("release.worktree_intent", payload)),
   "release.environment_intent": parseWith((payload) => parseReleaseEventPayload("release.environment_intent", payload)),
@@ -507,6 +549,8 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedTaskValidationPayload(event.payload)
     : event.type === "task.writer_completed"
       ? redactedWriterCompletedPayload(event.payload)
+    : event.type === "writer.receipt_observed"
+      ? redactedClaimWriterReceipt(event.payload)
     : event.type === "milestone.capability_boundary_resolved" || event.type === "task.capability_boundary_resolved"
     ? CapabilityBoundaryResolvedPayloadSchema.parse(event.payload)
     : event.type === "milestone.capability_boundary_paused" || event.type === "task.capability_boundary_paused"
@@ -844,6 +888,27 @@ function redactedWriterCompletedPayload(payload: unknown): unknown {
   return {
     ...projectExactSafeFields("task.failed", payload) as object,
     networkBoundary,
+  };
+}
+
+function redactedClaimWriterReceipt(payload: unknown): unknown {
+  const receipt = WriterReceiptSchema.parse(payload);
+  return {
+    schemaVersion: receipt.schemaVersion,
+    receiptId: receipt.receiptId,
+    claimId: receipt.claimId,
+    ownerId: receipt.ownerId,
+    revision: receipt.revision,
+    dispatchId: receipt.dispatchId,
+    dispatchBindingDigest: receipt.dispatchBindingDigest,
+    outcome: receipt.outcome,
+    usageEvidence: receipt.usageEvidence,
+    patchProposalDigest: receipt.patchProposalDigest,
+    eventChainSha256: receipt.eventChain.chainSha256,
+    usage: receipt.usage,
+    startedAt: receipt.startedAt,
+    finishedAt: receipt.finishedAt,
+    digest: receipt.digest,
   };
 }
 

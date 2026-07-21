@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { PlannedTask } from "../../src/contracts/milestone.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
-import { WriterWorktreeCapsule } from "../../src/orchestration/writer-worktree-capsule.js";
+import { WriterWorktreeCapsule, type WriterCapsuleRequest } from "../../src/orchestration/writer-worktree-capsule.js";
 import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
@@ -23,6 +23,8 @@ import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
 import { WorkspaceOwnershipGate } from "../../src/workspaces/workspace-ownership.js";
 import { WorktreeManager } from "../../src/workspaces/worktree-manager.js";
+import { buildRoleCapabilityBinding } from "../../src/workers/role-capability-envelope.js";
+import { digestCanonical } from "../../src/contracts/authority-attention.js";
 
 const temporaryDirectories: string[] = [];
 const git = new GitClient();
@@ -94,8 +96,14 @@ describe("WriterWorktreeCapsule", () => {
     expect(packetEvent.packet).toEqual({
       brief: "Update the greeting implementation.",
       ownedPaths: ["src/**"],
+      readPaths: ["src/**"],
+      writePaths: ["src/**"],
+      toolPermissions: ["read_repository", "write_worktree"],
+      capabilityEnvelopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       forbiddenPaths: [".env", ".git/**"],
       acceptanceCriteria: ["The greeting is updated."],
+      patchProtocol: { mode: "proposal_only", maxOperations: 256, maxBytes: 1048576,
+        mutationTools: "denied" },
       budget: {
         maxSeconds: 5,
         maxRetries: 0,
@@ -342,12 +350,31 @@ describe("WriterWorktreeCapsule", () => {
   });
 });
 
-function capsule(): WriterWorktreeCapsule {
-  return new WriterWorktreeCapsule(
+function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {
+  const inner = new WriterWorktreeCapsule(
     new WorktreeManager(),
     new OpenCodeWriter(new ProcessSupervisor()),
     new WorkspaceOwnershipGate(),
   );
+  return {
+    run: (request) => inner.run({ ...request, capabilityBinding: directBinding(request) }),
+  };
+}
+
+function directBinding(request: Omit<WriterCapsuleRequest, "capabilityBinding">) {
+  return buildRoleCapabilityBinding({
+    milestoneId: request.task.taskId, taskId: request.task.taskId,
+    projectId: request.project.projectId, correlationId: request.task.taskId,
+    role: "implementer", actorId: request.model.id, repository: request.project.repositoryPath,
+    planDigest: digestCanonical(request.task), securityDigest: digestCanonical(request.security),
+    model: { capabilityId: request.model.id, transportModelId: request.model.model,
+      digest: digestCanonical(request.model), harness: request.model.harness,
+      roles: request.model.roles, toolPermissions: request.model.toolPermissions,
+      network: request.model.network },
+    budget: request.task.budget, admissionDigest: digestCanonical({ taskId: request.task.taskId }),
+    configuredReadPaths: request.security.allowedFileScopes, ownedPaths: request.task.ownedPaths,
+    forbiddenPaths: [...new Set([...request.task.forbiddenPaths, ...request.security.forbiddenPaths])],
+  });
 }
 
 function plannedTask(): PlannedTask {

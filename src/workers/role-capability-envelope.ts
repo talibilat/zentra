@@ -5,6 +5,7 @@ import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { capabilityEnvelope, CapabilityEnvelopeSchema } from "./worker-lifecycle.js";
 import { WebResearchPolicySchema } from "../research/web-research.js";
 import { researchDestinationAllows } from "../research/destination-policy.js";
+import { canonicalDarwinPathIdentity } from "../milestones/path-ownership.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const IdentitySchema = z.string().min(1).max(256);
@@ -461,10 +462,8 @@ function pathScopesOverlap(first: string, second: string): boolean {
 }
 
 function canonicalDarwinPath(value: string): { readonly path: string; readonly recursive: boolean } {
-  const normalized = value.normalize("NFD").toLowerCase();
-  if (normalized === "**") return { path: "", recursive: true };
-  const recursive = normalized.endsWith("/**");
-  return { path: recursive ? normalized.slice(0, -3) : normalized, recursive };
+  const recursive = value === "**" || value.endsWith("/**");
+  return { path: canonicalDarwinPathIdentity(value), recursive };
 }
 
 function isSafeLogicalPath(value: string): boolean {
@@ -474,7 +473,9 @@ function isSafeLogicalPath(value: string): boolean {
 }
 
 function assertCanonicalSet(values: readonly string[], context: z.RefinementCtx): void {
-  if (new Set(values).size !== values.length || values.some((value, index) => index > 0 && values[index - 1]! >= value)) {
+  if (new Set(values).size !== values.length ||
+    new Set(values.map(canonicalDarwinPathIdentity)).size !== values.length ||
+    values.some((value, index) => index > 0 && values[index - 1]! >= value)) {
     context.addIssue({ code: "custom", message: "paths must be sorted and unique" });
   }
 }

@@ -10,6 +10,8 @@ describe("logicalPathScopesOverlap", () => {
     ["**", "any/file.ts"],
     ["SRC/File.ts", "src/file.ts"],
     ["cafe\u0301/file.ts", "caf\u00e9/file.ts"],
+    ["src/long-s.ts", "src/long-ſ.ts"],
+    ["src/strasse.ts", "src/straße.ts"],
   ])("conservatively overlaps %j and %j on Darwin", (first, second) => {
     expect(logicalPathScopesOverlap(first, second)).toBe(true);
   });
