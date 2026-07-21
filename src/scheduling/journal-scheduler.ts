@@ -45,6 +45,7 @@ export interface JournalSchedulerOptions {
   readonly grants: DispatchGrantService;
   readonly daemonOwnerLiveness?: DaemonOwnerLiveness;
   readonly now?: () => number;
+  readonly causationId?: string;
 }
 
 export interface SchedulerReconciliationCandidate {
@@ -101,7 +102,8 @@ export class JournalScheduler {
     const input = SchedulerTaskSchema.parse(raw);
     const view = this.inspect();
     this.assertCurrent(view);
-    this.append([this.event("scheduler.task_submitted", { task: input, submittedAtMs: this.now() }, input.taskId)]);
+    this.append([this.event("scheduler.task_submitted", { task: input, submittedAtMs: this.now() },
+      input.correlationId ?? input.taskId)]);
     const submitted = this.inspect();
     const task = submitted.tasks[input.taskId]!;
     const reasons = this.blockedReasons(task, submitted);
@@ -189,9 +191,9 @@ export class JournalScheduler {
           grantId: grant.grantId, intentSha256: grant.dispatchIntentSha256,
           audience: grant.audience, expiresAtMs: grant.expiresAtMs }, task.input.taskId),
         this.event("scheduler.resources_acquired", { taskId: task.input.taskId,
-          resources: task.input.resources }, task.input.taskId),
+          resources: task.input.resources, acquiredAtMs: this.now() }, task.input.taskId),
         this.event("scheduler.budget_acquired", { taskId: task.input.taskId,
-          budget: task.input.budget }, task.input.taskId),
+          budget: task.input.budget, acquiredAtMs: this.now() }, task.input.taskId),
         this.event("scheduler.dispatch_intended", intent, task.input.taskId),
       ];
       const leaseWrites = [
@@ -495,17 +497,22 @@ export class JournalScheduler {
   private append(events: readonly NewEvent<string, unknown>[], extraWrites: readonly AtomicAppend[] = []): void {
     this.daemonLease.assertActive(this.daemonOwner);
     const existing = readStreamEvents(this.journal, this.streamId);
-    const prospective = prospectiveEvents(existing, events, this.now());
+    const chainedEvents = chainEvents(events, existing.at(-1)?.eventId ?? null);
+    const prospective = prospectiveEvents(existing, chainedEvents, this.now());
     projectScheduler([...existing, ...prospective]);
-    for (const write of extraWrites) {
+    const triggerEventId = chainedEvents.at(-1)?.eventId ?? existing.at(-1)?.eventId ?? null;
+    const chainedWrites = extraWrites.map((write): AtomicAppend => {
       const leaseEvents = readStreamEvents(this.journal, write.streamId);
-      const prospectiveWrite = prospectiveEvents(leaseEvents, write.events, this.now());
+      const chained = chainEvents(write.events, leaseEvents.at(-1)?.eventId ?? triggerEventId);
+      const prospectiveWrite = prospectiveEvents(leaseEvents, chained, this.now());
       if (write.streamId === this.controlStreamId) projectGlobalControl([...leaseEvents, ...prospectiveWrite]);
       else if (write.streamId.startsWith("dispatch-grant:")) projectDispatchGrant([...leaseEvents, ...prospectiveWrite]);
       else projectLease([...leaseEvents, ...prospectiveWrite]);
-    }
+      return { ...write, events: chained };
+    });
     if (!isAtomicEventJournal(this.journal)) throw new Error("durable scheduler requires atomic append");
-    this.journal.appendAtomically([{ streamId: this.streamId, expectedVersion: existing.length, events }, ...extraWrites]);
+    this.journal.appendAtomically([{ streamId: this.streamId, expectedVersion: existing.length,
+      events: chainedEvents }, ...chainedWrites]);
   }
 
   private assertCurrent(view: SchedulerView): void {
@@ -520,14 +527,20 @@ export class JournalScheduler {
     return this.event("scheduler.daemon_started", { schemaVersion: 1,
       schedulerId: this.options.schedulerId, processIncarnation: this.options.processIncarnation,
       pid: this.options.pid, platform: this.options.platform, capabilities: this.options.capabilities,
-      limits: this.options.limits, startedAtMs: this.now() }, this.options.schedulerId);
+       limits: this.options.limits, startedAtMs: this.now() }, this.options.schedulerId,
+      this.options.causationId ?? null);
   }
-  private event(type: string, payload: unknown, correlationId: string): NewEvent<string, unknown> {
-    return { streamId: this.streamId, type, payload, causationId: null, correlationId };
+  private event(type: string, payload: unknown, correlationId: string,
+    causationId: string | null = null): NewEvent<string, unknown> {
+    const taskCorrelation = this.inspect().tasks[correlationId]?.input.correlationId;
+    return { streamId: this.streamId, type, payload, causationId,
+      correlationId: taskCorrelation ?? correlationId };
   }
   private leaseEvent(leaseId: string, type: string, payload: unknown,
     correlationId: string): NewEvent<string, unknown> {
-    return { streamId: leaseStreamId(leaseId), type, payload, causationId: null, correlationId };
+    const taskCorrelation = this.inspect().tasks[correlationId]?.input.correlationId;
+    return { streamId: leaseStreamId(leaseId), type, payload, causationId: null,
+      correlationId: taskCorrelation ?? correlationId };
   }
   private get streamId(): string { return schedulerStreamId(this.options.schedulerId); }
   private get controlStreamId(): string { return schedulerControlStreamId(this.options.controlIdentity); }
@@ -551,6 +564,16 @@ export class JournalScheduler {
   private controlEvent(type: string, payload: unknown, correlationId: string): NewEvent<string, unknown> {
     return { streamId: this.controlStreamId, type, payload, causationId: null, correlationId };
   }
+}
+
+function chainEvents(events: readonly NewEvent<string, unknown>[], initialCausationId: string | null): NewEvent<string, unknown>[] {
+  let causationId = initialCausationId;
+  return events.map((event) => {
+    const eventId = event.eventId ?? randomUUID();
+    const chained = { ...event, eventId, causationId: causationId ?? event.causationId };
+    causationId = eventId;
+    return chained;
+  });
 }
 
 function prospectiveEvents(existing: readonly StoredEvent[], events: readonly NewEvent<string, unknown>[], now: number): StoredEvent[] {

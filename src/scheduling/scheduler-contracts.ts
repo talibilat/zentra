@@ -49,6 +49,7 @@ export const SchedulerControlIdentitySchema = z.strictObject({
 });
 export const SchedulerTaskSchema = z.strictObject({
   taskId: Id,
+  correlationId: Id.optional(),
   projectId: Id,
   workerId: Id,
   effect: z.enum(["computation", "potentially_effectful"]),

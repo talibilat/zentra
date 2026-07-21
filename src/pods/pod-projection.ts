@@ -408,7 +408,8 @@ export function projectPod(events: readonly StoredEvent[]): PodView | null {
             throw new Error("completed reconciliation lacks task evidence");
           }
         }
-        assignments.set(current.assignmentId, Object.freeze({ ...current, status, evidenceIds: Object.freeze([...resolution.evidenceIds]) }));
+        assignments.set(current.assignmentId, Object.freeze({ ...current, status, observedOutcome: status,
+          evidenceIds: Object.freeze([...resolution.evidenceIds]) }));
         reconciliation = null;
         lifecycle = cancellation === null ? "running" : "cancel_requested";
         break;

@@ -259,11 +259,12 @@ export class RoleCapabilityEnvelopeService {
       if (existing.digest !== binding.digest) throw new Error("role capability envelope substitution is forbidden");
       return existing;
     }
+    const causationId = this.journal.readAll().findLast((event) => event.correlationId === binding.correlationId)?.eventId ?? null;
     this.journal.append(streamId, events.length, [{
       streamId,
       type: "capability_envelope.accepted",
       payload: AcceptedPayloadSchema.parse({ binding }),
-      causationId: null,
+      causationId,
       correlationId: binding.correlationId,
     }]);
     return binding;

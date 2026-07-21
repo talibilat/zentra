@@ -103,10 +103,18 @@ class FleetProjectionStore:
             return f"daemon-stale:{payload.get('staleProcessIncarnation')}"
         if kind == "scheduler.task_submitted":
             return f"task:{task_id}:submitted"
-        if kind in {"scheduler.task_ready", "scheduler.task_blocked", "scheduler.dispatch_intended",
-                    "scheduler.dispatch_started", "scheduler.cancellation_requested",
-                    "scheduler.dispatch_reconciliation_required", "scheduler.worker_outcome"}:
-            return f"task:{task_id}:state"
+        if kind in {"scheduler.task_ready", "scheduler.task_blocked"}:
+            return f"task:{task_id}:readiness"
+        if kind == "scheduler.dispatch_intended":
+            return f"task:{task_id}:dispatch-intent"
+        if kind == "scheduler.dispatch_started":
+            return f"task:{task_id}:dispatch-started"
+        if kind == "scheduler.cancellation_requested":
+            return f"task:{task_id}:cancellation"
+        if kind == "scheduler.dispatch_reconciliation_required":
+            return f"task:{task_id}:reconciliation"
+        if kind == "scheduler.worker_outcome":
+            return f"task:{task_id}:outcome"
         if kind == "scheduler.backpressure":
             return f"task:{task_id}:backpressure"
         if kind in {"scheduler.resources_acquired", "scheduler.resources_released"}:
@@ -120,13 +128,20 @@ class FleetProjectionStore:
         if kind == "lease.granted":
             return f"lease:{lease_id}:grant"
         if kind.startswith("lease."):
-            return f"lease:{lease_id}:state"
+            return f"lease:{lease_id}:{kind}"
         if kind == "pod.registered":
             return f"pod:{pod_id}:registered"
         if kind == "pod.ownership_intent_observed":
             return f"pod:{pod_id}:ownership:{payload.get('assignmentId')}"
         if kind.startswith("pod."):
             return f"pod:{pod_id}:state"
+        if kind == "integration.unit_formed":
+            return f"integration-unit:{payload.get('unitId')}:formed"
+        if kind in {"integration.candidate_created", "integration.candidate_validated", "integration.candidate_rejected",
+                    "conflict.observed", "replan.proposed", "replan.approved", "replan.rejected",
+                    "integration.committed", "final_acceptance.requested", "final_acceptance.accepted",
+                    "final_acceptance.rejected"}:
+            return f"integration-unit:{payload.get('unitId')}:state"
         if kind.startswith("gateway."):
             return "gateway:state"
         return None
@@ -1117,6 +1132,7 @@ def _fleet_projection(
     budget_capacity = _zero_budget()
     observability = "healthy"
     heartbeat_groups: dict[tuple[str, int], dict[str, object]] = {}
+    integration_units: dict[str, dict[str, object]] = {}
     backfill_high_water = 0
 
     for event in events:
@@ -1284,6 +1300,35 @@ def _fleet_projection(
                     lease["expires_at_ms"] = payload.get("expiresAtMs")
                 elif kind in {"lease.expired", "lease.released", "lease.reconciled"}:
                     lease["state"] = kind.removeprefix("lease.")
+        if kind == "integration.unit_formed" and isinstance(payload.get("unitId"), str):
+            unit_id = str(payload["unitId"])
+            integration_units[unit_id] = {
+                "unit_id": unit_id,
+                "project_id": payload.get("projectId"),
+                "task_ids": list(payload.get("taskIds", [])),
+                "pod_ids": list(payload.get("podIds", [])),
+                "state": "formed",
+                "placeholder": False,
+            }
+        elif kind in {"integration.candidate_created", "integration.candidate_validated", "integration.candidate_rejected",
+                      "conflict.observed", "replan.proposed", "replan.approved", "replan.rejected",
+                      "integration.committed", "final_acceptance.requested", "final_acceptance.accepted",
+                      "final_acceptance.rejected"}:
+            unit = integration_units.get(str(payload.get("unitId")))
+            if unit is not None:
+                unit["state"] = {
+                    "integration.candidate_created": "candidate",
+                    "integration.candidate_validated": "validated",
+                    "integration.candidate_rejected": "rejected",
+                    "conflict.observed": "conflicted",
+                    "replan.proposed": "awaiting_approval",
+                    "replan.approved": "formed",
+                    "replan.rejected": "rejected",
+                    "integration.committed": "integrated",
+                    "final_acceptance.requested": "acceptance_pending",
+                    "final_acceptance.accepted": "accepted",
+                    "final_acceptance.rejected": "correction_pending",
+                }[kind]
 
     active_states = {"dispatched", "running", "cancelling", "reconciling"}
     terminal_states = {"completed", "cancelled", "denied", "timed_out", "failed"}
@@ -1391,7 +1436,7 @@ def _fleet_projection(
             "task_id": task["task_id"], "project_id": task["project_id"],
             "state": "terminal" if task["state"] in terminal_states else "active" if task["state"] in active_states else "queued",
             "placeholder": True,
-        } for task in tasks.values() if task["integration"]],
+        } for task in tasks.values() if task["integration"]] + [integration_units[key] for key in sorted(integration_units)],
         "heartbeat_groups": sorted(heartbeat_groups.values(), key=lambda item: (str(item["worker_id"]), int(item["minute"]))),
         "observability": {"state": observability, "projection_position": projection_position,
             "journal_high_water_position": journal_high_water, "projection_lag": projection_lag,

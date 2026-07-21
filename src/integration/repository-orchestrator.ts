@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 
 import { z } from "zod";
@@ -17,6 +17,7 @@ import { schedulerStreamId } from "../scheduling/scheduler-contracts.js";
 import type { GitClient } from "../workspaces/git-client.js";
 import {
   PathClaimConflictError,
+  pathClaimStreamId,
   pathClaimContains,
   type PathClaim,
   type PathClaimService,
@@ -275,13 +276,14 @@ export class RepositoryOrchestrator {
       });
     } catch (error) {
       if (error instanceof PathClaimConflictError) {
+        const claimCause = this.journal.readStream(pathClaimStreamId(input.projectId)).at(-1)?.eventId ?? null;
         this.append(input.projectId, "ownership.conflict_observed", {
           schemaVersion: 1,
           podId: input.podId,
           taskId: input.taskId,
           conflictingClaimIds: [...error.conflictingClaimIds].sort(),
           observedAt: this.timestamp(),
-        }, input.correlationId);
+        }, input.correlationId, claimCause);
       }
       throw error;
     }
@@ -319,7 +321,8 @@ export class RepositoryOrchestrator {
         attempt: input.correction!.attempt, maxAttempts: input.correction!.maxAttempts, paths };
     })();
     const pod = projectPod(this.journal.readStream(input.podId));
-    const scheduler = projectScheduler(this.journal.readStream(schedulerStreamId(input.schedulerId)));
+    const schedulerEvents = this.journal.readStream(schedulerStreamId(input.schedulerId));
+    const scheduler = projectScheduler(schedulerEvents);
     const assignment = pod?.assignments[input.assignmentId];
     const scheduled = scheduler.tasks[input.schedulerTaskId];
     if (pod === null || pod.projectId !== input.project.projectId || assignment === undefined ||
@@ -383,6 +386,24 @@ export class RepositoryOrchestrator {
     if (!candidateGreen && !candidateNonGreen) {
       throw new Error("contract stability candidate result is inconclusive and cannot be admitted");
     }
+    const writerReceipt = claim.workerReceipt;
+    const binding = claim.dispatchBinding;
+    const proposal = claim.patchProposal;
+    const checkpoint = claim.checkpoint;
+    if (writerReceipt === null || writerReceipt.outcome !== "completed" || binding === null || claim.dispatchId === null ||
+      claim.dispatchId !== scheduled.dispatch.dispatchId || writerReceipt.dispatchId !== scheduled.dispatch.dispatchId ||
+      writerReceipt.dispatchId !== claim.dispatchId || writerReceipt.dispatchBindingDigest !== binding.digest ||
+      binding.dispatchId !== claim.dispatchId || binding.projectId !== input.project.projectId ||
+      binding.claimId !== claim.claimId || binding.ownerId !== claim.ownerId || binding.revision !== claim.revision ||
+      binding.leaseToken !== claim.leaseToken || proposal === null || writerReceipt.patchProposalDigest !== proposal.digest ||
+      proposal.baseRevision !== input.projectRevision || !claim.patchApplicationCompleted || checkpoint === null ||
+      checkpoint.claimId !== claim.claimId || checkpoint.revision !== claim.revision ||
+      checkpoint.diffSha256 !== diff.sha256 || checkpoint.toolEvidenceSha256 !== writerReceipt.eventChain.chainSha256 ||
+      digestCanonical(checkpoint.usage) !== digestCanonical(writerReceipt.usage) ||
+      JSON.stringify([...claim.patchAppliedPaths].sort()) !== JSON.stringify(diff.paths) ||
+      JSON.stringify(proposal.operations.map((operation) => operation.path).sort()) !== JSON.stringify(diff.paths)) {
+      throw new Error("repository admission requires the exact completed writer receipt, trusted patch, checkpoint, and source binding");
+    }
     const contract = {
       contractDigest: digestCanonical({ scope: input.contract.scope, behavior: input.contract.behavior,
         authority: input.contract.authority }),
@@ -416,8 +437,11 @@ export class RepositoryOrchestrator {
       review: input.review, focusedValidation: input.focusedValidation, contract,
       admittedAt: this.timestamp() };
     const receipt = IntegrationSubmissionSchema.parse({ ...body, digest: digestCanonical(body) });
+    const schedulerOutcome = schedulerEvents.findLast((event) => event.type === "scheduler.worker_outcome" &&
+      (event.payload as { taskId?: string }).taskId === input.schedulerTaskId);
+    if (schedulerOutcome === undefined) throw new Error("repository admission lacks scheduler outcome causation");
     this.appendMany(input.project.projectId, [{ type: "repository.submission_admitted",
-      payload: { schemaVersion: 1, receipt } }], input.correlationId, true);
+      payload: { schemaVersion: 1, receipt } }], input.correlationId, true, schedulerOutcome.eventId);
     return receipt;
   }
 
@@ -787,12 +811,13 @@ export class RepositoryOrchestrator {
     return projectRepositoryOrchestration(this.journal.readStream(repositoryOrchestrationStreamId(projectId)));
   }
 
-  private append(projectId: string, type: string, payload: unknown, correlationId: string): void {
-    this.appendMany(projectId, [{ type, payload }], correlationId);
+  private append(projectId: string, type: string, payload: unknown, correlationId: string,
+    causationId: string | null = null): void {
+    this.appendMany(projectId, [{ type, payload }], correlationId, false, causationId);
   }
 
   private appendMany(projectId: string, events: readonly { readonly type: string; readonly payload: unknown }[],
-    correlationId: string, requireActive = false): void {
+    correlationId: string, requireActive = false, initialCausationId: string | null = null): void {
     const streamId = repositoryOrchestrationStreamId(projectId);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const expectedVersion = this.journal.readStream(streamId).at(-1)?.streamVersion ?? 0;
@@ -800,8 +825,14 @@ export class RepositoryOrchestrator {
         throw new Error("repository orchestration is cancelled");
       }
       try {
-        this.journal.append(streamId, expectedVersion, events.map((event) => ({ streamId,
-          type: event.type, payload: event.payload, causationId: null, correlationId })));
+        let causationId = this.journal.readStream(streamId).at(-1)?.eventId ?? initialCausationId;
+        const chained = events.map((event) => {
+          const eventId = randomUUID();
+          const next = { streamId, eventId, type: event.type, payload: event.payload, causationId, correlationId };
+          causationId = eventId;
+          return next;
+        });
+        this.journal.append(streamId, expectedVersion, chained);
         return;
       } catch (error) {
         if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;

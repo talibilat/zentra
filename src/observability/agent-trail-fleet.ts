@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { digestCanonical } from "../contracts/authority-attention.js";
 
 import type { StoredEvent } from "../contracts/event.js";
 import {
@@ -96,10 +96,14 @@ export interface AgentTrailFleetProjection {
   readonly resources: { readonly capacity: SchedulerResources; readonly used: SchedulerResources };
   readonly budgets: { readonly capacity: SchedulerBudget; readonly reserved: SchedulerBudget; readonly used: SchedulerBudget };
   readonly integrationUnits: readonly {
-    readonly taskId: string;
+    readonly taskId?: string;
+    readonly unitId?: string;
     readonly projectId: string;
-    readonly state: "queued" | "active" | "terminal";
-    readonly placeholder: true;
+    readonly taskIds?: readonly string[];
+    readonly podIds?: readonly string[];
+    readonly state: "queued" | "active" | "terminal" | "formed" | "candidate" | "validated" | "rejected" |
+      "conflicted" | "awaiting_approval" | "integrated" | "acceptance_pending" | "accepted" | "correction_pending";
+    readonly placeholder: boolean;
   }[];
   readonly observability: {
     readonly state: "healthy" | "degraded" | "backfilling";
@@ -135,6 +139,9 @@ export function projectAgentTrailFleet(events: readonly StoredEvent[], options: 
   let capacity = zeroResources();
   let budgetCapacity = zeroBudget();
   let observability: "healthy" | "degraded" | "backfilling" = "healthy";
+  const repositoryUnits = new Map<string, { unitId: string; projectId: string; taskIds: string[];
+    podIds: string[]; state: "formed" | "candidate" | "validated" | "rejected" | "conflicted" |
+      "awaiting_approval" | "integrated" | "acceptance_pending" | "accepted" | "correction_pending" }>();
 
   for (const event of ordered) {
     const payload = object(event.payload, event.type);
@@ -242,6 +249,23 @@ export function projectAgentTrailFleet(events: readonly StoredEvent[], options: 
       case "gateway.degraded": observability = "degraded"; break;
       case "gateway.backfill_target": observability = "backfilling"; break;
       case "gateway.recovered": observability = "healthy"; break;
+      case "integration.unit_formed": {
+        const unitId = id(payload["unitId"]);
+        repositoryUnits.set(unitId, { unitId, projectId: repositoryProject(event, payload),
+          taskIds: ids(payload["taskIds"]), podIds: ids(payload["podIds"]), state: "formed" });
+        break;
+      }
+      case "integration.candidate_created": repositoryUnit(repositoryUnits, payload).state = "candidate"; break;
+      case "integration.candidate_validated": repositoryUnit(repositoryUnits, payload).state = "validated"; break;
+      case "integration.candidate_rejected": repositoryUnit(repositoryUnits, payload).state = "rejected"; break;
+      case "conflict.observed": repositoryUnit(repositoryUnits, payload).state = "conflicted"; break;
+      case "replan.proposed": repositoryUnit(repositoryUnits, payload).state = "awaiting_approval"; break;
+      case "replan.approved": repositoryUnit(repositoryUnits, payload).state = "formed"; break;
+      case "replan.rejected": repositoryUnit(repositoryUnits, payload).state = "rejected"; break;
+      case "integration.committed": repositoryUnit(repositoryUnits, payload).state = "integrated"; break;
+      case "final_acceptance.requested": repositoryUnit(repositoryUnits, payload).state = "acceptance_pending"; break;
+      case "final_acceptance.accepted": repositoryUnit(repositoryUnits, payload).state = "accepted"; break;
+      case "final_acceptance.rejected": repositoryUnit(repositoryUnits, payload).state = "correction_pending"; break;
       case "lease.granted": {
         const leaseId = id(payload["leaseId"]);
         leases.set(leaseId, { leaseId, taskId: id(payload["taskId"]), workerId: id(payload["workerId"]),
@@ -267,8 +291,12 @@ export function projectAgentTrailFleet(events: readonly StoredEvent[], options: 
       case "pod.registered": {
         const charter = object(payload["charter"], "pod charter");
         const charterTasks = Array.isArray(charter["tasks"]) ? charter["tasks"] : [];
+        const ownership = object(charter["ownership"], "pod ownership");
+        const ownedPaths = Array.isArray(ownership["ownedPaths"]) ? ownership["ownedPaths"] : [];
+        if (ownedPaths.some((value) => typeof value !== "string")) throw new Error("invalid AgentTrail pod ownership");
         pods.set(event.streamId, { podId: event.streamId, projectId: optionalId(charter["projectId"]),
-          state: "registered", claims: new Set(), tasks: charterTasks.map((candidate) => {
+          state: "registered", claims: new Set((ownedPaths as string[]).map((value) => digestCanonical(value))),
+          tasks: charterTasks.map((candidate) => {
             const task = object(candidate, "pod task");
             const dependencies = Array.isArray(task["dependencies"]) ? task["dependencies"] : [];
             return { taskId: id(task["taskId"]), dependencies: dependencies.map((dependency) =>
@@ -284,7 +312,7 @@ export function projectAgentTrailFleet(events: readonly StoredEvent[], options: 
           if (event.type === "pod.ownership_intent_observed") {
             const paths = payload["ownedPaths"];
             if (!Array.isArray(paths) || paths.some((value) => typeof value !== "string")) throw new Error("invalid AgentTrail ownership intent");
-            for (const path of paths as string[]) pod.claims.add(sha256(path));
+            for (const path of paths as string[]) pod.claims.add(digestCanonical(path));
           }
         }
     }
@@ -357,11 +385,13 @@ export function projectAgentTrailFleet(events: readonly StoredEvent[], options: 
     budgets: Object.freeze({ capacity: Object.freeze(budgetCapacity),
       reserved: Object.freeze(sumBudgets(taskList.map((task) => task.acquiredBudget))),
       used: Object.freeze(sumBudgets(taskList.map((task) => task.usedBudget))) }),
-    integrationUnits: Object.freeze(taskList.filter((task) => task.integration).map((task) => Object.freeze({
+    integrationUnits: Object.freeze([...taskList.filter((task) => task.integration).map((task) => Object.freeze({
       taskId: task.taskId, projectId: task.projectId,
       state: TERMINAL.has(task.state) ? "terminal" as const : ACTIVE.has(task.state) ? "active" as const : "queued" as const,
       placeholder: true as const,
-    }))),
+    })), ...[...repositoryUnits.values()].sort((a, b) => a.unitId.localeCompare(b.unitId)).map((unit) => Object.freeze({
+      ...unit, taskIds: Object.freeze(unit.taskIds), podIds: Object.freeze(unit.podIds), placeholder: false as const,
+    }))]),
     observability: Object.freeze({ state: observability, projectionPosition: position,
       journalHighWaterPosition: highWater, projectionLag: highWater - position,
       historyComplete, retentionIndependent: true as const, droppedProjectionEntries, ingestionGapCount }),
@@ -410,6 +440,22 @@ function schedulerTask(tasks: ReadonlyMap<string, TaskState>, payload: Readonly<
   if (task === undefined) throw new Error(`unknown AgentTrail scheduler task ${taskId}`);
   return task;
 }
+function repositoryUnit(units: ReadonlyMap<string, { state: string }>,
+  payload: Readonly<Record<string, unknown>>) {
+  const unit = units.get(id(payload["unitId"]));
+  if (unit === undefined) throw new Error("AgentTrail repository unit event has no formation");
+  return unit;
+}
+function repositoryProject(event: StoredEvent, payload: Readonly<Record<string, unknown>>): string {
+  const projected = optionalId(payload["projectId"]);
+  if (projected !== null) return projected;
+  if (!event.streamId.startsWith("repository-orchestration:")) throw new Error("AgentTrail repository unit lacks project identity");
+  return id(event.streamId.slice("repository-orchestration:".length));
+}
+function ids(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("AgentTrail repository unit identity list is invalid");
+  return value.map(id);
+}
 function schedulerWorker(events: readonly StoredEvent[], event: StoredEvent): string | null {
   const taskId = optionalId(object(event.payload, event.type)["taskId"]);
   const submitted = events.find((candidate) => candidate.type === "scheduler.task_submitted" &&
@@ -446,7 +492,6 @@ function addBudget(a: SchedulerBudget, b: SchedulerBudget): SchedulerBudget { re
   inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens,
   costUsdNano: a.costUsdNano + b.costUsdNano }; }
 function sumBudgets(values: readonly SchedulerBudget[]): SchedulerBudget { return values.reduce(addBudget, zeroBudget()); }
-function sha256(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 function assertOrdered(events: readonly StoredEvent[]): void {
   const ids = new Set<string>(); let prior = -1;
   for (const event of events) {

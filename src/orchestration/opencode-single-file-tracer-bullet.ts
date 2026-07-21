@@ -285,6 +285,7 @@ export class OpenCodeSingleFileTracerBullet {
           maxToolCalls: 1,
           correlationId: request.correlationId ?? request.task.taskId,
         },
+        dispatchAuthority: { mode: "unscheduled" },
         ...(request.guidance === undefined ? {} : { guidance: request.guidance }),
         capabilityBinding: roleBinding,
       executable: request.probe!.executable!,

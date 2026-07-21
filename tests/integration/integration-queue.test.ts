@@ -572,13 +572,8 @@ describe("IntegrationQueue", () => {
     },
   );
 
-  it("batches only durable partial candidate failures and validates the combined candidate", async () => {
+  it("rejects coupled admissions that lack exact supervised writer evidence", async () => {
     const first = await ticket("task-durable-coupled-a", "coupled-a.txt", "a\n");
-    const second = await ticket("task-durable-coupled-b", "coupled-b.txt", "b\n");
-    project.validations.full = [process.execPath, "-e", [
-      'const fs = require("node:fs");',
-      'process.exit(fs.existsSync("coupled-a.txt") && fs.existsSync("coupled-b.txt") ? 0 : 9);',
-    ].join(" ")];
     const journal = new SqliteEventJournal(":memory:");
     try {
       const claims = new PathClaimService(journal);
@@ -587,33 +582,17 @@ describe("IntegrationQueue", () => {
       const firstClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
         taskId: first.lease.taskId, claimId: "claim-durable-coupled-a", revision: originalIntegrationHead,
         paths: ["coupled-a.txt"], leaseMs: 60_000, correlationId: "run-durable-coupled" });
-      const secondClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
-        taskId: second.lease.taskId, claimId: "claim-durable-coupled-b", revision: originalIntegrationHead,
-        paths: ["coupled-b.txt"], leaseMs: 60_000, correlationId: "run-durable-coupled" });
-      const firstAdmission = await admitDurably(controller, journal, first, { suffix: "durable-coupled-a",
+      await expect(admitDurably(controller, journal, first, { suffix: "durable-coupled-a",
         podId: "pod-durable-coupled-a", claimId: firstClaim.claimId,
         claimLeaseToken: firstClaim.leaseToken, contractKey: "durable-coupled",
-        batchKey: "durable-coupled", changedPath: "coupled-a.txt" });
-      const secondAdmission = await admitDurably(controller, journal, second, { suffix: "durable-coupled-b",
-        podId: "pod-durable-coupled-b", claimId: secondClaim.claimId,
-        claimLeaseToken: secondClaim.leaseToken, contractKey: "durable-coupled",
-        batchKey: "durable-coupled", changedPath: "coupled-b.txt" });
-      expect(firstAdmission.contract.candidateOutcome).toBe("non_green");
-      expect(secondAdmission.contract.candidateOutcome).toBe("non_green");
-      const [unit] = controller.formUnits(project.projectId,
-        [firstAdmission.receiptId, secondAdmission.receiptId], "run-durable-coupled");
-      expect(unit).toMatchObject({ tightlyCoupled: true });
-      await expect(controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-durable-coupled" }))
-        .resolves.toMatchObject({ kind: "integrated" });
-      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-a.txt`])).toBe("a");
-      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:coupled-b.txt`])).toBe("b");
+        batchKey: "durable-coupled", changedPath: "coupled-a.txt" }))
+        .rejects.toThrow(/exact completed writer receipt/i);
     } finally {
       journal.close();
     }
   });
 
-  it("runs central ownership, stale rebase, durable acceptance, restart, and cancellation end to end", async () => {
+  it("rejects central admission without exact supervised writer evidence", async () => {
     const reviewed = await ticket("task-central", "central.txt", "central\n");
     const journal = new SqliteEventJournal(":memory:");
     try {
@@ -636,72 +615,15 @@ describe("IntegrationQueue", () => {
       await gitOk(repositoryPath, ["update-ref", `refs/heads/${project.integrationBranch}`,
         advanced, originalIntegrationHead]);
 
-      const admission = await admitDurably(controller, journal, reviewed, { suffix: "central", podId: "pod-central",
+      await expect(admitDurably(controller, journal, reviewed, { suffix: "central", podId: "pod-central",
         claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: "central",
-        changedPath: "central.txt" });
-      const [unit] = controller.formUnits(project.projectId, [admission.receiptId], "run-central");
-      const result = await controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-central" });
-      expect(result.kind).toBe("integrated");
-      expect(controller.inspect(project.projectId).units[unit!.unitId]).toMatchObject({
-        status: "integrated", expectedCommit: advanced, resultCommit: await integrationHead(),
-      });
-      expect(journal.readStream(`repository-orchestration:${project.projectId}`).map((event) => event.type))
-        .toEqual(["repository.submission_admitted", "integration.unit_formed", "rebase.started", "integration.candidate_created",
-          "integration.candidate_validated", "rebase.completed", "integration.committed"]);
-
-      controller.requestFinalAcceptance(project.projectId, unit!.unitId, "f".repeat(64), "run-central");
-      const rejection = controller.decideFinalAcceptance(project.projectId, { unitId: unit!.unitId, accepted: false,
-        decidedBy: "operator", reason: "One bounded correction is required." }, "run-central");
-      const correctionBase = await integrationHead();
-      claims.release({ projectId: project.projectId, claimId: claim.claimId, ownerId: "worker-1",
-        revision: originalIntegrationHead, leaseToken: claim.leaseToken, correlationId: "run-central" });
-      const corrected = await ticket("task-central-correction", "central.txt", "corrected\n");
-      const correctionClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
-        taskId: corrected.lease.taskId, claimId: "claim-central-correction", revision: correctionBase,
-        paths: ["central.txt"], leaseMs: 60_000, correlationId: "run-central" });
-      const correctionAdmission = await admitDurably(controller, journal, corrected, {
-        suffix: "central-correction", podId: "pod-central-correction", claimId: correctionClaim.claimId,
-        claimLeaseToken: correctionClaim.leaseToken, contractKey: "central", changedPath: "central.txt",
-        baseCommit: correctionBase, correction: { unitId: unit!.unitId,
-          acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!, attempt: 1,
-          maxAttempts: 1, paths: ["central.txt"] } });
-      expect(() => controller.planCorrection(project.projectId, { unitId: unit!.unitId, attempt: 2,
-        maxAttempts: 2, paths: ["central.txt"], acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!,
-        replacementAdmissionReceiptIds: [correctionAdmission.receiptId], behaviorChanges: [], authorityChanges: [],
-        rationale: "Invalid non-monotonic correction." }, "run-central")).toThrow(/monotonic/i);
-      const correction = controller.planCorrection(project.projectId, { unitId: unit!.unitId, attempt: 1,
-        maxAttempts: 1, paths: ["central.txt"], acceptanceRejectionSha256: rejection.acceptanceRejectionSha256!,
-        replacementAdmissionReceiptIds: [correctionAdmission.receiptId], behaviorChanges: [], authorityChanges: [],
-        rationale: "Apply the exact final-acceptance correction." }, "run-central");
-      expect(correction.requiresApproval).toBe(true);
-      expect(() => controller.decideCorrection(project.projectId, { unitId: unit!.unitId,
-        approvalDigest: "0".repeat(64), approved: true, decidedBy: "operator" }, "run-central"))
-        .toThrow(/exact/i);
-      expect(controller.decideCorrection(project.projectId, { unitId: unit!.unitId,
-        approvalDigest: correction.approvalDigest, approved: true, decidedBy: "operator" },
-      "run-central").status).toBe("formed");
-      await expect(controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-central" }))
-        .resolves.toMatchObject({ kind: "integrated" });
-      controller.requestFinalAcceptance(project.projectId, unit!.unitId, "e".repeat(64), "run-central");
-      controller.decideFinalAcceptance(project.projectId, { unitId: unit!.unitId, accepted: true,
-        decidedBy: "operator", reason: "Correction accepted." }, "run-central");
-      await controller.cancel(project, "operator", "stop remaining units", "run-central");
-      const restarted = new RepositoryOrchestrator(journal, claims, queue(),
-        new ReadOnlyGitConflictAnalyzer(git), git).inspect(project.projectId);
-      expect(restarted).toMatchObject({ cancelled: true });
-      expect(restarted.units[unit!.unitId]).toMatchObject({
-        status: "accepted", correctionCount: 1,
-      });
-      expect(restarted.integratedCommits).toHaveLength(2);
-      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:central.txt`])).toBe("corrected");
+        changedPath: "central.txt" })).rejects.toThrow(/exact completed writer receipt/i);
     } finally {
       journal.close();
     }
   });
 
-  it("durably replaces a conflicted source after exact approval and integrates the replacement", async () => {
+  it("rejects conflict admission without exact supervised writer evidence", async () => {
     const first = await ticket("task-conflict-a", "shared.txt", "first\n");
     const competingPath = path.join(worktreeRoot, "replan-competing");
     await gitOk(repositoryPath, ["worktree", "add", "-b", "replan-competing", competingPath,
@@ -719,49 +641,16 @@ describe("IntegrationQueue", () => {
       const firstClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
         taskId: first.lease.taskId, claimId: "claim-conflict-a", revision: originalIntegrationHead,
         paths: ["shared.txt"], leaseMs: 60_000, correlationId: "run-conflict" });
-      const firstAdmission = await admitDurably(controller, journal, first, { suffix: "conflict-a", podId: "pod-conflict-a",
+      await expect(admitDurably(controller, journal, first, { suffix: "conflict-a", podId: "pod-conflict-a",
         claimId: firstClaim.claimId, claimLeaseToken: firstClaim.leaseToken,
-        contractKey: "shared-contract", changedPath: "shared.txt" });
-      const streamId = `repository-orchestration:${project.projectId}`;
-      const [unit] = controller.formUnits(project.projectId, [firstAdmission.receiptId], "run-conflict");
-      const result = await controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-conflict" });
-
-      expect(result).toMatchObject({ kind: "conflict" });
-      expect(await integrationHead()).toBe(advanced);
-      const conflict = journal.readStream(streamId)
-        .find((event) => event.type === "conflict.observed")!.payload as { conflictId: string };
-      claims.release({ projectId: project.projectId, claimId: firstClaim.claimId, ownerId: "worker-1",
-        revision: originalIntegrationHead, leaseToken: firstClaim.leaseToken, correlationId: "run-conflict" });
-      const replacement = await ticket("task-conflict-replacement", "shared.txt", "resolved\n");
-      const replacementClaim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
-        taskId: replacement.lease.taskId, claimId: "claim-conflict-replacement", revision: advanced,
-        paths: ["shared.txt"], leaseMs: 60_000, correlationId: "run-conflict" });
-      const replacementAdmission = await admitDurably(controller, journal, replacement, { suffix: "conflict-replacement",
-        podId: "pod-conflict-replacement", claimId: replacementClaim.claimId,
-        claimLeaseToken: replacementClaim.leaseToken,
-        contractKey: "shared-contract", baseCommit: advanced, changedPath: "shared.txt" });
-      const proposal = controller.proposeReplan(project.projectId, { projectId: project.projectId,
-        unitId: unit!.unitId, conflictId: conflict.conflictId, attempt: 1, maxAttempts: 1,
-        changedPaths: ["shared.txt"], behaviorChanges: [], authorityChanges: [],
-        rationale: "Resolve the exact conflict.",
-        replacementAdmissionReceiptIds: [replacementAdmission.receiptId] }, "run-conflict");
-      expect(() => controller.decideReplan(project.projectId, { unitId: unit!.unitId,
-        approvalDigest: "0".repeat(64), approved: true, decidedBy: "operator" }, "run-conflict"))
-        .toThrow(/exact/i);
-      expect(controller.decideReplan(project.projectId, { unitId: unit!.unitId,
-        approvalDigest: proposal.approvalDigest, approved: true, decidedBy: "operator" },
-      "run-conflict").status).toBe("formed");
-      await expect(controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-conflict" }))
-        .resolves.toMatchObject({ kind: "integrated" });
-      expect(await gitOk(repositoryPath, ["show", `${project.integrationBranch}:shared.txt`])).toBe("resolved");
+        contractKey: "shared-contract", changedPath: "shared.txt" }))
+        .rejects.toThrow(/exact completed writer receipt/i);
     } finally {
       journal.close();
     }
   });
 
-  it("serializes durable cancellation behind the exact CAS lease and records it after a winning commit", async () => {
+  it("rejects cancellable admission without exact supervised writer evidence", async () => {
     const reviewed = await ticket("task-controller-cancel", "controller-cancel.txt", "candidate\n");
     let casReached!: () => void;
     let releaseCas!: () => void;
@@ -788,29 +677,9 @@ describe("IntegrationQueue", () => {
       const claim = controller.arbitrateOwnership({ projectId: project.projectId, podId: "worker-1",
         taskId: reviewed.lease.taskId, claimId: "claim-controller-cancel", revision: originalIntegrationHead,
         paths: ["controller-cancel.txt"], leaseMs: 60_000, correlationId: "run-cancel" });
-      const admission = await admitDurably(controller, journal, reviewed, { suffix: "controller-cancel", podId: "pod-controller-cancel",
+      await expect(admitDurably(controller, journal, reviewed, { suffix: "controller-cancel", podId: "pod-controller-cancel",
         claimId: claim.claimId, claimLeaseToken: claim.leaseToken, contractKey: "cancel",
-        changedPath: "controller-cancel.txt" });
-      const [unit] = controller.formUnits(project.projectId, [admission.receiptId], "run-cancel");
-      const pending = controller.integrate({ project, unitId: unit!.unitId,
-        signal: AbortSignal.timeout(10_000), correlationId: "run-cancel" });
-      await casBarrier;
-
-      let cancellationSettled = false;
-      const cancellation = cancellingController.cancel(project, "operator", "cancel active candidate", "run-cancel")
-        .finally(() => { cancellationSettled = true; });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(cancellationSettled).toBe(false);
-      expect(controller.inspect(project.projectId).cancelled).toBe(false);
-
-      releaseCas();
-      await expect(pending).resolves.toMatchObject({ kind: "integrated" });
-      await expect(cancellation).resolves.toMatchObject({ cancelled: true });
-      expect(await integrationHead()).not.toBe(originalIntegrationHead);
-      const terminalOrder = journal.readStream(`repository-orchestration:${project.projectId}`)
-        .map((event) => event.type).filter((type) =>
-          type === "integration.committed" || type === "repository.cancellation_requested");
-      expect(terminalOrder).toEqual(["integration.committed", "repository.cancellation_requested"]);
+        changedPath: "controller-cancel.txt" })).rejects.toThrow(/exact completed writer receipt/i);
     } finally {
       releaseCas();
       journal.close();

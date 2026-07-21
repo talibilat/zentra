@@ -146,9 +146,9 @@
       "sha256": "18c23e17a84722d6c3ab81356743f4735e1dd03e357350913a2149d6add4b3b6"
     },
     "src/agent_tail/serve.py": {
-      "bytes": 166883,
+      "bytes": 169575,
       "mode": "100644",
-      "sha256": "0b2769c45b834a63acdb0bd04a90954ab65c558d63c8c55f3f033a08415f9b87"
+      "sha256": "d8705878648bd3082e4bb3178d919d8b510a2c7f9c3d4c839fd7e426ff9260c1"
     },
     "src/agent_tail/session_import.py": {
       "bytes": 7790,
@@ -459,9 +459,10 @@
   "source": {
     "commit": "f7d3e20ac1c7a8be3b572161058480df10ab4ffb",
     "downstreamChanges": [
-      "zentra#100"
+      "zentra#100",
+      "zentra#101"
     ],
     "repository": "https://github.com/talibilat/agent-trail.git"
   },
-  "treeSha256": "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a"
+  "treeSha256": "0f1152b61b3c436b4c977c0f360186e15254ee8bb33bdfeca561f9d0b8b818fb"
 }

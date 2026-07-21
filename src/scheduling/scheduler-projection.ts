@@ -166,7 +166,8 @@ export function projectScheduler(events: readonly StoredEvent[]): SchedulerView 
         payload.audience !== task.input.workerId) throw new Error("dispatch grant was not consumed exactly");
       consumed.set(payload.grantId, payload.intentSha256);
     } else if (event.type === "scheduler.resources_acquired") {
-      const payload = z.strictObject({ taskId: Id, resources: SchedulerResourceSchema }).parse(event.payload);
+      const payload = z.strictObject({ taskId: Id, resources: SchedulerResourceSchema,
+        acquiredAtMs: z.number().int().nonnegative() }).parse(event.payload);
       if (allocations.has(task.input.taskId)) throw new Error("task already has a resource allocation");
       if (JSON.stringify(payload.resources) !== JSON.stringify(task.input.resources)) {
         throw new Error("resource acquisition does not match the exact dispatch request");
@@ -175,7 +176,8 @@ export function projectScheduler(events: readonly StoredEvent[]): SchedulerView 
       addResources(usage.resources, payload.resources, 1);
       assertWithin(usage.resources, limits.resources, "resource capacity");
     } else if (event.type === "scheduler.budget_acquired") {
-      const payload = z.strictObject({ taskId: Id, budget: SchedulerBudgetSchema }).parse(event.payload);
+      const payload = z.strictObject({ taskId: Id, budget: SchedulerBudgetSchema,
+        acquiredAtMs: z.number().int().nonnegative() }).parse(event.payload);
       const allocation = allocations.get(task.input.taskId);
       if (allocation === undefined || !isZeroBudget(allocation.budget)) throw new Error("budget acquisition is out of order");
       if (JSON.stringify(payload.budget) !== JSON.stringify(task.input.budget)) {

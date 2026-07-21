@@ -8,9 +8,9 @@ const packageRoot = path.join(root, "agenttrail", "package", "darwin-arm64");
 const executable = path.join(packageRoot, "agenttrail");
 const manifestPath = path.join(packageRoot, "manifest.json");
 const attestationPath = path.join(packageRoot, "attestation.json");
-const reviewedManifestSha256 = "3236995259bdf7ad61925d0e61a2887b5bbaa79c20ff224278bd7e4e6efe89c7";
-const reviewedExecutableSha256 = "bd379e002704e52d8a5211e6a204bbe0d09e8da49dfa4787b074dc56c1cdd36b";
-const reviewedBuildInputsSha256 = "11494d4051fffe42bb8cba2b90e4f8d2347794faa579e30cda8bca32fa46ccf2";
+const reviewedManifestSha256 = "2e41a2b288e31d8857a90560be46bd4cfdc60d53a6f2953a49457798ead92253";
+const reviewedExecutableSha256 = "50b33f3019132e9b186585088f74a28558649e52667420c5f5debae47676438d";
+const reviewedBuildInputsSha256 = "70e41e42d6500beb8109da2070e02ee057db00b0ba5299ac46a7c19f3ec15d96";
 
 try {
   canonicalDirectory(packageRoot);
@@ -24,7 +24,7 @@ try {
     manifest.product !== "AgentTrail" ||
     manifest.platform !== "darwin" ||
     manifest.architecture !== "arm64" ||
-    manifest.source?.treeSha256 !== "cf9c956b6d0a07b3f4ee338a6464966a8f2d7605fae900af726bd42236e8a58a" ||
+    manifest.source?.treeSha256 !== "0f1152b61b3c436b4c977c0f360186e15254ee8bb33bdfeca561f9d0b8b818fb" ||
     manifest.build?.inputsSha256 !== reviewedBuildInputsSha256 ||
     sha256(manifestBytes) !== reviewedManifestSha256
   ) throw new Error("manifest identity is malformed or unsupported");

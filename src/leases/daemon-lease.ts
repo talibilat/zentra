@@ -76,7 +76,8 @@ export class DaemonLeaseService {
     const streamId = daemonLeaseStreamId(this.identity);
     const event: NewEvent<string, unknown> = { streamId, type, payload, causationId: null,
       correlationId: controlIdentitySha256(this.identity) };
-    this.journal.append(streamId, expectedVersion, [event]);
+    this.journal.append(streamId, expectedVersion, [{ ...event,
+      causationId: readStreamEvents(this.journal, streamId).at(-1)?.eventId ?? null }]);
   }
 }
 

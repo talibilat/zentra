@@ -680,7 +680,12 @@ function writer(factory?: (claims: PathClaimService) => TrustedPatchApplier): Op
       new WorktreeManager(), new OpenCodeWriter(new ProcessSupervisor()), new WorkspaceOwnershipGate(),
       new GitClient(), factory,
     );
-  return new OpenCodeMultiFileWriter(capsule);
+  const implementation = new OpenCodeMultiFileWriter(capsule);
+  return {
+    run: (request) => implementation.run({ ...request, dispatchAuthority: { mode: "unscheduled" } }),
+    runCorrection: (request, correction) => implementation.runCorrection({ ...request,
+      dispatchAuthority: { mode: "unscheduled" } }, correction),
+  } as OpenCodeMultiFileWriter;
 }
 
 async function createFixture(): Promise<{ root: string; repository: string; revision: string; project: ProjectConfig }> {

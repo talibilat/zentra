@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { assertBoundedProjectionEntries, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
@@ -33,6 +34,7 @@ import type { TerminalOutcome } from "../contracts/task.js";
 export interface RegisterPodInput {
   readonly charter: PodCharter;
   readonly correlationId: string;
+  readonly causationId?: string | null;
 }
 
 export interface RevisePodInput {
@@ -57,16 +59,19 @@ export class PodRegistry {
   register(input: RegisterPodInput): PodView {
     const charter = PodCharterSchema.parse(input.charter);
     if (this.inspect(charter.podId) !== null) throw new Error(`pod ${charter.podId} already exists`);
+    const registeredEventId = randomUUID();
     const events: NewEvent<string, unknown>[] = [{
-      streamId: charter.podId, type: "pod.registered", payload: { charter }, causationId: null, correlationId: input.correlationId,
+      eventId: registeredEventId, streamId: charter.podId, type: "pod.registered", payload: { charter },
+      causationId: input.causationId ?? null, correlationId: input.correlationId,
     }, {
+      eventId: randomUUID(),
       streamId: charter.podId,
       type: "pod.task_relationships_recorded",
       payload: {
         charterRevision: charter.revision,
         relationships: charter.tasks.map((task) => ({ taskId: task.taskId, dependencies: task.dependencies })),
       },
-      causationId: null,
+      causationId: registeredEventId,
       correlationId: input.correlationId,
     }];
     projectPod(events.map((event, index) => candidateEvent(event, index + 1)));
@@ -135,12 +140,13 @@ export class PodRegistry {
     const events = readStreamEvents(this.journal, podId);
     if (events.length === 0) throw new Error(`pod ${podId} does not exist`);
     const current = projectPod(events)!;
-    const next: NewEvent<string, unknown>[] = [{ streamId: podId, type: "pod.assignment_invocation_started",
+    const invocationEventId = randomUUID();
+    const next: NewEvent<string, unknown>[] = [{ eventId: invocationEventId, streamId: podId, type: "pod.assignment_invocation_started",
       payload: { assignmentId: input.assignmentId, dispatchId: input.dispatchId, authorizedAt: input.authorizedAt },
-      causationId: null, correlationId: events[0]!.correlationId },
-    { streamId: podId, type: "pod.execution_reserved", payload: { assignmentId: input.assignmentId,
+      causationId: events.at(-1)!.eventId, correlationId: events[0]!.correlationId },
+    { eventId: randomUUID(), streamId: podId, type: "pod.execution_reserved", payload: { assignmentId: input.assignmentId,
       dispatchId: input.dispatchId, executionId: input.executionId, charterRevision: input.charterRevision },
-      causationId: null, correlationId: events[0]!.correlationId }];
+      causationId: invocationEventId, correlationId: events[0]!.correlationId }];
     projectPod([...events, ...next.map((event, index) => candidateEvent(event, current.streamVersion + index + 1))]);
     this.journal.append(podId, current.streamVersion, next);
     return this.require(podId);
@@ -172,8 +178,8 @@ export class PodRegistry {
     return this.append(podId, "pod.checkpointed", PodCheckpointSchema.parse(checkpoint));
   }
 
-  recordEvidence(podId: string, evidence: PodEvidence): StoredEvent {
-    return this.appendReturningEvent(podId, "pod.evidence_recorded", PodEvidenceSchema.parse(evidence));
+  recordEvidence(podId: string, evidence: PodEvidence, causationId: string | null = null): StoredEvent {
+    return this.appendReturningEvent(podId, "pod.evidence_recorded", PodEvidenceSchema.parse(evidence), causationId);
   }
 
   revise(podId: string, input: RevisePodInput): PodView {
@@ -187,14 +193,16 @@ export class PodRegistry {
     const events = readStreamEvents(this.journal, podId);
     const first: NewEvent<string, unknown> = { streamId: podId, type: "pod.revised", payload: revision,
       causationId: revision.cause.eventId, correlationId: events[0]!.correlationId };
-    const second: NewEvent<string, unknown> = { streamId: podId, type: "pod.task_relationships_recorded", payload: {
+    const firstEventId = randomUUID();
+    const firstWithId = { ...first, eventId: firstEventId };
+    const second: NewEvent<string, unknown> = { eventId: randomUUID(), streamId: podId, type: "pod.task_relationships_recorded", payload: {
       charterRevision: revision.charter.revision,
       relationships: revision.charter.tasks.map((task) => ({ taskId: task.taskId, dependencies: task.dependencies })),
-    }, causationId: null, correlationId: events[0]!.correlationId };
-    const candidates = [first, second].map((event, index) => candidateEvent(event, existing.streamVersion + index + 1));
+    }, causationId: firstEventId, correlationId: events[0]!.correlationId };
+    const candidates = [firstWithId, second].map((event, index) => candidateEvent(event, existing.streamVersion + index + 1));
     projectPod([...events, ...candidates]);
     try {
-      this.journal.append(podId, existing.streamVersion, [first, second]);
+      this.journal.append(podId, existing.streamVersion, [firstWithId, second]);
     } catch (error) {
       if (!(error instanceof Error) || !/^expected version \d+, actual \d+$/.test(error.message)) throw error;
       const raced = this.require(podId);
@@ -311,7 +319,7 @@ export class PodRegistry {
       streamId: podId,
       type,
       payload,
-      causationId,
+      causationId: causationId ?? events.at(-1)!.eventId,
       correlationId: events[0]!.correlationId,
     };
     projectPod([...events, candidateEvent(event, current.streamVersion + 1)]);

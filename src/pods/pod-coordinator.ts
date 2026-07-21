@@ -329,7 +329,7 @@ export class PodCoordinator {
         this.registry.observeDispatch(podId, { assignmentId, dispatchId: assignment.dispatchId,
           outcome: observed.effect, evidenceIds: observed.evidence.map((item) => item.evidenceId).sort(), usage,
           terminationAcknowledged: true });
-      } else if (assignment.observedOutcome !== observed.effect) {
+      } else if (assignment.observedOutcome !== "uncertain" && assignment.observedOutcome !== observed.effect) {
         throw new Error("pod reconciliation effect contradicts its durable observation");
       }
     }

@@ -2,6 +2,7 @@ import type { PlannedTask } from "../contracts/milestone.js";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { z } from "zod";
 import type {
   OpenCodeWriter,
   OpenCodeWriterReport,
@@ -56,6 +57,7 @@ export interface WriterPathClaimRequest {
   readonly readPaths?: readonly string[];
   readonly maxToolCalls?: number;
   readonly timeoutMs?: number;
+  readonly retainAfterCheckpoint?: boolean;
 }
 
 export interface WriterCapsuleRequest {
@@ -72,6 +74,9 @@ export interface WriterCapsuleRequest {
   readonly guidance?: UntrustedEvidenceHandoff;
   readonly writeClaim?: WriterPathClaimRequest;
   readonly retainedLease?: WorkspaceLease;
+  readonly dispatchAuthority?:
+    | { readonly mode: "scheduled"; readonly dispatchId: string }
+    | { readonly mode: "unscheduled" };
 }
 
 export interface WriterCapsuleResult {
@@ -98,6 +103,9 @@ export class WriterWorktreeCapsule {
     }
     assertAuthority(request);
     if (request.writeClaim !== undefined) assertClaimRequestWithinTask(request.task, request.writeClaim);
+    if (request.writeClaim !== undefined && request.dispatchAuthority === undefined) {
+      throw new Error("writer path claim requires explicit scheduled or unscheduled dispatch authority");
+    }
     if (request.writeClaim !== undefined && request.writeClaim.maxToolCalls !== 1) {
       throw new Error("claimed OpenCode writer requires one-effect maxToolCalls mode");
     }
@@ -165,7 +173,12 @@ export class WriterWorktreeCapsule {
       ? new Map<string, string>()
       : snapshotPaths(lease.path, retainedBaseline.changedPaths);
     await this.ownership.assertSafeBaseline(lease, packet.ownedPaths, { signal: request.signal });
-    const dispatchId = pathClaim === null ? null : randomUUID();
+    let dispatchId: string | null = null;
+    if (pathClaim !== null) {
+      dispatchId = request.dispatchAuthority!.mode === "scheduled"
+        ? z.string().uuid().parse(request.dispatchAuthority!.dispatchId)
+        : randomUUID();
+    }
     const preparedWriter = await this.writer.prepare({
       taskId: request.task.taskId,
       executable: request.executable,
@@ -337,11 +350,13 @@ export class WriterWorktreeCapsule {
           },
           correlationId: request.writeClaim!.correlationId,
         });
-        request.writeClaim!.service.release({
-          projectId: pathClaim.projectId, claimId: pathClaim.claimId, ownerId: pathClaim.ownerId,
-          revision: pathClaim.revision, leaseToken: pathClaim.leaseToken,
-          correlationId: request.writeClaim!.correlationId,
-        });
+        if (request.writeClaim!.retainAfterCheckpoint !== true) {
+          request.writeClaim!.service.release({
+            projectId: pathClaim.projectId, claimId: pathClaim.claimId, ownerId: pathClaim.ownerId,
+            revision: pathClaim.revision, leaseToken: pathClaim.leaseToken,
+            correlationId: request.writeClaim!.correlationId,
+          });
+        }
       }
       if (settledWriter.outcome !== "completed") {
         return Object.freeze({ outcome: settledWriter.outcome, lease, writer: settledWriter, ownership, pathClaim });

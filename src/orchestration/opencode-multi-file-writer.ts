@@ -24,6 +24,7 @@ export interface OpenCodeMultiFileWriterRequest
   readonly claims: PathClaimService;
   readonly claimId: string;
   readonly correlationId: string;
+  readonly retainClaimAfterCheckpoint?: boolean;
 }
 
 export class OpenCodeMultiFileWriter {
@@ -46,6 +47,7 @@ export class OpenCodeMultiFileWriter {
         readPaths: writer.readPaths,
         maxToolCalls: writer.checkpoint.maxToolCalls,
         timeoutMs: writer.checkpoint.maxDurationMs,
+        retainAfterCheckpoint: raw.retainClaimAfterCheckpoint ?? false,
       },
     });
   }

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import type { StoredEvent } from "../contracts/event.js";
+import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import { assertCorrectionWithinWriterEnvelope, WriterCheckpointSchema } from "../contracts/writer-request.js";
 import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import type { WorkspaceOwnershipGate, WorkspaceOwnershipReport } from "./workspace-ownership.js";
@@ -188,6 +188,7 @@ export interface PathClaim {
   readonly patchApplicationStarted: boolean;
   readonly patchAppliedPaths: readonly string[];
   readonly patchApplicationCompleted: boolean;
+  readonly checkpoint: z.infer<typeof WriterCheckpointSchema> | null;
 }
 
 export interface PathClaimAggregate {
@@ -277,7 +278,7 @@ export class PathClaimService {
             conflictingClaimIds: conflicts.map((claim) => claim.claimId), deniedAt: at,
           }), input.correlationId)];
       try {
-        this.journal.append(streamId, aggregate.streamVersion, events);
+        this.append(streamId, aggregate.streamVersion, events);
         if (conflicts.length > 0) throw new PathClaimConflictError(conflicts.map((claim) => claim.claimId));
         return this.requiredActive(input.projectId, input.claimId);
       } catch (error) {
@@ -297,7 +298,7 @@ export class PathClaimService {
       if (Date.parse(expiresAt) <= Date.parse(claim.expiresAt)) {
         throw new Error("path claim renewal must extend the active lease");
       }
-      this.journal.append(streamId, aggregate.streamVersion, [event(streamId, "path_claim.renewed", ClaimRenewedSchema.parse({
+      this.append(streamId, aggregate.streamVersion, [event(streamId, "path_claim.renewed", ClaimRenewedSchema.parse({
         claimId: claim.claimId, ownerId: claim.ownerId, revision: claim.revision,
         previousLeaseToken: claim.leaseToken, leaseToken,
         expiresAt,
@@ -308,7 +309,7 @@ export class PathClaimService {
 
   release(input: ClaimCommandIdentity & { readonly leaseToken: string }): void {
     this.mutateActive(input, (claim, streamId, aggregate) => {
-      this.journal.append(streamId, aggregate.streamVersion, [event(streamId, "path_claim.released", ClaimReleasedSchema.parse({
+      this.append(streamId, aggregate.streamVersion, [event(streamId, "path_claim.released", ClaimReleasedSchema.parse({
         claimId: claim.claimId, ownerId: claim.ownerId, revision: claim.revision,
         leaseToken: claim.leaseToken, releasedAt: this.now().toISOString(),
       }), input.correlationId)]);
@@ -360,7 +361,7 @@ export class PathClaimService {
       throw new Error("writer dispatch binding does not match exact claim authority");
     }
     const streamId = pathClaimStreamId(input.projectId);
-    this.journal.append(streamId, aggregate.streamVersion, [event(streamId, "writer.dispatch_started", DispatchStartedSchema.parse({
+    this.append(streamId, aggregate.streamVersion, [event(streamId, "writer.dispatch_started", DispatchStartedSchema.parse({
       schemaVersion: 1, claimId: claim.claimId, ownerId: claim.ownerId,
       revision: claim.revision, leaseToken: claim.leaseToken,
       dispatchId: input.dispatchId, binding: input.binding, startedAt: this.now().toISOString(),
@@ -398,7 +399,7 @@ export class PathClaimService {
     });
     const receipt = WriterReceiptSchema.parse({ ...body, digest: digestCanonical(body) });
     const streamId = pathClaimStreamId(input.projectId);
-    this.journal.append(streamId, aggregate.streamVersion, [event(
+    this.append(streamId, aggregate.streamVersion, [event(
       streamId, "writer.receipt_observed", receipt, input.correlationId,
     )]);
     return receipt;
@@ -414,7 +415,7 @@ export class PathClaimService {
     const streamId = pathClaimStreamId(input.projectId);
     const now = this.now().toISOString();
     const intentId = randomUUID();
-    const stored = this.journal.append(streamId, aggregate.streamVersion, [
+    const stored = this.append(streamId, aggregate.streamVersion, [
       event(streamId, "writer.patch_proposal_recorded", PatchProposalRecordedSchema.parse({
         schemaVersion: 1, claimId: claim.claimId, proposal: input.proposal, recordedAt: now,
       }), input.correlationId),
@@ -438,7 +439,7 @@ export class PathClaimService {
       throw new Error("patch application start lost optimistic intent CAS");
     }
     const streamId = pathClaimStreamId(input.projectId);
-    this.journal.append(streamId, input.expectedStreamVersion, [event(
+    this.append(streamId, input.expectedStreamVersion, [event(
       streamId, "writer.patch_application_started", PatchApplicationStartedSchema.parse({
         schemaVersion: 1, claimId: input.claimId, intentId: input.intentId,
         proposalDigest: input.proposalDigest, applicationId: input.applicationId,
@@ -476,7 +477,7 @@ export class PathClaimService {
     assertCorrectionWithinWriterEnvelope(claim.paths, paths);
     const aggregate = this.inspect(input.projectId);
     const streamId = pathClaimStreamId(input.projectId);
-    this.journal.append(streamId, aggregate.streamVersion, [event(streamId, "writer.correction_proposed", CorrectionSchema.parse({
+    this.append(streamId, aggregate.streamVersion, [event(streamId, "writer.correction_proposed", CorrectionSchema.parse({
       schemaVersion: 1, claimId: input.claimId, correctionId: IdentitySchema.parse(input.correctionId),
       revision: input.revision, paths, reason: z.string().min(1).max(4_096).parse(input.reason),
       proposedAt: this.now().toISOString(),
@@ -509,7 +510,7 @@ export class PathClaimService {
       }), input.correlationId);
       if (ownership.outcome !== "accepted") {
         const reason = "retained writer diff is outside its active path claim";
-        this.journal.append(streamId, aggregate.streamVersion, [observed, event(
+        this.append(streamId, aggregate.streamVersion, [observed, event(
           streamId, "writer.effect_uncertain", UncertainSchema.parse({
             schemaVersion: 1, claimId: claim.claimId, revision: claim.revision,
             reason, observedAt: reconciledAt,
@@ -521,7 +522,7 @@ export class PathClaimService {
         (claim.patchProposal === null || claim.patchApplicationPending === null) &&
         !claim.patchApplicationCompleted) {
         if (claim.dispatchId === null) throw new Error("proposal receipt has no dispatch identity");
-        this.journal.append(streamId, aggregate.streamVersion, [observed, event(
+        this.append(streamId, aggregate.streamVersion, [observed, event(
           streamId, "writer.evidence_missing", EvidenceMissingSchema.parse({
             schemaVersion: 1, claimId: claim.claimId, revision: claim.revision,
             dispatchId: claim.dispatchId, missing: "patch_proposal_or_intent", observedAt: reconciledAt,
@@ -533,7 +534,7 @@ export class PathClaimService {
       if (claim.patchApplicationPending !== null && !claim.patchApplicationStarted &&
         claim.patchAppliedPaths.length === 0 && claim.patchProposal !== null &&
         proposalPreimagesMatch(input.lease.path, claim.patchProposal)) {
-        this.journal.append(streamId, aggregate.streamVersion, [observed, event(
+        this.append(streamId, aggregate.streamVersion, [observed, event(
           streamId, "writer.effect_uncertain", UncertainSchema.parse({
             schemaVersion: 1, claimId: claim.claimId, revision: claim.revision,
             reason: "durable patch intent is recoverable only through the trusted single-use applier",
@@ -545,7 +546,7 @@ export class PathClaimService {
       }
       if (claim.patchApplicationPending !== null) {
         const reason = "trusted patch application has started or partial per-file evidence";
-        this.journal.append(streamId, aggregate.streamVersion, [observed, event(
+        this.append(streamId, aggregate.streamVersion, [observed, event(
           streamId, "writer.effect_uncertain", UncertainSchema.parse({
             schemaVersion: 1, claimId: claim.claimId, revision: claim.revision,
             reason, observedAt: reconciledAt,
@@ -554,12 +555,12 @@ export class PathClaimService {
         return Object.freeze({ classification: "uncertain", claim, ownership, reason, reconciledAt });
       }
       if (ownership.changedPaths.length === 0 && inspected.diff === "" && claim.workerReceipt === null) {
-        this.journal.append(streamId, aggregate.streamVersion, [observed]);
+        this.append(streamId, aggregate.streamVersion, [observed]);
         return Object.freeze({ classification: "no_effect", claim, ownership, diffSha256, reconciledAt });
       }
       if (claim.workerReceipt === null) {
         if (claim.dispatchId === null) throw new Error("retained effect has no dispatch identity");
-        this.journal.append(streamId, aggregate.streamVersion, [
+        this.append(streamId, aggregate.streamVersion, [
           observed,
           event(streamId, "writer.evidence_missing", EvidenceMissingSchema.parse({
             schemaVersion: 1, claimId: claim.claimId, revision: claim.revision,
@@ -572,7 +573,7 @@ export class PathClaimService {
         });
       }
       const checkpointId = `${claim.claimId}:reconciled:${randomUUID()}`;
-      this.journal.append(streamId, aggregate.streamVersion, [
+      this.append(streamId, aggregate.streamVersion, [
         observed,
         event(streamId, "writer.checkpointed", WriterCheckpointSchema.parse({
           schemaVersion: 1, checkpointId, claimId: claim.claimId, revision: claim.revision,
@@ -627,7 +628,7 @@ export class PathClaimService {
 
   private appendClaimEvidence(input: ClaimCommandIdentity & { readonly leaseToken: string }, type: string, payload: unknown): void {
     this.mutateActive(input, (_claim, streamId, aggregate) => {
-      this.journal.append(streamId, aggregate.streamVersion, [event(streamId, type, payload, input.correlationId)]);
+      this.append(streamId, aggregate.streamVersion, [event(streamId, type, payload, input.correlationId)]);
     });
   }
 
@@ -658,6 +659,19 @@ export class PathClaimService {
     return claim;
   }
 
+  private append(streamId: string, expectedVersion: number,
+    events: readonly NewEvent<string, unknown>[]): readonly StoredEvent[] {
+    let causationId = this.journal.readStream(streamId).at(-1)?.eventId ??
+      this.journal.readAll().findLast((stored) => stored.correlationId === events[0]?.correlationId)?.eventId ?? null;
+    const chained = events.map((candidate) => {
+      const eventId = candidate.eventId ?? randomUUID();
+      const next = { ...candidate, eventId, causationId };
+      causationId = eventId;
+      return next;
+    });
+    return this.journal.append(streamId, expectedVersion, chained);
+  }
+
   private historicalClaim(projectId: string, claimId: string): PathClaim {
     let found: PathClaim | null = null;
     for (const stored of readStreamEvents(this.journal, pathClaimStreamId(projectId))) {
@@ -667,7 +681,7 @@ export class PathClaimService {
           found = { ...payload, status: "active", requiresReconciliation: false,
             dispatchAuthorized: false, dispatchId: null, dispatchBinding: null, workerReceipt: null,
             patchApplicationPending: null, patchIntentId: null, patchProposal: null, patchApplicationStarted: false,
-            patchAppliedPaths: Object.freeze([]), patchApplicationCompleted: false };
+            patchAppliedPaths: Object.freeze([]), patchApplicationCompleted: false, checkpoint: null };
         }
       } else if (stored.type === "path_claim.renewed" && found !== null) {
         const payload = ClaimRenewedSchema.parse(stored.payload);
@@ -756,6 +770,7 @@ function projectClaimEvent(
     }
     active.set(payload.claimId, Object.freeze({
       ...claim, requiresReconciliation: false, dispatchAuthorized: false,
+      checkpoint: payload,
     }));
     return;
   }
@@ -902,7 +917,7 @@ function projectClaimEvent(
       requiresReconciliation: false, dispatchAuthorized: true,
       dispatchId: null, dispatchBinding: null, workerReceipt: null, patchApplicationPending: null,
       patchIntentId: null, patchProposal: null, patchApplicationStarted: false, patchAppliedPaths: Object.freeze([]),
-      patchApplicationCompleted: false });
+      patchApplicationCompleted: false, checkpoint: null });
     active.set(payload.claimId, acquired);
     history.set(payload.claimId, acquired);
     return;

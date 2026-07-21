@@ -203,6 +203,13 @@ export const AGENT_TAIL_EVENT_TYPES = [
   "scheduler.usage_recorded", "scheduler.dispatch_reconciliation_required",
   "scheduler.resources_released", "scheduler.budget_released",
   "lease.granted", "lease.heartbeat", "lease.renewed", "lease.expired", "lease.released", "lease.reconciled",
+  "repository.submission_admitted", "repository.cancellation_requested", "ownership.conflict_observed",
+  "integration.unit_formed", "integration.candidate_created", "integration.candidate_validated",
+  "integration.candidate_rejected", "integration.committed", "conflict.observed",
+  "replan.proposed", "replan.approved", "replan.rejected",
+  "rebase.started", "rebase.completed", "rebase.validated",
+  "final_acceptance.requested", "final_acceptance.accepted", "final_acceptance.rejected",
+  "correction.planned", "correction.approved", "correction.rejected",
 ] as const;
 
 type AgentTailEventType = typeof AGENT_TAIL_EVENT_TYPES[number];
@@ -524,6 +531,27 @@ export const AGENT_TAIL_PAYLOAD_SCHEMAS: Readonly<Record<AgentTailEventType, Pay
   "lease.expired": parseWith((payload) => parseLeasePayload("lease.expired", payload)),
   "lease.released": parseWith((payload) => parseLeasePayload("lease.released", payload)),
   "lease.reconciled": parseWith((payload) => parseLeasePayload("lease.reconciled", payload)),
+  "integration.unit_formed": mandatory({ unitId: Id }),
+  "integration.candidate_created": mandatory({ unitId: Id }),
+  "integration.committed": mandatory({ unitId: Id }),
+  "final_acceptance.requested": mandatory({ unitId: Id }),
+  "final_acceptance.accepted": mandatory({ unitId: Id }),
+  "repository.submission_admitted": parseWith((payload) => repositoryEventPayload("repository.submission_admitted", payload)),
+  "repository.cancellation_requested": mandatory({ requestedBy: Id, reason: Id }),
+  "ownership.conflict_observed": mandatory({ podId: Id, taskId: Id }),
+  "integration.candidate_validated": mandatory({ unitId: Id }),
+  "integration.candidate_rejected": mandatory({ unitId: Id }),
+  "conflict.observed": mandatory({ unitId: Id, conflictId: Id }),
+  "replan.proposed": mandatory({ unitId: Id, conflictId: Id, approvalDigest: Digest }),
+  "replan.approved": mandatory({ unitId: Id, approvalDigest: Digest }),
+  "replan.rejected": mandatory({ unitId: Id, approvalDigest: Digest }),
+  "rebase.started": mandatory({ unitId: Id }),
+  "rebase.completed": mandatory({ unitId: Id }),
+  "rebase.validated": mandatory({ unitId: Id }),
+  "final_acceptance.rejected": mandatory({ unitId: Id }),
+  "correction.planned": mandatory({ unitId: Id, approvalDigest: Digest }),
+  "correction.approved": mandatory({ unitId: Id, approvalDigest: Digest }),
+  "correction.rejected": mandatory({ unitId: Id, approvalDigest: Digest }),
 };
 
 export interface AgentTailActor {
@@ -575,6 +603,7 @@ export interface AgentTailEvent {
       readonly causation_id: string | null;
       readonly correlation_id: string;
       readonly native_type: string;
+      readonly journal_digest: string;
       readonly chosen_model?: {
         readonly capability_id: string;
         readonly harness: string;
@@ -653,6 +682,11 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
       ? redactedLeasePayload(event.type, event.payload)
     : event.type.startsWith("pod.")
       ? redactedPodPayload(event.type, event.payload)
+    : event.type.startsWith("repository.") || event.type.startsWith("ownership.") ||
+      event.type.startsWith("integration.") || event.type.startsWith("conflict.") ||
+      event.type.startsWith("replan.") || event.type.startsWith("rebase.") ||
+      event.type.startsWith("final_acceptance.") || event.type.startsWith("correction.")
+      ? redactedRepositoryEvent(event)
     : event.type.startsWith("capsule.")
     ? parseCapsuleEventPayload(event.type, event.payload)
     : event.type.startsWith("routing.")
@@ -695,6 +729,10 @@ export function storedEventToAgentTailEvent(event: StoredEvent): AgentTailEvent 
         causation_id: event.causationId,
         correlation_id: event.correlationId,
         native_type: event.type,
+        journal_digest: digestCanonical({ eventId: event.eventId, streamId: event.streamId,
+          streamVersion: event.streamVersion, globalPosition: event.globalPosition, type: event.type,
+          payload: event.payload, causationId: event.causationId, correlationId: event.correlationId,
+          recordedAt: event.recordedAt }),
         ...chosenModelAttributes(event.type, payload),
       }),
     }),
@@ -897,6 +935,9 @@ function identitiesFor(event: StoredEvent, payload: unknown): AgentTailIdentitie
   const podCharter = payloadRecord(payload, "charter");
   assign("project_id", payloadString(schedulerTask, "projectId"));
   assign("project_id", payloadString(podCharter, "projectId"));
+  if (event.streamId.startsWith("repository-orchestration:")) {
+    assign("project_id", event.streamId.slice("repository-orchestration:".length));
+  }
   assign("run_id", payloadString(payload, "runId") ??
     (event.type.startsWith("run.") || event.type.startsWith("preflight.")
       ? event.streamId.replace(/^run:/, "") : null));
@@ -963,6 +1004,66 @@ function projectExactSafeFields(type: string, payload: unknown): unknown {
     safe[key] = value;
   }
   return safe;
+}
+
+function repositoryEventPayload(type: string, payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new Error(`Agent Tail ${type} payload must be an object`);
+  }
+  return payload;
+}
+
+function redactedRepositoryEvent(event: StoredEvent): unknown {
+  const record = repositoryEventPayload(event.type, event.payload) as Readonly<Record<string, unknown>>;
+  const safe: Record<string, unknown> = {};
+  const unitId = record["unitId"];
+  if (unitId !== undefined) {
+    if (typeof unitId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(unitId)) {
+      throw new Error("Agent Tail repository event has an invalid unit identity");
+    }
+    safe["unitId"] = unitId;
+  }
+  if (event.streamId.startsWith("repository-orchestration:")) {
+    safe["projectId"] = event.streamId.slice("repository-orchestration:".length);
+  }
+  for (const key of ["contractId", "candidateId", "conflictId", "approvalDigest", "decidedBy",
+    "requestedBy", "reason", "receiptId", "taskId", "podId"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) safe[key] = value;
+  }
+  for (const key of ["taskIds", "podIds"] as const) {
+    const value = record[key];
+    if (Array.isArray(value) && value.every((item) => typeof item === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(item))) safe[key] = [...value];
+  }
+  if (event.type === "repository.submission_admitted") {
+    const receipt = record["receipt"];
+    if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)) {
+      throw new Error("Agent Tail repository admission lacks its receipt");
+    }
+    const admitted = receipt as Readonly<Record<string, unknown>>;
+    for (const key of ["receiptId", "taskId", "podId", "claimId", "schedulerTaskId"] as const) {
+      const value = admitted[key];
+      if (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) safe[key] = value;
+    }
+    for (const key of ["digest", "diffSha256", "writerAuthorityDigest"] as const) {
+      const value = admitted[key];
+      if (typeof value === "string" && /^[a-f0-9]{64}$/.test(value)) safe[key] = value;
+    }
+  }
+  for (const key of ["expectedCommit", "resultCommit"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value)) safe[key] = value;
+  }
+  for (const key of ["evidenceSha256"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && /^[a-f0-9]{64}$/.test(value)) safe[key] = value;
+  }
+  for (const key of ["formedAt", "createdAt", "committedAt", "requestedAt", "decidedAt"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && Number.isFinite(Date.parse(value))) safe[key] = value;
+  }
+  return Object.freeze(safe);
 }
 
 function redactedWriterCompletedPayload(payload: unknown): unknown {
@@ -1039,9 +1140,9 @@ function parseSchedulerPayload(type: string, payload: unknown): Readonly<Record<
       return SchedulerTaskId.extend({ grantId: SchedulerId, intentSha256: Digest, audience: SchedulerId,
         expiresAtMs: z.number().int().positive() }).parse(payload);
     case "scheduler.resources_acquired":
-      return SchedulerTaskId.extend({ resources: SchedulerResourceSchema }).parse(payload);
+      return SchedulerTaskId.extend({ resources: SchedulerResourceSchema, acquiredAtMs: SchedulerTime }).parse(payload);
     case "scheduler.budget_acquired":
-      return SchedulerTaskId.extend({ budget: SchedulerBudgetSchema }).parse(payload);
+      return SchedulerTaskId.extend({ budget: SchedulerBudgetSchema, acquiredAtMs: SchedulerTime }).parse(payload);
     case "scheduler.dispatch_intended":
       return process.extend({ projectId: SchedulerId, workerId: SchedulerId, taskLeaseId: SchedulerId,
         workerLeaseId: SchedulerId, grantId: SchedulerId, intentSha256: Digest,

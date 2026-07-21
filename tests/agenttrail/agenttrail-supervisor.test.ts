@@ -233,7 +233,7 @@ describe("AgentTrailSupervisor", () => {
     expect(launchCanonical).toBe(true);
     expect(launchLinks).toBe(1);
     expect(launchMode).toBe(0o700);
-    expect(launchDigest).toBe("bd379e002704e52d8a5211e6a204bbe0d09e8da49dfa4787b074dc56c1cdd36b");
+    expect(launchDigest).toBe("50b33f3019132e9b186585088f74a28558649e52667420c5f5debae47676438d");
     expect(spawnObserved).toBe(false);
     expect(supervisor.environmentKeys()).toEqual([]);
   }, 90_000);

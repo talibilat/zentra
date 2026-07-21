@@ -225,6 +225,7 @@ export type {
 } from "./attention/attention-dispatcher.js";
 export { AgentTailJsonlFileSink } from "./observability/agent-tail-file-sink.js";
 export { isAgentTailProjectableEventType } from "./observability/agent-tail.js";
+export { agentTailEventToJsonLine, storedEventToAgentTailEvent } from "./observability/agent-tail.js";
 export { AgentTailSegmentStore } from "./observability/agent-tail-segment-store.js";
 export type {
   AgentTailSegmentDescriptor,
@@ -745,3 +746,7 @@ export type {
   RepositoryUnitView,
 } from "./integration/repository-orchestrator.js";
 export type { IntegrationUnitSource } from "./integration/integration-queue.js";
+export { buildThreePodConformanceReport, compareAgentTrailJournal } from "./conformance/three-pod-report.js";
+export type { AgentTrailJournalEntry, ThreePodConformanceReport } from "./conformance/three-pod-report.js";
+export { runInstalledThreePodConformance } from "./conformance/three-pod-installed.js";
+export type { InstalledThreePodResult } from "./conformance/three-pod-installed.js";
