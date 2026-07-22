@@ -29,6 +29,7 @@
     "package:contents": "node scripts/verify-package-contents.mjs",
     "package:verify": "node scripts/verify-agenttrail-package.mjs && node scripts/verify-package.mjs",
     "prepack": "node scripts/build-package.mjs && node scripts/verify-package.mjs",
+    "soak:run": "node scripts/run-soak.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "node dist/src/cli/main.js"

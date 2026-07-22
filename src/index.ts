@@ -750,3 +750,7 @@ export { buildThreePodConformanceReport, compareAgentTrailJournal } from "./conf
 export type { AgentTrailJournalEntry, ThreePodConformanceReport } from "./conformance/three-pod-report.js";
 export { runInstalledThreePodConformance } from "./conformance/three-pod-installed.js";
 export type { InstalledThreePodResult } from "./conformance/three-pod-installed.js";
+export { SOAK_ABRUPT_POINTS, SOAK_FAULT_KINDS, createSoakProfile, runSoakHarness,
+  trustedSoakPublicKeySha256, verifySoakReport } from "./soak/soak-harness.js";
+export type { SoakAbruptPoint, SoakConfig, SoakFaultKind, SoakReport, SoakRunResult,
+  SoakSloResult } from "./soak/soak-harness.js";
