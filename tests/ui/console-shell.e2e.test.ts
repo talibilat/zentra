@@ -20,6 +20,11 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
+/** Mirrors the client-side `label()` formatter embedded in controls-section.ts so the test's expectation is derived the same way the UI derives it, without depending on the UI's own rendered output as its oracle. */
+function label(value: string): string {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 async function consoleShellWorkflow(root: string): Promise<{ readonly workflow: WorkflowSurface; readonly journal: SqliteEventJournal }> {
   execFileSync("/usr/bin/git", ["init", root], { env: { HOME: root }, stdio: "ignore" });
   execFileSync("/usr/bin/git", ["config", "user.name", "Zentra Browser Test"], { cwd: root, env: { HOME: root } });
@@ -77,6 +82,39 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
       const frameSrc = await driver.evaluate<string>(`document.getElementById("agenttrail-frame")?.getAttribute("src") || ""`);
       expect(frameSrc).toBe("/agenttrail/");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("switches to the Overview nav item and renders the selected run's real title and lifecycle badge", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-overview-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      const runId = await driver.submitGoal("Confirm Overview renders the selected run's real data");
+
+      // Independent oracle: read the run straight from the same workflow surface the gateway is backed
+      // by, rather than from another rendered panel, so this cannot pass by cross-checking one buggy
+      // render against another.
+      const detail = fixture.workflow.getRun(runId);
+      if (detail === null) throw new Error("submitted run is missing from the workflow surface");
+      const expectedBadge = label(detail.run.lifecycle);
+
+      await driver.click('[data-nav-id="overview"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="overview"]')?.dataset.active === "true"`);
+
+      const heading = await driver.evaluate<string>(`document.querySelector("#overview-root h1")?.textContent || ""`);
+      expect(heading).toBe(runId);
+
+      const badgeText = await driver.evaluate<string>(`document.querySelector("#overview-root .badge")?.textContent || ""`);
+      expect(badgeText).toBe(expectedBadge);
+      expect(badgeText).not.toBe("");
     } finally {
       await gateway.close();
       fixture.journal.close();
