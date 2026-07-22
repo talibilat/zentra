@@ -564,7 +564,11 @@ describe("console shell", () => {
 
   it("owns the single page-level session handoff and wires Controls' connect hook after it", () => {
     expect(SHELL_SCRIPT).toContain("async function handoff()");
-    expect(SHELL_SCRIPT).toContain("window.__consoleSections.controls.connect()");
+    expect(SHELL_SCRIPT).toContain("window.__consoleSections.controls?.connect?.()");
+  });
+
+  it("re-establishes the AgentTrail iframe src after session handoff, since Task 4 removed the old dynamic assignment from controls-section.ts", () => {
+    expect(SHELL_SCRIPT).toContain('document.getElementById("agenttrail-frame").src="/agenttrail/"');
   });
 
   it("never loads a font from an external host", () => {
@@ -668,11 +672,14 @@ async function handoff(){
     window.__consoleSections=window.__consoleSections||{};
     window.__consoleSections.controls?.setSession?.(result.bearerToken,result.csrfToken);
     document.querySelector(".shell").dataset.ready="true";document.documentElement.dataset.ready="true";
+    document.getElementById("agenttrail-frame").src="/agenttrail/";
     await window.__consoleSections.controls?.connect?.();
   }catch(error){status("Session unavailable: "+error.message+".","error")}
 }
 void handoff();`;
 ```
+
+Note on a plan gap found during Task 4's review: the original `operations-ui.ts` set `agenttrail-frame.src` dynamically inside its own `handoff()`, after session establishment (not as a static markup attribute — the iframe should not start loading before the session exists). Task 3 ported that assignment into `controls-section.ts`'s copy of `handoff()`, and Task 4 correctly deleted it from there (it was AgentTrail-specific). This shell is the first task since then to own the page-level `handoff()`, so it is the correct and only place left to re-add it — the line above does that. Task 9's e2e assertion that `#agenttrail-frame`'s `src` equals `/agenttrail/` depends on this line existing.
 
 - [ ] **Step 3a: Wire `controls-section.ts`'s exposed hook to accept the session from the shell**
 
