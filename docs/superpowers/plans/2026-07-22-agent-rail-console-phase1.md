@@ -710,6 +710,108 @@ git commit -m "Add the console sidebar shell and move session handoff to it"
 
 ---
 
+### Task 6b: Carry over component CSS and the connection-status element (found during Task 8)
+
+**Files:**
+- Modify: `src/gateway/console/shell.ts`
+- Test: `tests/gateway/console/shell.test.ts`
+
+Task 8's implementer loaded a real gateway in a real browser and found two regressions that no prior task's string-matching unit tests caught, because none of them actually rendered or executed the composed page:
+
+1. `CONTROLS_SCRIPT`'s `connect()` function (ported verbatim from `operations-ui.ts` in Task 3, unchanged) references `$("connection")` — an element that existed in `operations-ui.ts`'s original `<header class="masthead">` nav (`<div id="connection" class="connection" role="status">Connecting</div>`) but was never carried into `SHELL_MARKUP` when Task 6 built the new header. At runtime this throws when the SSE polling loop starts, breaking live updates entirely.
+2. `operations-ui.ts`'s original `<style>` block defined every component class `CONTROLS_MARKUP` depends on for both correct rendering and for `tests/conformance/packaged-browser-security.e2e.test.ts`'s style-dependent assertions — `.panel`, `.intake`, `.workspace`, `.stack`, `.run-card`, `.attention-card`, `.badge`, `.facts`/`.fact`, `.empty`/`.recommendation`/`.notice`, `details`/`summary`/`pre`, `.decision-actions`/`.digest`/`.actions`, `.history-card`, `.form-row`, `.field-label`, `textarea,input,select`, `.primary`/`.secondary`/`.danger`, `#status`, `.connection`, plus the responsive media queries. Task 6's `SHELL_MARKUP` only added new shell-chrome rules (`.shell`, `.sidebar`, `.nav-item`, etc.) and never carried these over, so the ported markup renders with no component styling at all.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// append to tests/gateway/console/shell.test.ts
+it("carries over the component styles Controls' ported markup depends on, and the connection-status element connect() targets", () => {
+  for (const selector of [".panel{", ".run-card,.attention-card{", ".badge{", ".fact{", ".decision-actions{", "textarea,input,select{"]) {
+    expect(SHELL_MARKUP).toContain(selector);
+  }
+  expect(SHELL_MARKUP).toContain('id="connection"');
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts`
+Expected: FAIL — none of the listed selectors or `id="connection"` exist yet.
+
+- [ ] **Step 3: Add the ported component styles and the connection element**
+
+In `src/gateway/console/shell.ts`, append the following to the existing `<style>` block (after the shell-chrome rules already there), renaming the old palette's variables to Task 2's `design-tokens.ts` names as you go: `--ink` → `--text`, `--muted` → `--dim`, `--danger` → `--err`. Every other `var(--name)` reference (`--line`, `--panel`, `--accent`, `--warn`) keeps its name unchanged — Task 2's `:root` already redefines those names to the new palette, so the rules automatically pick up the new colors without further edits. Standalone hardcoded hex values (state-specific accent colors like `#0b1512`, `#3c6549`, `#bceba0`) are carried over unchanged; harmonizing them with the new palette is a follow-up, not required to fix the two regressions below.
+
+```css
+#status{border-left:3px solid var(--line);padding:.8rem 1rem;background:#0d1814}
+#status[data-tone=ok]{border-color:var(--accent)}
+#status[data-tone=error]{border-color:var(--err);color:#ffd3cf}
+.connection{font-size:.8rem;color:var(--warn)}
+.connection[data-connected=true]{color:var(--accent)}
+.intake{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.panel{background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--line);border-radius:14px;padding:1.25rem;box-shadow:0 20px 60px #0004}
+.panel h2{font-size:.8rem;letter-spacing:.15em;text-transform:uppercase;color:var(--dim);margin:0 0 1rem}
+.field-label{display:block;font-weight:700;margin-bottom:.4rem}
+textarea,input,select{width:100%;border:1px solid #3c554b;border-radius:8px;background:#08110e;color:var(--text);padding:.75rem}
+textarea{min-height:7rem;resize:vertical}
+.form-row{display:flex;gap:.75rem;align-items:end}
+.form-row>div{flex:1}
+.primary,.secondary,.danger{border:0;border-radius:999px;padding:.7rem 1.1rem;font-weight:800}
+.primary{background:var(--accent);color:#10200f}
+.secondary{background:#2a3d35;color:var(--text)}
+.danger{background:#512622;color:#ffd7d2}
+.workspace{display:grid;grid-template-columns:minmax(15rem,.65fr) minmax(24rem,1.35fr) minmax(19rem,.8fr);gap:1rem;margin-top:1rem;align-items:start}
+.stack{display:grid;gap:.75rem}
+.run-card,.attention-card{width:100%;text-align:left;color:var(--text);background:#0b1512;border:1px solid var(--line);border-radius:10px;padding:.8rem;display:grid;gap:.3rem}
+.run-card[data-selected=true]{border-color:var(--accent)}
+.run-card span,.attention-card span{color:var(--dim);font-size:.82rem}
+.badge{display:inline-block!important;width:max-content;color:#bceba0!important;border:1px solid #3c6549;border-radius:999px;padding:.12rem .45rem;text-transform:uppercase;letter-spacing:.08em;font-size:.65rem!important}
+.facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.65rem}
+.fact{border-top:1px solid var(--line);padding-top:.5rem}
+.fact dt{color:var(--dim);font-size:.72rem;text-transform:uppercase}
+.fact dd{margin:0;overflow-wrap:anywhere}
+.empty,.recommendation{color:var(--dim)}
+.recommendation{border:1px solid #685d32;background:#251f0f;padding:.8rem;border-radius:8px}
+.notice{color:var(--warn);border-left:3px solid var(--warn);padding-left:.75rem}
+details{border-top:1px solid var(--line);padding:.7rem 0}
+summary{cursor:pointer;font-weight:700}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed0c8;background:#07100d;padding:.8rem;border-radius:8px}
+.decision-actions{display:grid;gap:.8rem;margin-top:1rem}
+.digest{font-family:ui-monospace,monospace;overflow-wrap:anywhere;color:var(--accent)}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap}
+.actions form{flex:1;min-width:12rem}
+.history-card{padding:.75rem 0;border-top:1px solid var(--line)}
+.history-card strong{display:block}
+.history-card .badge{margin:.35rem 0}
+.history-card p{margin:0;color:var(--dim);font-size:.85rem}
+@media(max-width:980px){.workspace{grid-template-columns:1fr 1fr}.workspace>.panel:last-child{grid-column:1/-1}.intake{grid-template-columns:1fr}}
+@media(max-width:620px){.workspace{grid-template-columns:1fr}.workspace>.panel:last-child{grid-column:auto}.facts{grid-template-columns:1fr}.form-row{display:grid}.panel{padding:1rem;border-radius:10px}.actions{display:grid}.actions form{min-width:0}}
+```
+
+Add the `#connection` element itself into `SHELL_MARKUP`'s header, next to the existing `#status` line, e.g.:
+
+```html
+<div id="connection" class="connection" role="status">Connecting</div>
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts tests/gateway/console/console-ui.test.ts`
+Expected: both PASS (console-ui.test.ts re-run since it embeds SHELL_MARKUP).
+
+- [ ] **Step 5: Manually confirm against a real gateway**
+
+This regression was only caught by loading a real browser against a real gateway — a unit test alone is not sufficient evidence it's fixed. Boot a `LoopbackGateway` (following the pattern in `tests/gateway/chromium-browser.e2e.test.ts`), open the session URL in a real browser (or via `ChromiumWorkflowDriver`), and confirm: no console error from `connect()`, the connection indicator shows "Live" after a moment, and `.panel`/`.run-card` elements are visibly styled (not raw unstyled `<div>`s).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/gateway/console/shell.ts tests/gateway/console/shell.test.ts
+git commit -m "Carry over component CSS and the connection-status element to the shell"
+```
+
+---
+
 ### Task 7: Compose the full console document
 
 **Files:**
