@@ -1,8 +1,6 @@
 import { BrowserPendingSubmissionCommands, isProvenPreEffectBrowserSubmissionError } from "./pending-submissions.js";
 
-export const CONTROLS_SCRIPT = String.raw`(()=>{
-"use strict";
-const state={bearer:"",csrf:"",runs:[],selected:null,attention:[],history:[],decision:null,sourceTexts:{},cursor:0,connected:false};
+export const CONTROLS_SCRIPT = String.raw`const state={bearer:"",csrf:"",runs:[],selected:null,attention:[],history:[],decision:null,sourceTexts:{},cursor:0,connected:false};
 const MAX_SOURCE_DISPLAY_CHARS=65536;
 const MAX_PENDING_BROWSER_SUBMISSIONS=32;
 const BrowserPendingSubmissionCommands=${BrowserPendingSubmissionCommands.toString()};
@@ -92,8 +90,7 @@ window.__consoleSections.controls={
   refresh,
   connect,
   setSession:(bearer,csrf)=>{state.bearer=bearer;state.csrf=csrf}
-};
-})();`;
+};`;
 
 export const CONTROLS_MARKUP = `<section class="intake" aria-label="Run intake"><form id="goal-form" class="panel"><h2>Inline goal</h2><label class="field-label" for="goal">Goal</label><textarea id="goal" name="goal" required maxlength="20000" placeholder="Describe one measurable outcome"></textarea><p><button class="primary" type="submit">Submit goal</button></p></form><form id="tickets-form" class="panel"><h2>Ticket folder</h2><label class="field-label" for="ticket-path">Project-relative folder</label><div class="form-row"><div><input id="ticket-path" name="path" required maxlength="1024" placeholder="tickets/release-42"></div><button class="primary" type="submit">Submit tickets</button></div><p class="empty">The configured workflow validates path authority and bounded source ingestion.</p></form></section>
 <section class="workspace" aria-label="Run operations"><section class="panel"><h2>Runs</h2><div id="runs" class="stack"></div></section><section class="panel"><h2>Run, source, analysis, and readiness</h2><div id="run-detail"></div><p><button id="cancel-run" class="danger" type="button" disabled>Cancel run</button></p></section><section class="panel"><h2>Pending attention</h2><div id="attention" class="stack" aria-live="polite"></div><div id="decision"></div><h3>Decision history</h3><div id="decision-history" aria-label="Resolved decision history"></div></section></section>
