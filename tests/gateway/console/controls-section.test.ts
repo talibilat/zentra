@@ -20,4 +20,8 @@ describe("controls section", () => {
   it("does not embed the AgentTrail evidence frame markup, which now lives in trail-section.ts", () => {
     expect(CONTROLS_MARKUP).not.toContain('id="agenttrail-frame"');
   });
+
+  it("notifies the Overview section whenever the selected run changes", () => {
+    expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.overview?.render?.()");
+  });
 });
