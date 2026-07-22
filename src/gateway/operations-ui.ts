@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 
 import { BrowserPendingSubmissionCommands, isProvenPreEffectBrowserSubmissionError } from "./console/pending-submissions.js";
 
-export { BrowserPendingSubmissionCommands, isProvenPreEffectBrowserSubmissionError };
-
 export const OPERATIONS_SCRIPT = String.raw`(()=>{
 "use strict";
 const state={bearer:"",csrf:"",runs:[],selected:null,attention:[],history:[],decision:null,sourceTexts:{},cursor:0,connected:false};

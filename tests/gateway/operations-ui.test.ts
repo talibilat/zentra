@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   BrowserPendingSubmissionCommands,
-  OPERATIONS_SCRIPT,
   isProvenPreEffectBrowserSubmissionError,
-} from "../../src/gateway/operations-ui.js";
+} from "../../src/gateway/console/pending-submissions.js";
+import { OPERATIONS_SCRIPT } from "../../src/gateway/operations-ui.js";
 
 describe("operations UI submission dispatch", () => {
   it("creates one command identity per form submission and suppresses duplicate dispatch while pending", () => {
