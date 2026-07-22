@@ -1175,3 +1175,76 @@ git status
 ```
 
 If Steps 1-4 required any fixes, commit them now with a message describing what the fix addressed. If everything was already green, no commit is needed for this task.
+
+---
+
+### Task 10b: Fix `dataset.ready` firing before the initial run data loads (found during merge verification)
+
+**Files:**
+- Modify: `src/gateway/console/shell.ts`
+- Test: `tests/gateway/console/shell.test.ts`
+
+After merging to `main`, re-running the full test suite there (not just in the worktree) surfaced a real, timing-sensitive regression that no prior run had hit: `tests/gateway/chromium-browser.e2e.test.ts > keeps labeled keyboard-native controls and mobile viewport semantics` intermittently fails with the page's `<html data-ready="true">` present but `#run-detail`'s content (`Source kind</dt><dd>Inline Goal`, etc.) missing.
+
+Root cause: `operations-ui.ts`'s original `handoff()` sequenced `await refresh();await synchronize();` — both fully awaited — **before** setting `document.documentElement.dataset.ready="true"`, and only *then* fired the continuous polling loop with `void connect()` (fire-and-forget; `connect()` is an infinite loop while `state.bearer` is set, so it must never be awaited). `data-ready="true"` was therefore a real signal that the initial run list and selected-run detail had already rendered.
+
+Task 6's `SHELL_SCRIPT.handoff()` (as given in this plan) set `dataset.ready="true"` immediately after receiving the session tokens, then called `await window.__consoleSections.controls?.connect?.()` afterward — inverting the order, and incorrectly `await`-ing an infinite loop. `runChromium`'s `--dump-dom` capture in the test above waits only for `data-ready="true"` to appear, so it now sometimes captures the DOM before the first data fetch inside `connect()` has completed, since that fetch now starts strictly *after* the ready flag they're waiting on.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// append to tests/gateway/console/shell.test.ts
+it("marks the page ready only after the initial run data has loaded, matching operations-ui.ts's original synchronization contract", () => {
+  expect(SHELL_SCRIPT).toContain("await window.__consoleSections.controls?.refresh?.()");
+  const readyIndex = SHELL_SCRIPT.indexOf('document.documentElement.dataset.ready="true"');
+  const refreshIndex = SHELL_SCRIPT.indexOf("await window.__consoleSections.controls?.refresh?.()");
+  expect(refreshIndex).toBeGreaterThan(-1);
+  expect(readyIndex).toBeGreaterThan(refreshIndex);
+  expect(SHELL_SCRIPT).toContain("void window.__consoleSections.controls?.connect?.()");
+  expect(SHELL_SCRIPT).not.toContain("await window.__consoleSections.controls?.connect?.()");
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts`
+Expected: FAIL — the current `handoff()` calls `connect()` with `await`, never calls `refresh()` explicitly, and sets `dataset.ready` before either.
+
+- [ ] **Step 3: Fix `handoff()`'s sequencing**
+
+In `SHELL_SCRIPT`'s `handoff()`, replace the success-path body (from `window.__consoleSections.controls?.setSession?.(...)` through the end of the `try` block) with:
+
+```javascript
+window.__consoleSections.controls?.setSession?.(result.bearerToken,result.csrfToken);
+document.getElementById("agenttrail-frame").src="/agenttrail/";
+await window.__consoleSections.controls?.refresh?.();
+status("Secure local session established.","ok");
+document.querySelector(".shell").dataset.ready="true";document.documentElement.dataset.ready="true";
+void window.__consoleSections.controls?.connect?.();
+```
+
+This restores the original contract: the initial data load (`refresh()`, which also fetches runs, selects one, and renders run/attention/decision/Overview state) is fully awaited before `dataset.ready` is set, and the continuous polling loop (`connect()`) starts as fire-and-forget afterward, exactly as `operations-ui.ts` did with `await refresh();await synchronize();` then `dataset.ready="true"` then `void connect()`. (`synchronize()` itself is not separately re-invoked here since `refresh()` already performs the equivalent initial render; the polling loop `connect()` calls `synchronize()` on every subsequent tick.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts tests/gateway/console/console-ui.test.ts`
+Expected: both PASS.
+
+- [ ] **Step 5: Confirm the regression is actually fixed with a real browser, repeatedly**
+
+A single passing run is not sufficient evidence for a timing race — run the specific previously-flaky test several times in a row:
+
+Run: `for i in 1 2 3 4 5; do pnpm vitest run tests/gateway/chromium-browser.e2e.test.ts || break; done`
+Expected: all 5 iterations PASS. If any iteration fails, the race is not fully closed — investigate further rather than reporting DONE.
+
+- [ ] **Step 6: Run the full previously-scoped verification suite once more**
+
+Run: `pnpm vitest run tests/docs/codebase-map.test.ts tests/gateway/console tests/gateway/loopback-gateway.test.ts tests/gateway/chromium-browser.e2e.test.ts tests/conformance/packaged-browser-security.e2e.test.ts tests/ui/console-shell.e2e.test.ts tests/ui/chromium-acceptance.ts`
+Expected: all PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/gateway/console/shell.ts tests/gateway/console/shell.test.ts
+git commit -m "Fix shell handoff to await initial data load before marking ready"
+```
