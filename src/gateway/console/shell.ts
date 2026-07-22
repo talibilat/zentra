@@ -127,6 +127,7 @@ async function handoff(){
     const result=await session.json();if(!session.ok)throw new Error(result.error||"session_failed");
     window.__consoleSections=window.__consoleSections||{};
     window.__consoleSections.controls?.setSession?.(result.bearerToken,result.csrfToken);
+    status("Secure local session established.","ok");
     document.querySelector(".shell").dataset.ready="true";document.documentElement.dataset.ready="true";
     document.getElementById("agenttrail-frame").src="/agenttrail/";
     await window.__consoleSections.controls?.connect?.();

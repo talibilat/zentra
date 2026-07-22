@@ -46,4 +46,8 @@ describe("console shell", () => {
     }
     expect(SHELL_MARKUP).toContain('id="connection"');
   });
+
+  it("confirms session success with the same status text the prior page used, which an existing untouched e2e test asserts on", () => {
+    expect(SHELL_SCRIPT).toContain('status("Secure local session established.","ok")');
+  });
 });
