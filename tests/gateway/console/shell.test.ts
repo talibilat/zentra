@@ -39,4 +39,11 @@ describe("console shell", () => {
   it("never loads a font from an external host", () => {
     expect(SHELL_MARKUP).not.toMatch(/fonts\.googleapis\.com/);
   });
+
+  it("carries over the component styles Controls' ported markup depends on, and the connection-status element connect() targets", () => {
+    for (const selector of [".panel{", ".run-card,.attention-card{", ".badge{", ".fact{", ".decision-actions{", "textarea,input,select{"]) {
+      expect(SHELL_MARKUP).toContain(selector);
+    }
+    expect(SHELL_MARKUP).toContain('id="connection"');
+  });
 });
