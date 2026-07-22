@@ -77,7 +77,7 @@ describe("Chromium operations UI", () => {
       expect(page.dom).toContain('name="viewport" content="width=device-width,initial-scale=1"');
       expect(page.dom).toContain('<label class="field-label" for="goal">Goal</label>');
       expect(page.dom).toContain('<label class="field-label" for="ticket-path">Project-relative folder</label>');
-      expect(page.dom).toContain('href="#workspace"');
+      expect(page.dom).toContain('data-nav-id="controls"');
       expect(page.dom).toContain('aria-live="polite"');
       expect(page.dom).not.toMatch(/<option[^>]+selected/);
       expect(page.dom).toContain("Source kind</dt><dd>Inline Goal");

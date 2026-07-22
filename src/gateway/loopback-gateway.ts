@@ -14,7 +14,7 @@ import {
   type WorkflowSurfaceErrorCode,
 } from "../surfaces/workflow-surface.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
-import { OPERATIONS_SCRIPT_SHA256, operationsHtml } from "./operations-ui.js";
+import { CONSOLE_SCRIPT_SHA256, consoleHtml } from "./console/console-ui.js";
 import { CLI_CONTROL_AUTHORIZATION_SCHEME } from "../surfaces/http-workflow-client.js";
 
 const TOKEN_BYTES = 32;
@@ -211,8 +211,8 @@ export class LoopbackGateway {
     if (this.readiness !== "ready") return this.respond(response, 503, { error: "service_unavailable", status: this.readiness });
     response.statusCode = 200;
     response.setHeader("content-type", "text/html; charset=utf-8");
-    response.setHeader("content-security-policy", `default-src 'none'; connect-src 'self'; frame-src 'self'; script-src 'sha256-${OPERATIONS_SCRIPT_SHA256}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
-    response.end(operationsHtml());
+    response.setHeader("content-security-policy", `default-src 'none'; connect-src 'self'; frame-src 'self'; script-src 'sha256-${CONSOLE_SCRIPT_SHA256}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
+    response.end(consoleHtml());
   }
 
   private async createSession(request: IncomingMessage, response: ServerResponse, expectedOrigin: string): Promise<void> {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createServer, get, type IncomingHttpHeaders, type Server } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 
+import { CONSOLE_SCRIPT_SHA256 } from "../../src/gateway/console/console-ui.js";
 import { LoopbackGateway } from "../../src/gateway/loopback-gateway.js";
 import { WorkflowSurfaceError, type WorkflowSurface } from "../../src/surfaces/workflow-surface.js";
 
@@ -21,6 +22,7 @@ describe("LoopbackGateway", () => {
       const html = await page.text();
       expect(page.status).toBe(200);
       expect(page.headers.get("set-cookie")).toBeNull();
+      expect(html).toContain("Zentra Agent Rail Console");
       expect(html).not.toContain(token(session));
       expect(html).toContain('history.replaceState(null,"","/")');
       expect(html).not.toMatch(/localStorage|sessionStorage|document\.cookie/);
@@ -29,7 +31,7 @@ describe("LoopbackGateway", () => {
       expect(html).toContain('setText(button,"Expand source text")');
       expect(html).toContain('id="agenttrail-frame"');
       expect(html).toContain('title="AgentTrail evidence views"');
-      expect(html).toContain('href="#agenttrail"');
+      expect(html).toContain('data-nav-id="trail"');
       expect(html).toContain('id="agenttrail-status"');
       expect(html).toContain('change.type==="gateway.degraded"');
       expect(html).toContain('change.type==="gateway.backfill_target"');
@@ -39,6 +41,7 @@ describe("LoopbackGateway", () => {
       expect(page.headers.get("content-security-policy")).toContain(
         `'sha256-${createHash("sha256").update(script).digest("base64")}'`,
       );
+      expect(page.headers.get("content-security-policy")).toContain(`'sha256-${CONSOLE_SCRIPT_SHA256}'`);
 
       const established = await establish(session);
       expect(established.bearerToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
