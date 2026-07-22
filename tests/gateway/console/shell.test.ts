@@ -50,4 +50,14 @@ describe("console shell", () => {
   it("confirms session success with the same status text the prior page used, which an existing untouched e2e test asserts on", () => {
     expect(SHELL_SCRIPT).toContain('status("Secure local session established.","ok")');
   });
+
+  it("marks the page ready only after the initial run data has loaded, matching operations-ui.ts's original synchronization contract", () => {
+    expect(SHELL_SCRIPT).toContain("await window.__consoleSections.controls?.refresh?.()");
+    const readyIndex = SHELL_SCRIPT.indexOf('document.documentElement.dataset.ready="true"');
+    const refreshIndex = SHELL_SCRIPT.indexOf("await window.__consoleSections.controls?.refresh?.()");
+    expect(refreshIndex).toBeGreaterThan(-1);
+    expect(readyIndex).toBeGreaterThan(refreshIndex);
+    expect(SHELL_SCRIPT).toContain("void window.__consoleSections.controls?.connect?.()");
+    expect(SHELL_SCRIPT).not.toContain("await window.__consoleSections.controls?.connect?.()");
+  });
 });
