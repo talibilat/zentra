@@ -812,6 +812,56 @@ git commit -m "Carry over component CSS and the connection-status element to the
 
 ---
 
+### Task 6c: Restore the success-path session status message (found during Task 8)
+
+**Files:**
+- Modify: `src/gateway/console/shell.ts`
+- Test: `tests/gateway/console/shell.test.ts`
+
+Task 8's implementer found that `operations-ui.ts`'s original `handoff()` called `status("Secure local session established.","ok")` on the success path, immediately before marking the page ready and starting `connect()`. Task 6's `SHELL_SCRIPT.handoff()` (as given in this plan) dropped that line — `#status` now never updates past "Establishing secure local session." even once the session is fully live. `tests/gateway/chromium-browser.e2e.test.ts` (unmodified, out of this plan's scope) asserts on the exact original success text and currently fails because of this gap.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// append to tests/gateway/console/shell.test.ts
+it("confirms session success with the same status text the prior page used, which an existing untouched e2e test asserts on", () => {
+  expect(SHELL_SCRIPT).toContain('status("Secure local session established.","ok")');
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts`
+Expected: FAIL — the string is not present yet.
+
+- [ ] **Step 3: Restore the status call**
+
+In `SHELL_SCRIPT`'s `handoff()`, add the call immediately before `document.querySelector(".shell").dataset.ready="true";`:
+
+```javascript
+status("Secure local session established.","ok");
+document.querySelector(".shell").dataset.ready="true";document.documentElement.dataset.ready="true";
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run tests/gateway/console/shell.test.ts tests/gateway/console/console-ui.test.ts`
+Expected: both PASS.
+
+- [ ] **Step 5: Confirm the previously-failing e2e assertion now passes**
+
+Run: `pnpm vitest run tests/gateway/chromium-browser.e2e.test.ts`
+Expected: PASS — this file was never modified by this plan; it should now pass unchanged now that the status text it asserts on is restored.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/gateway/console/shell.ts tests/gateway/console/shell.test.ts
+git commit -m "Restore the success-path session status message in the shell"
+```
+
+---
+
 ### Task 7: Compose the full console document
 
 **Files:**
