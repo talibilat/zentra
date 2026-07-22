@@ -37,6 +37,11 @@ Every new endpoint is read-only.
 
 ### Frontend composition
 
+Correction from initial review: `Console.dc.html`'s twelve sidebar items (Overview, Trail, Warnings, Security, Cost, Compare, Imports, Pods, Milestones, GitHub broker, Journal, Warning policies) are all read-only observability views.
+The mock does not include goal submission, ticket submission, or decision approval; `data-screen-label="Console"` in the source file names the whole mock screen in the design tool, not a nav destination.
+The existing goal/ticket/run/decision functionality in `operations-ui.ts` is therefore carried into the new shell unchanged, under an added "Operate &gt; Controls" entry that is not part of the literal mock, clearly labeled as such rather than presented as designed content.
+This keeps one unified console and preserves every existing DOM id and behavior the current browser test suite already asserts against.
+
 Replace `src/gateway/operations-ui.ts` with a `src/gateway/console/` directory, one file per concern:
 
 - `styles.ts` exports the shared design tokens (colors, fonts, spacing) taken from `Console.dc.html`, matching the palette AgentTrail's own UI already uses (`--run:#33c9ff`, `--ok:#37e39b`, `--warn:#ffb454`, `--err:#ff5d6c`).
