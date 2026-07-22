@@ -182,13 +182,25 @@ export class ChromiumWorkflowDriver {
     await terminateGroup(this.child);
   }
 
+  async click(selector: string): Promise<void> {
+    await this.clickInternal(selector);
+  }
+
+  async waitFor(expression: string): Promise<void> {
+    await waitFor(this.cdp, expression);
+  }
+
+  async evaluate<T>(expression: string): Promise<T> {
+    return await evaluate<T>(this.cdp, expression);
+  }
+
   private async openPendingDecision(runId: string, action: string): Promise<void> {
     await this.selectRun(runId);
     await waitFor(this.cdp, `document.querySelector(".attention-card") !== null`);
     await waitFor(this.cdp, `(()=>{if(document.querySelector('form[data-action="${action}"]'))return true;document.querySelector(".attention-card")?.click();return false})()`);
   }
 
-  private async click(selector: string): Promise<void> {
+  private async clickInternal(selector: string): Promise<void> {
     await evaluate(this.cdp, `(()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!(element instanceof HTMLElement))throw new Error("control not found");element.click();return true})()`);
   }
 
