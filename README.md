@@ -16,7 +16,7 @@ It is not a multi-tenant sandbox.
 - macOS on Apple Silicon.
 - Node.js 24, 25, or 26.
 - pnpm 10.
-- Git.
+- Git
 
 See [platform support](docs/release/support-policy.md) for exact limits.
 
