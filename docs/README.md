@@ -9,6 +9,7 @@
 
 ## Codebase Atlas
 
+- `architecture.md` is the diagram-only system architecture from input and model admission through execution, evidence, terminal outcomes, and recovery.
 - `codebase-map.html` is a self-contained, source-derived interactive map of current features, functions, schemas, tests, and end-to-end data flows.
 - Regenerate it with `pnpm docs:codebase-map` after executable declarations or module relationships change.
 
