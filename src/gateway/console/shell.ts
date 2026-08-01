@@ -3,36 +3,36 @@ import { CONTROLS_MARKUP } from "./controls-section.js";
 import { TRAIL_MARKUP } from "./trail-section.js";
 import { OVERVIEW_MARKUP } from "./overview-section.js";
 
-interface NavItem { readonly id: string; readonly label: string; readonly enabled: boolean; }
+interface NavItem { readonly id: string; readonly label: string; readonly icon: string; readonly enabled: boolean; }
 interface NavGroup { readonly label: string; readonly items: readonly NavItem[]; }
 
 const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "OPERATE", items: [{ id: "controls", label: "Controls", enabled: true }] },
+  { label: "OPERATE", items: [{ id: "controls", label: "Controls", icon: "▶", enabled: true }] },
   { label: "OBSERVE", items: [
-    { id: "overview", label: "Overview", enabled: true },
-    { id: "trail", label: "Trail", enabled: true },
-    { id: "warnings", label: "Warnings", enabled: false },
-    { id: "security", label: "Security", enabled: false },
-    { id: "cost", label: "Cost", enabled: false },
+    { id: "overview", label: "Overview", icon: "◉", enabled: true },
+    { id: "trail", label: "Trail", icon: "⬡", enabled: true },
+    { id: "warnings", label: "Warnings", icon: "△", enabled: false },
+    { id: "security", label: "Security", icon: "⛨", enabled: false },
+    { id: "cost", label: "Cost", icon: "◔", enabled: false },
   ] },
   { label: "ANALYZE", items: [
-    { id: "compare", label: "Compare runs", enabled: false },
-    { id: "imports", label: "Imports", enabled: false },
+    { id: "compare", label: "Compare runs", icon: "⑂", enabled: false },
+    { id: "imports", label: "Imports", icon: "⇥", enabled: false },
   ] },
   { label: "ZENTRA", items: [
-    { id: "pods", label: "Pods", enabled: false },
-    { id: "milestones", label: "Milestones", enabled: false },
-    { id: "github", label: "GitHub broker", enabled: false },
-    { id: "journal", label: "Journal", enabled: false },
+    { id: "pods", label: "Pods", icon: "⬢", enabled: false },
+    { id: "milestones", label: "Milestones", icon: "⊕", enabled: false },
+    { id: "github", label: "GitHub broker", icon: "⎇", enabled: false },
+    { id: "journal", label: "Journal", icon: "≣", enabled: false },
   ] },
-  { label: "CONFIG", items: [{ id: "policies", label: "Warning policies", enabled: false }] },
+  { label: "CONFIG", items: [{ id: "policies", label: "Warning policies", icon: "⚙", enabled: false }] },
 ];
 
 function renderNav(): string {
   return NAV_GROUPS.map((group) => {
     const items = group.items.map((item) => item.enabled
-      ? `<button type="button" class="nav-item" data-nav-id="${item.id}">${item.label}</button>`
-      : `<button type="button" class="nav-item" data-nav-id="${item.id}" disabled aria-disabled="true"><span>${item.label}</span><span class="badge">Phase 2</span></button>`
+      ? `<button type="button" class="nav-item" data-nav-id="${item.id}"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span></button>`
+      : `<button type="button" class="nav-item" data-nav-id="${item.id}" disabled aria-disabled="true"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span><span class="badge">Phase 2</span></button>`
     ).join("");
     return `<div class="nav-group-label">${group.label}</div>${items}`;
   }).join("");
@@ -50,13 +50,32 @@ ${CONSOLE_DESIGN_TOKENS}
 .nav-item[data-active=true]{background:rgba(122,162,255,.13);color:var(--accent)}
 .nav-item:disabled{cursor:not-allowed;opacity:.55}
 .nav-item .badge{font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px}
+.nav-icon{width:16px;text-align:center;font-size:13px;flex:none;display:inline-block}
+.nav-label{flex:1;text-align:left}
 .content{flex:1;min-width:0;display:flex;flex-direction:column}
 .section{display:none}
 .section[data-active=true]{display:flex;flex:1;min-height:0;flex-direction:column}
 #status{border-left:3px solid var(--line);padding:.8rem 1rem;background:#0d1814}
 #status[data-tone=ok]{border-color:var(--accent)}
 #status[data-tone=error]{border-color:var(--err);color:#ffd3cf}
-.connection{font-size:.8rem;color:var(--warn)}
+.topbar{height:54px;flex:none;display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+.topbar-spacer{flex:1}
+.run-switcher{position:relative}
+.run-switcher-button{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:7px 12px;cursor:pointer;color:var(--text);max-width:360px;font:inherit}
+.run-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint);display:inline-block}
+.run-switcher-title{font:600 13px ${CONSOLE_FONT_STACK_SANS};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.run-switcher-caret{color:var(--dim);font-size:10px}
+.run-switcher-menu{position:absolute;top:44px;left:0;width:340px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:6px;box-shadow:0 18px 40px rgba(0,0,0,.5);z-index:40}
+.run-switcher-menu[hidden]{display:none}
+.run-switcher-menu-label{font:600 9px ${CONSOLE_FONT_STACK_MONO};color:var(--faint);letter-spacing:1px;padding:6px 8px 4px}
+.run-switcher-row{display:flex;align-items:center;gap:9px;width:100%;text-align:left;padding:8px 9px;border:none;border-radius:7px;background:transparent;cursor:pointer;font:inherit;color:var(--text)}
+.run-switcher-row:hover,.run-switcher-row[data-selected=true]{background:var(--panel2)}
+.run-switcher-row-title{font:600 12.5px ${CONSOLE_FONT_STACK_SANS};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.run-switcher-empty{padding:8px 9px;color:var(--dim);font:400 12px ${CONSOLE_FONT_STACK_SANS}}
+.search-box{width:250px;display:flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:var(--panel2)}
+.search-box .search-icon{color:var(--faint);font-size:12px}
+.search-box input{min-width:0;width:100%;border:0;outline:0;background:transparent;color:var(--text);font:400 12px ${CONSOLE_FONT_STACK_MONO}}
+.connection{font:500 10px ${CONSOLE_FONT_STACK_MONO};color:var(--faint);border:1px solid var(--line);padding:3px 8px;border-radius:4px;white-space:nowrap}
 .connection[data-connected=true]{color:var(--accent)}
 .intake{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
 .panel{background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--line);border-radius:14px;padding:1.25rem;box-shadow:0 20px 60px #0004}
@@ -101,7 +120,25 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed0c8;background:#07100d
   <aside class="sidebar" role="navigation" aria-label="Console sections">${renderNav()}</aside>
   <div class="content">
     <p id="status" role="status" aria-live="polite">Establishing secure local session.</p>
-    <div id="connection" class="connection" role="status">Connecting</div>
+    <header class="topbar" aria-label="Run context">
+      <div class="run-switcher">
+        <button type="button" id="run-switcher-button" class="run-switcher-button" aria-haspopup="true" aria-expanded="false">
+          <span id="run-switcher-dot" class="run-dot"></span>
+          <span id="run-switcher-title" class="run-switcher-title">No runs yet</span>
+          <span class="run-switcher-caret">▾</span>
+        </button>
+        <div id="run-switcher-menu" class="run-switcher-menu" hidden>
+          <div class="run-switcher-menu-label">RUNS ON THIS MACHINE</div>
+          <div id="run-switcher-rows"></div>
+        </div>
+      </div>
+      <span class="topbar-spacer"></span>
+      <label class="search-box">
+        <span class="search-icon">⌕</span>
+        <input id="console-search" type="search" placeholder="filter events, actors, kinds…">
+      </label>
+      <div id="connection" class="connection" role="status">Connecting</div>
+    </header>
     <section class="section" data-section-id="controls">${CONTROLS_MARKUP}</section>
     <section class="section" data-section-id="overview">${OVERVIEW_MARKUP}</section>
     <section class="section" data-section-id="trail">${TRAIL_MARKUP}</section>

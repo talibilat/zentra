@@ -60,4 +60,38 @@ describe("console shell", () => {
     expect(SHELL_SCRIPT).toContain("void window.__consoleSections.controls?.connect?.()");
     expect(SHELL_SCRIPT).not.toContain("await window.__consoleSections.controls?.connect?.()");
   });
+
+  it("gives every nav item the mockup's icon glyph", () => {
+    const icons: Record<string, string> = {
+      controls: "▶", overview: "◉", trail: "⬡", warnings: "△", security: "⛨", cost: "◔",
+      compare: "⑂", imports: "⇥", pods: "⬢", milestones: "⊕", github: "⎇", journal: "≣", policies: "⚙",
+    };
+    for (const [id, icon] of Object.entries(icons)) {
+      const marker = `data-nav-id="${id}"`;
+      const start = SHELL_MARKUP.indexOf(marker);
+      expect(start).toBeGreaterThan(-1);
+      const buttonEnd = SHELL_MARKUP.indexOf("</button>", start);
+      expect(SHELL_MARKUP.slice(start, buttonEnd)).toContain(`<span class="nav-icon">${icon}</span>`);
+    }
+  });
+
+  it("adds a topbar with a run switcher, an inert search box, and the relocated connection badge", () => {
+    for (const marker of [
+      '<header class="topbar"',
+      'id="run-switcher-button"',
+      'id="run-switcher-dot"',
+      'id="run-switcher-title"',
+      'id="run-switcher-menu"',
+      'id="run-switcher-rows"',
+      'id="console-search"',
+      'id="connection"',
+    ]) {
+      expect(SHELL_MARKUP).toContain(marker);
+    }
+    // connection now lives inside the topbar, not as a standalone paragraph
+    const topbarStart = SHELL_MARKUP.indexOf('<header class="topbar"');
+    const topbarEnd = SHELL_MARKUP.indexOf("</header>");
+    expect(SHELL_MARKUP.indexOf('id="connection"')).toBeGreaterThan(topbarStart);
+    expect(SHELL_MARKUP.indexOf('id="connection"')).toBeLessThan(topbarEnd);
+  });
 });
