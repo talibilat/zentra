@@ -467,7 +467,7 @@ export class LoopbackGateway {
           chunks.push(chunk);
         });
         upstream.once("error", () => resolve(null));
-        upstream.once("end", () => {
+        upstream.once("close", () => {
           if (oversized) { resolve(null); return; }
           try { resolve({ status, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
           catch { resolve(null); }

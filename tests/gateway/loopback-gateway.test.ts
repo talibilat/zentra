@@ -391,6 +391,23 @@ describe("LoopbackGateway trail endpoint", () => {
     }
   });
 
+  it("responds agenttrail_unavailable instead of hanging when the upstream response is oversized", async () => {
+    const upstream = await fakeAgentTrail();
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setAgentTrailAddress(upstream.address);
+    gateway.setReadiness("ready");
+    try {
+      const auth = await establish(session);
+      const response = await api(session, auth, "/runs/oversized-trace/trail");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "agenttrail_unavailable" });
+    } finally {
+      await gateway.close();
+      await upstream.close();
+    }
+  });
+
   it("responds agenttrail_unavailable when the upstream body cannot be reshaped", async () => {
     const upstream = await fakeAgentTrail();
     const gateway = new LoopbackGateway({ workflow: workflow() });
@@ -568,6 +585,11 @@ async function fakeAgentTrail(traceId = "trace-1"): Promise<{
     if (request.url === "/api/v1/runs/malformed-trace") {
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify("not an object"));
+      return;
+    }
+    if (request.url === "/api/v1/runs/oversized-trace") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ padding: "x".repeat(5 * 1024 * 1024) }));
       return;
     }
     if (request.url === "/api/v1/events?cursor=7") {
