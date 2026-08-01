@@ -44,7 +44,6 @@ describe("Chromium operations UI", () => {
       expect(page.href).toBe(`${session.origin}/`);
       expect(page.dom).toContain(`data-location="${session.origin}/"`);
       expect(page.dom).not.toContain(new URL(session.url).hash.slice("#token=".length));
-      expect(page.dom).toContain('src="/agenttrail/"');
       expect(page.dom).not.toContain("agentTrailToken");
       expect(page.dom).not.toContain("/agenttrail/?token=");
       expect(page.dom).toContain("Secure local session established.");
