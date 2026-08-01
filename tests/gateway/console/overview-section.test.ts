@@ -32,4 +32,30 @@ describe("overview section", () => {
   it("registers itself under window.__consoleSections.overview.render", () => {
     expect(OVERVIEW_SCRIPT).toContain("window.__consoleSections.overview={render:renderOverview}");
   });
+
+  it("renders the literal em-dash as the metric tile value, not any number", () => {
+    expect(OVERVIEW_SCRIPT).toContain('setText(valueEl,"—")');
+  });
+
+  it("renders all four Observed Outcome rows sourced from real run/readiness data", () => {
+    expect(OVERVIEW_SCRIPT).toContain('"Lifecycle"');
+    expect(OVERVIEW_SCRIPT).toContain('"Terminal outcome"');
+    expect(OVERVIEW_SCRIPT).toContain('"Readiness"');
+    expect(OVERVIEW_SCRIPT).toContain('"Approval"');
+    expect(OVERVIEW_SCRIPT).toContain("state.selected?.planning?.readiness");
+  });
+
+  it("extracts narrative summaries from item.packet for both pending and resolved items, not the raw kind", () => {
+    expect(OVERVIEW_SCRIPT).toContain('value(item.packet||{},["summary","question"]');
+    expect(OVERVIEW_SCRIPT).not.toContain('value(item,["title","question","kind"],"Decision")');
+  });
+
+  it("sorts the narrative timeline chronologically by streamVersion", () => {
+    expect(OVERVIEW_SCRIPT).toContain(".sort(");
+    expect(OVERVIEW_SCRIPT).toContain("streamVersion");
+  });
+
+  it("uses the shared design-token font stacks instead of hardcoded font names", () => {
+    expect(OVERVIEW_SCRIPT).not.toMatch(/'IBM Plex (Mono|Sans)',(monospace|sans-serif)/);
+  });
 });

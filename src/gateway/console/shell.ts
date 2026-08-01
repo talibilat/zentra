@@ -155,11 +155,16 @@ for(const button of document.querySelectorAll(".nav-item:not(:disabled)")){
   button.addEventListener("click",()=>setActiveSection(button.dataset.navId));
 }
 setActiveSection("controls");
-const dotColorForLifecycle=(lifecycle)=>{
-  const name=String(lifecycle||"").toLowerCase();
-  if(name.includes("error")||name.includes("failed")||name.includes("rejected"))return "var(--err)";
-  if(name.includes("terminal")||name.includes("ended")||name.includes("done"))return "var(--ok)";
-  if(name.includes("degraded")||name.includes("waiting")||name.includes("stale"))return "var(--warn)";
+const dotColorForRun=(run)=>{
+  const lifecycle=String(value(run,["lifecycle","state","status"],"")).toLowerCase();
+  const terminalOutcome=String(value(run,["terminalOutcome"],"")).toLowerCase();
+  if(lifecycle==="terminal"){
+    if(terminalOutcome==="completed")return "var(--ok)";
+    if(terminalOutcome==="failed"||terminalOutcome==="timed_out")return "var(--err)";
+    if(terminalOutcome==="cancelled")return "var(--warn)";
+    return "var(--faint)";
+  }
+  if(lifecycle==="waiting"||lifecycle==="blocked"||lifecycle==="awaiting_approval")return "var(--warn)";
   return "var(--run)";
 };
 const renderTopbar=()=>{
@@ -167,7 +172,7 @@ const renderTopbar=()=>{
   const titleEl=$("run-switcher-title");const dotEl=$("run-switcher-dot");const rows=$("run-switcher-rows");
   const run=currentRun();
   setText(titleEl,run?value(run,["runId","id"],"Run"):"No runs yet");
-  dotEl.style.background=run?dotColorForLifecycle(value(run,["lifecycle","state","status"],"")):"var(--faint)";
+  dotEl.style.background=run?dotColorForRun(run):"var(--faint)";
   rows.replaceChildren();
   if(!state.runs.length){
     const empty=document.createElement("div");empty.className="run-switcher-empty";
@@ -178,7 +183,7 @@ const renderTopbar=()=>{
     const row=document.createElement("button");row.type="button";row.className="run-switcher-row";
     row.dataset.selected=String(Boolean(run)&&value(run,["runId","id"])===id);
     const dot=document.createElement("span");dot.className="run-dot";
-    dot.style.background=dotColorForLifecycle(value(candidate,["lifecycle","state","status"],""));
+    dot.style.background=dotColorForRun(candidate);
     const titleSpan=document.createElement("span");titleSpan.className="run-switcher-row-title";setText(titleSpan,id);
     row.append(dot,titleSpan);
     row.addEventListener("click",()=>{$("run-switcher-menu").hidden=true;button.setAttribute("aria-expanded","false");selectRun(id)});

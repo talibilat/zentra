@@ -109,4 +109,12 @@ describe("console shell", () => {
     const selectRunBody = CONTROLS_SCRIPT.slice(CONTROLS_SCRIPT.indexOf("const selectRun=async"), CONTROLS_SCRIPT.indexOf("const loadDecision="));
     expect(selectRunBody).toContain("window.__consoleSections.shell?.render?.()");
   });
+
+  it("colors the run-switcher dot from the real RunLifecycle/TerminalOutcome enums, not fictional substrings", () => {
+    expect(SHELL_SCRIPT).toContain("dotColorForRun");
+    expect(SHELL_SCRIPT).not.toContain('name.includes("error")');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="failed"');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="completed"');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="cancelled"');
+  });
 });
