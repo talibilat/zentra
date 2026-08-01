@@ -111,6 +111,12 @@ export async function createLocalWorkflowSurface(
           },
           actor,
           acceptanceCommandId,
+          presentation: {
+            title: presentationText(source.kind === "inline_goal" ? source.goal : path.basename(source.root), "Untitled run"),
+            projectName: presentationText(path.basename(projectRoot), "Project"),
+            workspace: projectRoot,
+            sourceLabel: source.kind === "inline_goal" ? "Inline goal" : "Tickets",
+          },
         });
         const current = runs.get(runId);
         if (current === null || current.lifecycle === "accepted" || current.lifecycle === "preflighting" || current.lifecycle === "intake") await preflight.prepareAndInvoke({
@@ -256,4 +262,11 @@ function recordSubmissionEvidence(
     causationId: serviceReadyEventId,
     payload: evidence,
   }]);
+}
+
+function presentationText(value: string, fallback: string): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim();
+  if (normalized === "") return fallback;
+  const characters = Array.from(normalized);
+  return characters.length <= 160 ? normalized : `${characters.slice(0, 159).join("")}…`;
 }

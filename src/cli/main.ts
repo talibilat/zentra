@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Command, CommanderError } from "commander";
+import { formatRunList, formatRunStatus } from "./presentation.js";
 import { isSafeWorktreeTaskIdentity } from "../contracts/task-identity.js";
 
 import { ValidationRunner } from "../capabilities/validation-runner.js";
@@ -195,6 +196,7 @@ export interface CliRuntime {
   readonly openBrowser?: typeof openSessionInBrowser;
   readonly startService?: typeof startZentraService;
   readonly workflowSurface?: WorkflowSurface;
+  readonly terminalWidth?: number;
 }
 
 export interface SignalSource {
@@ -235,6 +237,9 @@ interface WorkflowRunOptions {
   readonly tickets?: string;
   readonly actor: string;
 }
+
+interface WorkflowListOptions { readonly json?: boolean }
+interface WorkflowStatusOptions extends WorkflowListOptions { readonly verbose?: boolean }
 
 interface WorkflowMutationOptions {
   readonly runId: string;
@@ -320,6 +325,7 @@ interface CommandResult {
   readonly exitCode: number;
   readonly value: Record<string, unknown>;
   readonly streamOutput?: boolean;
+  readonly formattedOutput?: string;
 }
 
 class CliFailure extends Error {
@@ -355,6 +361,7 @@ export async function runCli(
       interactive: runtime.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
       openBrowser: runtime.openBrowser ?? openSessionInBrowser,
       startService: runtime.startService ?? startZentraService,
+      terminalWidth: runtime.terminalWidth ?? process.stdout.columns,
       ...(workflowSurface === undefined ? {} : { workflowSurface }),
     });
     await program.parseAsync([...userArgv], { from: "user" });
@@ -373,19 +380,24 @@ export async function runCli(
         value: { ...commandResult.value, traceOutcome: "failed" },
       };
     }
-    const serialized = serializeJson(commandResult.value);
-    if (Buffer.byteLength(serialized) > operationalJsonLimit(userArgv)) {
-      writeFixedError(stderr, commandLabel(userArgv), "OUTPUT_TOO_LARGE");
+    const output = commandResult.formattedOutput ?? serializeJson(commandResult.value);
+    if (Buffer.byteLength(output) > operationalOutputLimit(userArgv, commandResult.formattedOutput !== undefined)) {
+      writePublicError(stderr, userArgv, "OUTPUT_TOO_LARGE");
       return 1;
     }
-    writeSerialized(commandResult.exitCode === 0 && commandResult.streamOutput !== true ? stdout : stderr, serialized);
+    if (commandResult.formattedOutput !== undefined) {
+      writeText(commandResult.exitCode === 0 ? stdout : stderr, output);
+    } else {
+      writeSerialized(commandResult.exitCode === 0 && commandResult.streamOutput !== true ? stdout : stderr, output);
+    }
     return commandResult.exitCode;
   } catch (error) {
+    if (isBrokenPipe(error)) return 0;
     if (error instanceof CommanderError && error.code === "commander.helpDisplayed") {
       return 0;
     }
     const failure = toFailure(error, isWorkflowCommand(userArgv));
-    writeFixedError(stderr, commandLabel(userArgv), failure.code);
+    writePublicError(stderr, userArgv, failure.code);
     return 1;
   } finally {
     liveOutput?.dispose();
@@ -405,6 +417,7 @@ function createProgram(
     readonly openBrowser: typeof openSessionInBrowser;
     readonly startService: typeof startZentraService;
     readonly workflowSurface?: WorkflowSurface;
+    readonly terminalWidth?: number;
   },
 ): Command {
   const program = new Command()
@@ -463,18 +476,39 @@ function createProgram(
       setResult({ exitCode: 0, value: { command: "run", result } });
     });
 
-  program.command("list").description("List durable workflow runs.").action(async () => {
+  program.command("list").description("List durable workflow runs.")
+    .option("--json", "write bounded newline-delimited JSON")
+    .action(async (options: WorkflowListOptions) => {
     const runs = await requireWorkflowSurface(startRuntime).listRuns();
-    setResult({ exitCode: 0, value: { command: "list", runs } });
+    setResult({
+      exitCode: 0,
+      value: { command: "list", runs },
+      ...(options.json === true ? {} : {
+        formattedOutput: formatRunList(runs, startRuntime.terminalWidth === undefined
+          ? {}
+          : { width: startRuntime.terminalWidth }),
+      }),
+    });
   });
 
   program.command("status").description("Inspect one durable workflow run.")
     .argument("<run-id>", "run identity")
-    .action(async (runId: string) => {
+    .option("--verbose", "include additional public lifecycle diagnostics")
+    .option("--json", "write the complete bounded workflow projection as JSON")
+    .action(async (runId: string, options: WorkflowStatusOptions) => {
       assertCliIdentity(runId);
       const run = await requireWorkflowSurface(startRuntime).getRun(runId);
       if (run === null) throw new CliFailure("not_found");
-      setResult({ exitCode: 0, value: { command: "status", run } });
+      setResult({
+        exitCode: 0,
+        value: { command: "status", run },
+        ...(options.json === true ? {} : {
+          formattedOutput: formatRunStatus(run, {
+            ...(startRuntime.terminalWidth === undefined ? {} : { width: startRuntime.terminalWidth }),
+            verbose: options.verbose === true,
+          }),
+        }),
+      });
     });
 
   program.command("cancel").description("Record cancellation of one workflow run.")
@@ -1917,8 +1951,8 @@ function isWorkflowCommand(argv: readonly string[]): boolean {
     argv[0] === "question" || argv[0] === "plan";
 }
 
-function operationalJsonLimit(argv: readonly string[]): number {
-  return argv[0] === "status" ? MAX_WORKFLOW_DETAIL_JSON_BYTES : MAX_OPERATIONAL_JSON_BYTES;
+function operationalOutputLimit(argv: readonly string[], human: boolean): number {
+  return argv[0] === "status" && !human ? MAX_WORKFLOW_DETAIL_JSON_BYTES : MAX_OPERATIONAL_JSON_BYTES;
 }
 
 function assertRepresentableTaskRun(input: {
@@ -2028,8 +2062,46 @@ function writeFixedError(
   writeSerialized(write, serialized);
 }
 
+function writePublicError(write: WriteOutput, argv: readonly string[], code: PublicErrorCode): void {
+  if (!usesHumanWorkflowOutput(argv)) {
+    writeFixedError(write, commandLabel(argv), code);
+    return;
+  }
+  if (argv[0] === "status" && missingStatusRunId(argv)) {
+    writeText(write, "Error: A Run ID is required.\n\nUsage:\n  zentra status <run-id>\n\nFind a Run ID with:\n  zentra list\n");
+    return;
+  }
+  if (argv[0] === "status" && code === "not_found") {
+    writeText(write, `Run not found: ${safeErrorArgument(argv[1])}\n\nUse \`zentra list\` to view available runs.\n`);
+    return;
+  }
+  writeText(write, `Error: ${PUBLIC_ERROR_MESSAGES[code]}\n`);
+}
+
+function usesHumanWorkflowOutput(argv: readonly string[]): boolean {
+  return (argv[0] === "list" || argv[0] === "status") && !argv.includes("--json");
+}
+
+function missingStatusRunId(argv: readonly string[]): boolean {
+  return argv[0] === "status" && (argv[1] === undefined || argv[1]!.startsWith("--"));
+}
+
+function safeErrorArgument(value: string | undefined): string {
+  if (value === undefined) return "unknown";
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/gu, " ").slice(0, 256);
+}
+
 function writeSerialized(write: WriteOutput, serialized: string): void {
   write(`${serialized}\n`);
+}
+
+function writeText(write: WriteOutput, output: string): void {
+  write(output.endsWith("\n") ? output : `${output}\n`);
+}
+
+function isBrokenPipe(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    "code" in error && (error as NodeJS.ErrnoException).code === "EPIPE";
 }
 
 function isDirectExecution(entryPoint: string | undefined): boolean {
@@ -2042,6 +2114,10 @@ function isDirectExecution(entryPoint: string | undefined): boolean {
 }
 
 if (isDirectExecution(process.argv[1])) {
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") process.exit(0);
+    throw error;
+  });
   void runCli(process.argv.slice(2)).then((exitCode) => {
     if (!forceDirectExit) {
       process.exitCode = exitCode;

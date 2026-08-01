@@ -42,7 +42,7 @@ describe("production workflow CLI composition", () => {
   it.each(["missing", "stopped"] as const)("rejects %s durable service authority as unavailable", async (state) => {
     const fixture = await productionFixture(state);
 
-    const result = await invoke(["list"], fixture.projectRoot);
+    const result = await invoke(["list", "--json"], fixture.projectRoot);
 
     expect(result).toMatchObject({ code: 1, stdout: "", json: {
       command: "list", error: { code: "unavailable", message: "Workflow service is unavailable." },

@@ -49,18 +49,28 @@ describe("createLocalWorkflowSurface", () => {
     );
 
     expect(inline).toMatchObject({
+      presentation: {
+        title: "Fix one production workflow boundary.",
+        workspace: root,
+        sourceLabel: "Inline goal",
+      },
       run: { lifecycle: "analyzing", source: { kind: "inline_goal" }, authority: { executionAuthority: "none" } },
       intake: { status: "closed", sourceCount: 1, sources: [{ relativePath: "$inline" }] },
       analysis: { status: "not_started" },
       planning: { status: "not_started", readiness: { executionAuthority: "none" } },
     });
     expect(tickets).toMatchObject({
+      presentation: { title: "tickets", workspace: root, sourceLabel: "Tickets" },
       run: { lifecycle: "analyzing", source: { kind: "ticket_directory" }, authority: { executionAuthority: "none" } },
        intake: { status: "closed", sourceCount: 1, sources: [{ relativePath: "issue.md",
         trust: "untrusted_planning_data", mediaType: "text/plain; charset=utf-8" }] },
     });
     expect(inline.run.runId).not.toBe(tickets.run.runId);
     expect(surface.listRuns().map((run) => run.runId)).toEqual([tickets.run.runId, inline.run.runId]);
+    expect(surface.listRuns()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ presentation: expect.objectContaining({ title: "Fix one production workflow boundary." }) }),
+      expect.objectContaining({ presentation: expect.objectContaining({ title: "tickets" }) }),
+    ]));
     expect(JSON.stringify(surface.listRuns())).not.toContain(hostileTicket);
     expect(surface.getRun(inline.run.runId)).toEqual(inline);
     expect(inline.commandEvidence).toEqual([expect.objectContaining({
@@ -145,7 +155,7 @@ describe("createLocalWorkflowSurface", () => {
     );
     let stdout = "";
     let stderr = "";
-    const code = await runCli(["status", submitted.run.runId], {
+    const code = await runCli(["status", submitted.run.runId, "--json"], {
       workflowSurface: surface,
       stdout: (value) => { stdout += value; },
       stderr: (value) => { stderr += value; },

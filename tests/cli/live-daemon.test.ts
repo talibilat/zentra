@@ -45,11 +45,11 @@ describe("live daemon CLI control channel", () => {
     const inlineRunId = runId(inline);
     const ticketRunId = runId(ticket);
 
-    const listed = await invoke(root, ["list"]);
+    const listed = await invoke(root, ["list", "--json"]);
     expect(listed.code).toBe(0);
     expect(JSON.stringify(listed.json)).toContain(inlineRunId);
     expect(JSON.stringify(listed.json)).toContain(ticketRunId);
-    const status = await invoke(root, ["status", inlineRunId]);
+    const status = await invoke(root, ["status", inlineRunId, "--json"]);
     const version = ((status.json["run"] as { run: { streamVersion: number } }).run.streamVersion);
     const cancelled = await invoke(root, [
       "cancel", inlineRunId, "--expected-version", String(version),
@@ -74,10 +74,10 @@ describe("live daemon CLI control channel", () => {
     await service.shutdown("test_requested");
     services.splice(services.indexOf(service), 1);
     expect(() => readFileSync(tokenPath, "utf8")).toThrow();
-    expect((await invoke(root, ["list"]))).toMatchObject({ code: 1, json: { error: { code: "unavailable" } } });
+    expect((await invoke(root, ["list", "--json"]))).toMatchObject({ code: 1, json: { error: { code: "unavailable" } } });
 
     const missing = repository();
-    expect((await invoke(missing, ["list"]))).toMatchObject({ code: 1, json: { error: { code: "unavailable" } } });
+    expect((await invoke(missing, ["list", "--json"]))).toMatchObject({ code: 1, json: { error: { code: "unavailable" } } });
   });
 });
 
