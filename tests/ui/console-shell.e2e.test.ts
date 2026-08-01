@@ -129,7 +129,7 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
     }
   }, 60_000);
 
-  it("switches to the Trail nav item and shows the honest unavailable state when AgentTrail is not configured", async () => {
+  it("switches to the Trail nav item and shows a prompt to select a run when none is selected", async () => {
     const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-trail-e2e-")));
     temporaryDirectories.push(root);
     const fixture = await consoleShellWorkflow(root);
@@ -140,9 +140,32 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const driver = await ChromiumWorkflowDriver.open(session.url, root);
       await driver.click('[data-nav-id="trail"]');
       await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
-      await driver.waitFor(`document.getElementById("trail-events")?.textContent.includes("Trace evidence unavailable.")`);
+      await driver.waitFor(`document.getElementById("trail-events")?.textContent.includes("Select a run to see its trail.")`);
       const disabledTabs = await driver.evaluate<number>(`document.querySelectorAll('[data-trail-view][disabled]').length`);
       expect(disabledTabs).toBe(3);
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("shows the honest AgentTrail-unavailable state when a run is selected but AgentTrail is down", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-trail-unavailable-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      // Deliberately never calls gateway.setAgentTrailAddress(...), so a run IS selected but
+      // AgentTrail itself is unavailable - a genuinely different scenario from "no run selected"
+      // above, and one that must produce its own honest message rather than reusing that one.
+      await driver.submitGoal("Prove Trail shows an honest unavailable state, not a filtered-empty one");
+      await driver.click('[data-nav-id="trail"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
+      await driver.evaluate(`window.__consoleSections.trail.load()`);
+      await driver.waitFor(`document.getElementById("trail-events")?.textContent.includes("Trace evidence unavailable.")`);
     } finally {
       await gateway.close();
       fixture.journal.close();
@@ -169,11 +192,19 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       gateway.setAgentTrailAddress(upstream.address);
       await driver.click('[data-nav-id="trail"]');
       await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
-      await driver.evaluate(`window.__consoleSections.trail.render()`);
+      await driver.evaluate(`window.__consoleSections.trail.load()`);
       await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
       await driver.click('#trail-filter-pills button');
       await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "1 of 2 events"`);
       await driver.click('#trail-filter-pills button');
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
+      // Topbar search narrows Trail's events the same way a filter pill does, without a new fetch
+      // (see shell.ts's console-search listener, which calls Trail's pure `.render()` path). Only
+      // the "run_tests" event (pod-a, tool.call.attempt) matches this substring; the other fixture
+      // event (pod-b, verification.finished / "assertion mismatch") does not.
+      await driver.evaluate(`(()=>{const input=document.getElementById("console-search");input.value="run_tests";input.dispatchEvent(new Event("input",{bubbles:true}));return true})()`);
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "1 of 2 events"`);
+      await driver.evaluate(`(()=>{const input=document.getElementById("console-search");input.value="";input.dispatchEvent(new Event("input",{bubbles:true}));return true})()`);
       await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
       const eventButtons = await driver.evaluate<number>(`document.querySelectorAll("#trail-events button").length`);
       expect(eventButtons).toBe(2);

@@ -30,6 +30,7 @@ const EVENT_WAIT_MS = 15_000;
 const MAX_AGENTTRAIL_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_AGENTTRAIL_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_AGENTTRAIL_STREAM_BYTES = 8 * 1024 * 1024;
+const AGENTTRAIL_TRAIL_TIMEOUT_MS = 10_000;
 const AGENTTRAIL_COOKIE_NAME = "zentra_agenttrail";
 const AGENTTRAIL_COOKIE_PATH = "/agenttrail/";
 const UI_CALLER = { actorId: "zentra-local-operator", channel: "ui" } as const;
@@ -473,6 +474,7 @@ export class LoopbackGateway {
           catch { resolve(null); }
         });
       });
+      upstreamRequest.setTimeout(AGENTTRAIL_TRAIL_TIMEOUT_MS, () => { upstreamRequest.destroy(); resolve(null); });
       upstreamRequest.once("error", () => resolve(null));
       upstreamRequest.end();
     });

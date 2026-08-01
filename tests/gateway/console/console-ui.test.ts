@@ -1,5 +1,6 @@
 // tests/gateway/console/console-ui.test.ts
 import { createHash } from "node:crypto";
+import { Script } from "node:vm";
 
 import { describe, expect, it } from "vitest";
 
@@ -19,5 +20,12 @@ describe("composed console document", () => {
     expect(html).toContain('id="goal-form"');
     expect(html).toContain('id="trail-events"');
     expect(html).toContain('id="overview-root"');
+  });
+
+  it("produces a script that parses as valid JavaScript", () => {
+    const html = consoleHtml();
+    const match = /<script>([\s\S]*)<\/script>/.exec(html);
+    expect(match).not.toBeNull();
+    expect(() => new Script(match![1]!)).not.toThrow();
   });
 });

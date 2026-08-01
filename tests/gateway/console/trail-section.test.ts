@@ -48,6 +48,16 @@ describe("trail-section script", () => {
     }
   });
 
+  it("isolates every font-stack interpolation in TRAIL_MARKUP inside a single-quoted HTML attribute, never a double-quoted one", () => {
+    const source = readFileSync("src/gateway/console/trail-section.ts", "utf8");
+    const markupSource = source.slice(source.indexOf("export const TRAIL_MARKUP"), source.indexOf("export const TRAIL_SCRIPT"));
+    const lines = markupSource.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).not.toMatch(/="[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
+    }
+  });
+
   it("preserves the existing gateway degrade/recover handling and re-fetches trail data on recovery", () => {
     expect(TRAIL_SCRIPT).toContain('change.type==="gateway.degraded"');
     expect(TRAIL_SCRIPT).toContain('change.type==="gateway.backfill_target"');
@@ -58,8 +68,25 @@ describe("trail-section script", () => {
     expect(TRAIL_SCRIPT).not.toContain("contentWindow");
   });
 
-  it("registers loadTrail under window.__consoleSections.trail", () => {
-    expect(TRAIL_SCRIPT).toContain("window.__consoleSections.trail={render:loadTrail}");
+  it("registers a pure render and a fetch-and-load function under window.__consoleSections.trail", () => {
+    expect(TRAIL_SCRIPT).toContain("window.__consoleSections.trail={render:renderTrailView,load:loadTrail}");
+  });
+
+  it("only resets scrub position and selection when the selected run actually changes", () => {
+    expect(TRAIL_SCRIPT).toContain("runChanged");
+    expect(TRAIL_SCRIPT).toContain("id!==trailRunId");
+  });
+
+  it("shows a distinct empty-state message for each of the three reasons the event list can be empty", () => {
+    expect(TRAIL_SCRIPT).toContain("trailLoadFailed");
+    expect(TRAIL_SCRIPT).toContain('"Trace evidence unavailable."');
+    expect(TRAIL_SCRIPT).toContain('"Select a run to see its trail."');
+    expect(TRAIL_SCRIPT).toContain('"No events match the current filters."');
+  });
+
+  it("reads durationSeconds from the trail response and uses it for the inspector's duration row", () => {
+    expect(TRAIL_SCRIPT).toContain("trailDurationSeconds");
+    expect(TRAIL_SCRIPT).toContain("trailFormatClock(trailDurationSeconds)");
   });
 
   it("fetches the new trail endpoint for the current run", () => {
