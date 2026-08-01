@@ -120,4 +120,54 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       fixture.journal.close();
     }
   }, 60_000);
+
+  it("shows the submitted run in the topbar run switcher and lists it in the dropdown", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-topbar-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      const runId = await driver.submitGoal("Confirm the topbar run switcher shows the real run");
+
+      const switcherTitle = await driver.evaluate<string>(`document.getElementById("run-switcher-title")?.textContent || ""`);
+      expect(switcherTitle).toBe(runId);
+
+      await driver.click("#run-switcher-button");
+      await driver.waitFor(`document.getElementById("run-switcher-menu")?.hidden === false`);
+      const rowText = await driver.evaluate<string>(`document.getElementById("run-switcher-rows")?.textContent || ""`);
+      expect(rowText).toContain(runId);
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("renders Overview's metric tiles as an honest placeholder, not fabricated numbers", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-overview-metrics-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.submitGoal("Confirm Overview metric tiles are honest placeholders");
+      await driver.click('[data-nav-id="overview"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="overview"]')?.dataset.active === "true"`);
+
+      const placeholderCount = await driver.evaluate<number>(
+        `Array.from(document.querySelectorAll("#overview-root")[0].querySelectorAll("div")).filter(el => el.textContent === "—").length`
+      );
+      expect(placeholderCount).toBeGreaterThanOrEqual(5);
+
+      const warningsText = await driver.evaluate<string>(`document.getElementById("overview-root")?.textContent || ""`);
+      expect(warningsText).toContain("Warning triage lands in a later phase.");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
 });

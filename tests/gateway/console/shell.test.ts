@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import { SHELL_MARKUP, SHELL_SCRIPT } from "../../../src/gateway/console/shell.js";
+import { CONTROLS_SCRIPT } from "../../../src/gateway/console/controls-section.js";
 
 describe("console shell", () => {
   it("renders all twelve mock nav items plus the carried-over Controls entry, grouped correctly", () => {
@@ -59,5 +60,61 @@ describe("console shell", () => {
     expect(readyIndex).toBeGreaterThan(refreshIndex);
     expect(SHELL_SCRIPT).toContain("void window.__consoleSections.controls?.connect?.()");
     expect(SHELL_SCRIPT).not.toContain("await window.__consoleSections.controls?.connect?.()");
+  });
+
+  it("gives every nav item the mockup's icon glyph", () => {
+    const icons: Record<string, string> = {
+      controls: "▶", overview: "◉", trail: "⬡", warnings: "△", security: "⛨", cost: "◔",
+      compare: "⑂", imports: "⇥", pods: "⬢", milestones: "⊕", github: "⎇", journal: "≣", policies: "⚙",
+    };
+    for (const [id, icon] of Object.entries(icons)) {
+      const marker = `data-nav-id="${id}"`;
+      const start = SHELL_MARKUP.indexOf(marker);
+      expect(start).toBeGreaterThan(-1);
+      const buttonEnd = SHELL_MARKUP.indexOf("</button>", start);
+      expect(SHELL_MARKUP.slice(start, buttonEnd)).toContain(`<span class="nav-icon">${icon}</span>`);
+    }
+  });
+
+  it("adds a topbar with a run switcher, an inert search box, and the relocated connection badge", () => {
+    for (const marker of [
+      '<header class="topbar"',
+      'id="run-switcher-button"',
+      'id="run-switcher-dot"',
+      'id="run-switcher-title"',
+      'id="run-switcher-menu"',
+      'id="run-switcher-rows"',
+      'id="console-search"',
+      'id="connection"',
+    ]) {
+      expect(SHELL_MARKUP).toContain(marker);
+    }
+    // connection now lives inside the topbar, not as a standalone paragraph
+    const topbarStart = SHELL_MARKUP.indexOf('<header class="topbar"');
+    const topbarEnd = SHELL_MARKUP.indexOf("</header>");
+    expect(SHELL_MARKUP.indexOf('id="connection"')).toBeGreaterThan(topbarStart);
+    expect(SHELL_MARKUP.indexOf('id="connection"')).toBeLessThan(topbarEnd);
+  });
+
+  it("renders the topbar via window.__consoleSections.shell and picking a run switcher row calls the existing selectRun", () => {
+    expect(SHELL_SCRIPT).toContain("window.__consoleSections.shell={render:renderTopbar}");
+    const renderTopbarBody = SHELL_SCRIPT.slice(SHELL_SCRIPT.indexOf("const renderTopbar="), SHELL_SCRIPT.indexOf('$("run-switcher-button")?.addEventListener("click"'));
+    expect(renderTopbarBody).toContain("row.addEventListener(\"click\",()=>{");
+    expect(renderTopbarBody).toContain("selectRun(id)");
+  });
+
+  it("refreshes the topbar every time Controls loads or switches a run", () => {
+    const refreshBody = CONTROLS_SCRIPT.slice(CONTROLS_SCRIPT.indexOf("const refresh=async"), CONTROLS_SCRIPT.indexOf("const selectRun="));
+    expect(refreshBody).toContain("window.__consoleSections.shell?.render?.()");
+    const selectRunBody = CONTROLS_SCRIPT.slice(CONTROLS_SCRIPT.indexOf("const selectRun=async"), CONTROLS_SCRIPT.indexOf("const loadDecision="));
+    expect(selectRunBody).toContain("window.__consoleSections.shell?.render?.()");
+  });
+
+  it("colors the run-switcher dot from the real RunLifecycle/TerminalOutcome enums, not fictional substrings", () => {
+    expect(SHELL_SCRIPT).toContain("dotColorForRun");
+    expect(SHELL_SCRIPT).not.toContain('name.includes("error")');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="failed"');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="completed"');
+    expect(SHELL_SCRIPT).toContain('terminalOutcome==="cancelled"');
   });
 });
