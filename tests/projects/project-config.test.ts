@@ -38,6 +38,10 @@ function withCaseVariant(executable: string): string {
 }
 
 describe("ProjectConfigSchema", () => {
+  it("always exposes a human-readable project title", () => {
+    expect(ProjectConfigSchema.parse(validConfig).title).toBe("repository");
+    expect(ProjectConfigSchema.parse({ ...validConfig, title: "Zentra CLI" }).title).toBe("Zentra CLI");
+  });
   it.each(["main", "master", "refs/heads/main"])(
     "rejects protected integration branch %s",
     (integrationBranch) => {

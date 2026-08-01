@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
+import { deriveProjectTitle, deriveRunTitle, type ProjectIdentity } from "../contracts/project-identity.js";
 
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { AttentionService } from "../attention/attention-service.js";
@@ -78,6 +79,12 @@ export async function createLocalWorkflowSurface(
     (revision) => projectRevisionMatches(projectRoot, revision),
   );
   const projectId = `project-${createHash("sha256").update(projectRoot).digest("hex").slice(0, 24)}`;
+  const project: ProjectIdentity = {
+    schemaVersion: 1,
+    projectId,
+    title: deriveProjectTitle(projectRoot),
+    repositoryPath: projectRoot,
+  };
   let surface!: LocalWorkflowSurface;
   surface = new WorkflowSurface(
     options.journal,
@@ -87,12 +94,15 @@ export async function createLocalWorkflowSurface(
     {
       submit: async (submission: RunSubmission, caller: WorkflowCallerContext): Promise<WorkflowRunDetail> => {
         const source = await canonicalSource(projectRoot, submission);
+        const submittedFrom = await canonicalSubmissionDirectory(projectRoot, submission.submittedFrom ?? projectRoot);
+        const title = deriveRunTitle(submission.title ?? (source.kind === "inline_goal" ? source.goal : path.basename(source.root)));
         const reference = source.kind === "inline_goal" ? source.goal : source.root;
         const referenceBytes = Buffer.from(reference, "utf8");
         const acceptedSource: RunSource = {
           kind: source.kind,
           referenceSha256: createHash("sha256").update(referenceBytes).digest("hex"),
           declaredBytes: referenceBytes.length,
+          submittedFrom,
         };
         const actor = { actorId: caller.actorId, kind: "operator" as const, channel: caller.channel };
         const reservation = reserveSubmission(options.journal, options.serviceReadyEventId, {
@@ -112,8 +122,8 @@ export async function createLocalWorkflowSurface(
           actor,
           acceptanceCommandId,
           presentation: {
-            title: presentationText(source.kind === "inline_goal" ? source.goal : path.basename(source.root), "Untitled run"),
-            projectName: presentationText(path.basename(projectRoot), "Project"),
+            title,
+            projectName: project.title,
             workspace: projectRoot,
             sourceLabel: source.kind === "inline_goal" ? "Inline goal" : "Tickets",
           },
@@ -122,6 +132,8 @@ export async function createLocalWorkflowSurface(
         if (current === null || current.lifecycle === "accepted" || current.lifecycle === "preflighting" || current.lifecycle === "intake") await preflight.prepareAndInvoke({
           runId,
           projectId,
+          title,
+          project,
           projectRevision: options.projectRevision,
           source: acceptedSource,
           actor: { actorId: caller.actorId, kind: "operator" },
@@ -148,6 +160,7 @@ export async function createLocalWorkflowSurface(
     },
     options.runAdvancer ?? unavailableAdvancer,
     artifacts,
+    project,
   );
   return surface;
 }
@@ -233,6 +246,15 @@ async function canonicalDirectory(supplied: string): Promise<string> {
   return canonical;
 }
 
+async function canonicalSubmissionDirectory(projectRoot: string, supplied: string): Promise<{ path: string; projectRelativePath: string }> {
+  const canonical = await canonicalDirectory(supplied);
+  const relative = path.relative(projectRoot, canonical);
+  if (relative !== "" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+    throw new Error("submission directory must equal or descend from the project root");
+  }
+  return { path: canonical, projectRelativePath: relative === "" ? "." : relative.split(path.sep).join("/") };
+}
+
 function recordSubmissionEvidence(
   journal: EventJournal,
   serviceReadyEventId: string,
@@ -262,11 +284,4 @@ function recordSubmissionEvidence(
     causationId: serviceReadyEventId,
     payload: evidence,
   }]);
-}
-
-function presentationText(value: string, fallback: string): string {
-  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim();
-  if (normalized === "") return fallback;
-  const characters = Array.from(normalized);
-  return characters.length <= 160 ? normalized : `${characters.slice(0, 159).join("")}…`;
 }

@@ -31,8 +31,8 @@ const NAV_GROUPS: readonly NavGroup[] = [
 function renderNav(): string {
   return NAV_GROUPS.map((group) => {
     const items = group.items.map((item) => item.enabled
-      ? `<button type="button" class="nav-item" data-nav-id="${item.id}"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span></button>`
-      : `<button type="button" class="nav-item" data-nav-id="${item.id}" disabled aria-disabled="true"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span><span class="badge">Phase 2</span></button>`
+      ? `<button type="button" class="nav-item" data-nav-id="${item.id}" aria-label="${item.icon} ${item.label}"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span></button>`
+      : `<button type="button" class="nav-item" data-nav-id="${item.id}" disabled aria-disabled="true" aria-label="${item.icon} ${item.label}, Phase 2"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span><span class="badge">Phase 2</span></button>`
     ).join("");
     return `<div class="nav-group-label">${group.label}</div>${items}`;
   }).join("");
@@ -114,7 +114,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed0c8;background:#07100d
 .history-card .badge{margin:.35rem 0}
 .history-card p{margin:0;color:var(--dim);font-size:.85rem}
 @media(max-width:980px){.workspace{grid-template-columns:1fr 1fr}.workspace>.panel:last-child{grid-column:1/-1}.intake{grid-template-columns:1fr}}
-@media(max-width:620px){.workspace{grid-template-columns:1fr}.workspace>.panel:last-child{grid-column:auto}.facts{grid-template-columns:1fr}.form-row{display:grid}.panel{padding:1rem;border-radius:10px}.actions{display:grid}.actions form{min-width:0}}
+@media(max-width:620px){.sidebar{width:52px}.nav-group-label,.nav-label,.nav-item .badge{display:none}.nav-item{justify-content:center;padding:9px 6px}.nav-icon{width:auto}.topbar{padding:0 8px;gap:8px}.run-switcher{flex:1;min-width:0}.run-switcher-button{width:100%;max-width:none}.run-switcher-menu{width:min(340px,calc(100vw - 68px))}.search-box{display:none}.connection{padding:3px 5px}.workspace{grid-template-columns:1fr}.workspace>.panel:last-child{grid-column:auto}.facts{grid-template-columns:1fr}.form-row{display:grid}.panel{padding:1rem;border-radius:10px}.actions{display:grid}.actions form{min-width:0}}
 </style></head><body>
 <div class="shell" data-ready="false">
   <aside class="sidebar" role="navigation" aria-label="Console sections">${renderNav()}</aside>
@@ -171,7 +171,7 @@ const renderTopbar=()=>{
   const button=$("run-switcher-button");if(!button)return;
   const titleEl=$("run-switcher-title");const dotEl=$("run-switcher-dot");const rows=$("run-switcher-rows");
   const run=currentRun();
-  setText(titleEl,run?value(run,["runId","id"],"Run"):"No runs yet");
+  setText(titleEl,run?value(run,["title","goal","summary"],value(run,["runId","id"],"Run")):"No runs yet");
   dotEl.style.background=run?dotColorForRun(run):"var(--faint)";
   rows.replaceChildren();
   if(!state.runs.length){
@@ -184,7 +184,7 @@ const renderTopbar=()=>{
     row.dataset.selected=String(Boolean(run)&&value(run,["runId","id"])===id);
     const dot=document.createElement("span");dot.className="run-dot";
     dot.style.background=dotColorForRun(candidate);
-    const titleSpan=document.createElement("span");titleSpan.className="run-switcher-row-title";setText(titleSpan,id);
+    const titleSpan=document.createElement("span");titleSpan.className="run-switcher-row-title";setText(titleSpan,value(candidate,["title","goal","summary"],id));
     row.append(dot,titleSpan);
     row.addEventListener("click",()=>{$("run-switcher-menu").hidden=true;button.setAttribute("aria-expanded","false");selectRun(id)});
     rows.append(row);

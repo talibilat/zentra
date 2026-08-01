@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { digestCanonical } from "../contracts/authority-attention.js";
+import { deriveRunTitle, type ProjectIdentity } from "../contracts/project-identity.js";
 import {
   AnalysisBudgetExhaustedPayloadSchema,
   AnalysisBudgetRevisedPayloadSchema,
@@ -55,8 +56,8 @@ export interface WorkflowCallerContext {
 }
 
 export type RunSubmission =
-  | { readonly kind: "inline_goal"; readonly commandId: string; readonly goal: string }
-  | { readonly kind: "ticket_directory"; readonly commandId: string; readonly directoryPath: string };
+  | { readonly kind: "inline_goal"; readonly commandId: string; readonly goal: string; readonly title?: string; readonly submittedFrom?: string }
+  | { readonly kind: "ticket_directory"; readonly commandId: string; readonly directoryPath: string; readonly title?: string; readonly submittedFrom?: string };
 
 export interface RunSubmitter<TResult = unknown> {
   submit(input: RunSubmission, caller: WorkflowCallerContext): TResult;
@@ -131,6 +132,8 @@ export interface WorkflowRunSummary {
   readonly schemaVersion: 1;
   readonly runId: string;
   readonly projectId: string;
+  readonly title: string;
+  readonly project: NonNullable<RunView["project"]> | null;
   readonly source: RunView["source"];
   readonly lifecycle: RunView["lifecycle"];
   readonly terminalOutcome: RunView["terminalOutcome"];
@@ -314,6 +317,7 @@ export class WorkflowSurface<TResult = unknown> {
     private readonly submitter: RunSubmitter<TResult>,
     private readonly runAdvancer: RunAdvancer,
     private readonly artifactTextReader?: IntakeArtifactTextReader,
+    private readonly projectIdentity?: ProjectIdentity,
   ) {}
 
   submitRun(input: RunSubmission, caller: WorkflowCallerContext): TResult {
@@ -346,7 +350,8 @@ export class WorkflowSurface<TResult = unknown> {
     return json([...accepted.entries()]
       .map(([streamId, metadata]) => {
         const runId = streamId.startsWith("run:") ? streamId.slice(4) : "";
-        const run = runId === "" ? null : this.runs.reopen(runId);
+        const storedRun = runId === "" ? null : this.runs.reopen(runId);
+        const run = storedRun === null ? null : this.publicRun(storedRun);
         if (run === null || runStreamId(run.runId) !== streamId) {
           throw new Error("run.accepted stream identity is contradictory");
         }
@@ -365,6 +370,13 @@ export class WorkflowSurface<TResult = unknown> {
         schemaVersion: 1 as const,
         runId: run.runId,
         projectId: run.projectId,
+        title: run.title ?? presentation?.title ?? "Untitled run",
+        project: run.project ?? (presentation === undefined ? null : {
+          schemaVersion: 1 as const,
+          projectId: run.projectId,
+          title: presentation.projectName,
+          repositoryPath: presentation.workspace,
+        }),
         source: run.source,
         lifecycle: run.lifecycle,
         terminalOutcome: run.terminalOutcome,
@@ -431,8 +443,9 @@ export class WorkflowSurface<TResult = unknown> {
   }
 
   private runDetail(runId: string): WorkflowRunDetail | null {
-    const run = this.runs.reopen(runId);
-    if (run === null) return null;
+    const storedRun = this.runs.reopen(runId);
+    if (storedRun === null) return null;
+    const run = this.publicRun(storedRun);
     const runEvents = this.runs.readStream(runId);
     const acceptedAt = runEvents[0]?.recordedAt;
     const updatedAt = runEvents.at(-1)?.recordedAt;
@@ -454,6 +467,17 @@ export class WorkflowSurface<TResult = unknown> {
       commandEvidence,
       planning: this.planning(run, decisions),
     });
+  }
+
+  private publicRun(run: RunView): RunView {
+    const project = run.project ?? (this.projectIdentity?.projectId === run.projectId ? this.projectIdentity : null);
+    let title = run.title ?? null;
+    if (title === null && run.source.kind === "inline_goal" && this.artifactTextReader !== undefined) {
+      const source = this.intake(run).sources.find((item) => item.relativePath === "$inline");
+      if (source !== undefined) title = deriveRunTitle(this.artifactTextReader.readRetainedText(source.artifact));
+    }
+    title ??= project?.title ?? null;
+    return json({ ...run, title, project });
   }
 
   getDecision(decisionId: string): AttentionView | null {
@@ -942,6 +966,12 @@ export class WorkflowSurface<TResult = unknown> {
 function validateSubmission(input: RunSubmission): RunSubmission {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(input.commandId)) {
     throw new Error("submission command identity is invalid");
+  }
+  if (input.title !== undefined && (input.title.trim() === "" || Buffer.byteLength(input.title, "utf8") > 640)) {
+    throw new Error("run title is invalid");
+  }
+  if (input.submittedFrom !== undefined && (input.submittedFrom.trim() === "" || Buffer.byteLength(input.submittedFrom, "utf8") > 4_096)) {
+    throw new Error("submission directory is invalid");
   }
   if (input.kind === "inline_goal") {
     if (input.goal.trim() === "") throw new Error("inline goal must not be empty");

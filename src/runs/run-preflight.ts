@@ -102,6 +102,8 @@ function commandId(parent: string, stage: string): string {
 function assertSameRunRequest(run: RunView, input: AcceptRunInput): void {
   for (const [name, actual, expected] of [
     ["project", run.projectId, input.projectId],
+    ...(input.title === undefined ? [] : [["title", run.title, input.title] as const]),
+    ...(input.project === undefined ? [] : [["project identity", run.project, input.project] as const]),
     ["revision", run.projectRevision, input.projectRevision],
     ["source", run.source, input.source],
     ["actor", run.actor, input.actor],

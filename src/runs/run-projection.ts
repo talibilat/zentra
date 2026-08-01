@@ -1,5 +1,6 @@
 import type { StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
+import type { ProjectIdentity } from "../contracts/project-identity.js";
 import {
   PreflightPayloadSchema,
   PreflightFailedPayloadSchema,
@@ -28,9 +29,11 @@ import {
 
 export interface RunView {
   readonly schemaVersion: 1;
-  readonly runVersion: 1;
+  readonly runVersion: 1 | 2;
   readonly runId: string;
   readonly projectId: string;
+  readonly title?: string | null;
+  readonly project?: ProjectIdentity | null;
   readonly projectRevision: ProjectRevision;
   readonly source: RunSource;
   readonly actor: RunActor;
@@ -275,9 +278,11 @@ export function projectRun(events: readonly StoredEvent[]): RunView | null {
 
   return Object.freeze({
     schemaVersion: 1,
-    runVersion: 1,
+    runVersion: accepted.runVersion,
     runId: accepted.runId,
     projectId: accepted.projectId,
+    title: accepted.runVersion === 2 ? accepted.title : null,
+    project: accepted.runVersion === 2 ? accepted.project : null,
     projectRevision: accepted.projectRevision,
     source: accepted.source,
     actor: accepted.actor,

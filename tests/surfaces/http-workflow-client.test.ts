@@ -58,6 +58,7 @@ describe("HttpWorkflowClient submission reconciliation", () => {
       .resolves.toEqual({ runId: "run-1" });
 
     expect(requests).toHaveLength(2);
+    expect(requests[0]?.["submittedFrom"]).toBe(process.cwd());
     expect(requests[1]?.["commandId"]).toBe(requests[0]?.["commandId"]);
     expect(created).toBe(1);
     expect(pendingFiles(runtime)).toEqual([]);

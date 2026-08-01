@@ -69,11 +69,14 @@ const intakeLimits = {
 const accepted = {
   runId: "run-89",
   projectId: "zentra",
+  title: "Inspect the durable intake",
+  project: { schemaVersion: 1 as const, projectId: "zentra", title: "Zentra", repositoryPath: "/absolute/zentra" },
   projectRevision: { objectFormat: "sha1" as const, commit: "a".repeat(40) },
   source: {
     kind: "inline_goal" as const,
     referenceSha256: createHash("sha256").update(intakeGoal).digest("hex"),
     declaredBytes: Buffer.byteLength(intakeGoal),
+    submittedFrom: { path: "/absolute/zentra/tickets", projectRelativePath: "tickets" },
   },
   actor: { actorId: "operator-1", kind: "operator" as const },
   process: { pid: 123, processIncarnation: `process-v2:${"c".repeat(64)}` },
@@ -91,6 +94,30 @@ const accepted = {
 };
 
 describe("RunService", () => {
+  it("persists operator identity fields in the accepted event and rebuilt projection", () => {
+    const { journal, service, input } = fixture();
+    expect(service.accept(input)).toMatchObject({
+      runVersion: 2,
+      title: input.title,
+      project: input.project,
+      source: { submittedFrom: input.source.submittedFrom },
+    });
+    expect(service.reopen(input.runId)).toMatchObject({ title: input.title, project: input.project });
+    journal.close();
+  });
+
+  it("rejects contradictory project and submission directory identity", () => {
+    const first = fixture();
+    expect(() => first.service.accept({ ...first.input, project: { ...first.input.project, projectId: "other" } }))
+      .toThrow("project identity does not match");
+    first.journal.close();
+    const second = fixture();
+    expect(() => second.service.accept({
+      ...second.input,
+      source: { ...second.input.source, submittedFrom: { path: "/outside", projectRelativePath: "tickets" } },
+    })).toThrow("submission directory does not match");
+    second.journal.close();
+  });
   it("durably records service startup and readiness with process identity", () => {
     const { journal } = fixture(false);
     const services = new ServiceLifecycleService(journal);
