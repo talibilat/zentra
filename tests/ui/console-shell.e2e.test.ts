@@ -63,6 +63,12 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const driver = await ChromiumWorkflowDriver.open(session.url, root);
       const runId = await driver.submitGoal("Prove the console shell still submits goals");
       expect(runId).toMatch(/^run-/);
+      const detailText = await driver.evaluate<string>(`document.getElementById("run-detail")?.textContent || ""`);
+      expect(detailText).toContain("Prove the console shell still submits goals");
+      expect(detailText).toContain("Project");
+      expect(detailText).toContain("Repository");
+      expect(detailText).toContain("Submitted from");
+      expect(detailText).toContain(root);
     } finally {
       await gateway.close();
       fixture.journal.close();
@@ -110,7 +116,7 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       await driver.waitFor(`document.querySelector('[data-section-id="overview"]')?.dataset.active === "true"`);
 
       const heading = await driver.evaluate<string>(`document.querySelector("#overview-root h1")?.textContent || ""`);
-      expect(heading).toBe(runId);
+      expect(heading).toBe(detail.run.title);
 
       const badgeText = await driver.evaluate<string>(`document.querySelector("#overview-root .badge")?.textContent || ""`);
       expect(badgeText).toBe(expectedBadge);
@@ -133,12 +139,12 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const runId = await driver.submitGoal("Confirm the topbar run switcher shows the real run");
 
       const switcherTitle = await driver.evaluate<string>(`document.getElementById("run-switcher-title")?.textContent || ""`);
-      expect(switcherTitle).toBe(runId);
+      expect(switcherTitle).toBe("Confirm the topbar run switcher shows the real run");
 
       await driver.click("#run-switcher-button");
       await driver.waitFor(`document.getElementById("run-switcher-menu")?.hidden === false`);
       const rowText = await driver.evaluate<string>(`document.getElementById("run-switcher-rows")?.textContent || ""`);
-      expect(rowText).toContain(runId);
+      expect(rowText).toContain("Confirm the topbar run switcher shows the real run");
     } finally {
       await gateway.close();
       fixture.journal.close();

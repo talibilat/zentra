@@ -1,4 +1,12 @@
 export { OpenCodeReadOnlyProgram } from "./agents/opencode-read-only-program.js";
+export {
+  HumanTitleSchema,
+  ProjectIdentitySchema,
+  SubmissionDirectorySchema,
+  deriveProjectTitle,
+  deriveRunTitle,
+} from "./contracts/project-identity.js";
+export type { ProjectIdentity, SubmissionDirectory } from "./contracts/project-identity.js";
 export type { OpenCodeReadOnlyProgramRequest, OpenCodeReadOnlyProgramResult } from "./agents/opencode-read-only-program.js";
 export type { OpenCodeReadOnlyExecutedResult, OpenCodeReadOnlyPausedResult } from "./agents/opencode-read-only-program.js";
 export type { OpenCodeReadOnlyAgentResult } from "./agents/opencode-read-only-agent.js";

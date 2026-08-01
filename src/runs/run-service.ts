@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import type { TerminalOutcome } from "../contracts/task.js";
+import { HumanTitleSchema, ProjectIdentitySchema, type ProjectIdentity } from "../contracts/project-identity.js";
 import { findAllEvent, isAtomicEventJournal, iterateAllEvents, readStreamEvents, type AtomicAppend, type EventJournal } from "../journal/journal.js";
 import {
   RUN_SCHEMA_VERSION,
@@ -39,6 +41,8 @@ import { verifyAgentTrailReady } from "./service-lifecycle.js";
 export interface AcceptRunInput {
   readonly runId: string;
   readonly projectId: string;
+  readonly title?: string;
+  readonly project?: ProjectIdentity;
   readonly projectRevision: ProjectRevision;
   readonly source: RunSource;
   readonly actor: RunActor;
@@ -62,14 +66,34 @@ export class RunService {
     if (input.source.declaredBytes > input.budget.maxSourceBytes) {
       throw new Error("declared source bytes exceed the run budget");
     }
+    const identityFieldCount = Number(input.title !== undefined) + Number(input.project !== undefined) +
+      Number(input.source.submittedFrom !== undefined);
+    if (identityFieldCount !== 0 && identityFieldCount !== 3) {
+      throw new Error("run identity metadata must be complete");
+    }
+    if (input.project !== undefined && input.project.projectId !== input.projectId) {
+      throw new Error("project identity does not match the run project");
+    }
+    if (input.project !== undefined && input.source.submittedFrom !== undefined) {
+      const relative = path.relative(input.project.repositoryPath, input.source.submittedFrom.path);
+      const normalized = relative === "" ? "." : relative.split(path.sep).join("/");
+      if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) ||
+        normalized !== input.source.submittedFrom.projectRelativePath) {
+        throw new Error("submission directory does not match the run project");
+      }
+    }
     if (input.causationId === null) throw new Error("run acceptance requires service.ready causation");
     this.verifyServiceReady(input.causationId, input.process);
     const streamId = runStreamId(input.runId);
     const event = this.event(streamId, "run.accepted", {
       schemaVersion: RUN_SCHEMA_VERSION,
-      runVersion: 1,
+      runVersion: identityFieldCount === 3 ? 2 : 1,
       runId: input.runId,
       projectId: input.projectId,
+      ...(identityFieldCount === 3 ? {
+        title: HumanTitleSchema.parse(input.title),
+        project: ProjectIdentitySchema.parse(input.project),
+      } : {}),
       projectRevision: ProjectRevisionSchema.parse(input.projectRevision),
       source: RunSourceSchema.parse(input.source),
       actor: RunActorSchema.parse(input.actor),

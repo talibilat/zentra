@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import { digestCanonical } from "../contracts/authority-attention.js";
+import { deriveProjectTitle, HumanTitleSchema } from "../contracts/project-identity.js";
 import { ValidationIdentitySchema, type ValidationIdentity } from "../planning/planning-contracts.js";
 
 export const APPROVED_VALIDATION_EXECUTABLE = realpathSync(process.execPath);
@@ -228,6 +229,7 @@ export const ReleasePreparationConfigSchema = z.strictObject({
 
 export const ProjectConfigSchema = z.object({
   projectId: z.string().min(1),
+  title: HumanTitleSchema.optional(),
   repositoryPath: z.string().refine(path.isAbsolute),
   integrationBranch: z.string().default(DEFAULT_INTEGRATION_BRANCH).refine(isSafeBranchName, {
     message: "Integration branch must be a safe Git branch name",
@@ -258,9 +260,13 @@ export const ProjectConfigSchema = z.object({
     context.addIssue({ code: "custom", path: ["integrationBranch"],
       message: "Integration branch must be a dedicated non-protected branch" });
   }
-});
+}).transform((project) => ({
+  ...project,
+  title: project.title ?? deriveProjectTitle(project.repositoryPath),
+}));
 
-export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+type ParsedProjectConfig = z.output<typeof ProjectConfigSchema>;
+export type ProjectConfig = Omit<ParsedProjectConfig, "title"> & { readonly title?: string };
 export type ReleasePreparationConfig = z.infer<typeof ReleasePreparationConfigSchema>;
 
 export function assertDedicatedIntegrationBranch(project: Pick<ProjectConfig,

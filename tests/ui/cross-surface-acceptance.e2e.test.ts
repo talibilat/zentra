@@ -134,16 +134,16 @@ describe("workflow UI and CLI acceptance", () => {
       "textbox:Project-relative folder",
       "button:Submit tickets",
       "button:Cancel run",
-      "Iframe:AgentTrail evidence views",
+      "button:⬡ Trail",
     ]));
     expect(browserResult.focusOrder.slice(0, 7)).toEqual([
-      "a::Skip to operations",
-      "a::Controls",
-      "a::AgentTrail",
+      "button::▶ Controls",
+      "button::◉ Overview",
+      "button::⬡ Trail",
+      expect.stringMatching(/^button:run-switcher-button:tickets/u),
       "textarea:goal:Goal",
       "button::Submit goal",
       "input:ticket-path:Project-relative folder",
-      "button::Submit tickets",
     ]);
     expect(browserResult.viewport).toEqual({ width: 390, documentWidth: 390, offenders: [] });
     expect(browserResult.sourceText).toBe(HOSTILE_TICKET_TEXT);
@@ -218,7 +218,8 @@ function pendingQuestion(fixture: WorkflowAcceptanceFixture, runId: string) {
 async function cli(argv: readonly string[], root: string) {
   let stdout = "";
   let stderr = "";
-  const code = await runCli(argv, {
+  const command = argv[0] === "list" || argv[0] === "status" ? [...argv, "--json"] : argv;
+  const code = await runCli(command, {
     cwd: root,
     stdout: (value) => { stdout += value; },
     stderr: (value) => { stderr += value; },

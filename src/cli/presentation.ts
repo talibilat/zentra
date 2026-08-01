@@ -81,16 +81,19 @@ export function formatRunStatus(input: unknown, options: PresentationOptions = {
 export function toRunListItemView(input: unknown): RunListItemView {
   const summary = record(input);
   const presentation = record(summary["presentation"]);
+  const project = record(summary["project"]);
   const source = record(summary["source"]);
   const lifecycle = text(summary["lifecycle"]);
   const terminalOutcome = nullableText(summary["terminalOutcome"]);
   const projectDescription = optionalSafeValue(presentation["projectDescription"]);
-  const workspace = optionalSafeValue(presentation["workspace"]);
+  const workspace = optionalSafeValue(record(source["submittedFrom"])["path"])
+    ?? optionalSafeValue(project["repositoryPath"])
+    ?? optionalSafeValue(presentation["workspace"]);
   const acceptedAt = optionalSafeValue(summary["acceptedAt"]);
   return {
     runId: safeValue(summary["runId"], "Unknown run"),
-    title: safeValue(presentation["title"], deriveTitle(summary)),
-    projectName: safeValue(presentation["projectName"], "Unknown project"),
+    title: safeValue(summary["title"], safeValue(presentation["title"], deriveTitle(summary))),
+    projectName: safeValue(project["title"], safeValue(presentation["projectName"], "Unknown project")),
     ...(projectDescription === undefined ? {} : { projectDescription }),
     ...(workspace === undefined ? {} : { workspace }),
     sourceLabel: safeValue(presentation["sourceLabel"], sourceLabel(text(source["kind"]))),

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { HumanTitleSchema, ProjectIdentitySchema, SubmissionDirectorySchema } from "../contracts/project-identity.js";
 
 export const RUN_SCHEMA_VERSION = 1;
 
@@ -18,10 +19,14 @@ export const RunLifecycleSchema = z.enum([
   "terminal",
 ]);
 
-export const RunSourceSchema = z.strictObject({
+const RunSourceV1Schema = z.strictObject({
   kind: z.enum(["inline_goal", "ticket_directory"]),
   referenceSha256: DigestSchema,
   declaredBytes: z.number().int().nonnegative().max(1024 * 1024 * 1024),
+});
+
+export const RunSourceSchema = RunSourceV1Schema.extend({
+  submittedFrom: SubmissionDirectorySchema.optional(),
 });
 
 export const ProjectRevisionSchema = z.strictObject({
@@ -70,19 +75,40 @@ export const AcceptedRunAuthoritySchema = z.strictObject({
   executionAuthority: z.literal("none"),
 });
 
-export const RunAcceptedPayloadSchema = z.strictObject({
+const RunAcceptedV1PayloadSchema = z.strictObject({
   schemaVersion: z.literal(RUN_SCHEMA_VERSION),
   runVersion: z.literal(1),
   runId: IdSchema,
   projectId: IdSchema,
   projectRevision: ProjectRevisionSchema,
-  source: RunSourceSchema,
+  source: RunSourceV1Schema,
   actor: RunActorSchema,
   process: RunProcessSchema,
   budget: RunBudgetSchema,
   authority: AcceptedRunAuthoritySchema,
   commandId: IdSchema,
 });
+
+const RunAcceptedV2PayloadSchema = z.strictObject({
+  schemaVersion: z.literal(RUN_SCHEMA_VERSION),
+  runVersion: z.literal(2),
+  runId: IdSchema,
+  projectId: IdSchema,
+  title: HumanTitleSchema,
+  project: ProjectIdentitySchema,
+  projectRevision: ProjectRevisionSchema,
+  source: RunSourceV1Schema.extend({ submittedFrom: SubmissionDirectorySchema }),
+  actor: RunActorSchema,
+  process: RunProcessSchema,
+  budget: RunBudgetSchema,
+  authority: AcceptedRunAuthoritySchema,
+  commandId: IdSchema,
+});
+
+export const RunAcceptedPayloadSchema = z.discriminatedUnion("runVersion", [
+  RunAcceptedV1PayloadSchema,
+  RunAcceptedV2PayloadSchema,
+]);
 
 export const PreflightPayloadSchema = z.strictObject({
   schemaVersion: z.literal(RUN_SCHEMA_VERSION),

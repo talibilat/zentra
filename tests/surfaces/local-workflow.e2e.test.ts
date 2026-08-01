@@ -44,7 +44,7 @@ describe("createLocalWorkflowSurface", () => {
       { actorId: "operator-1", channel: "cli" },
     );
     const tickets = await surface.submitRun(
-      { kind: "ticket_directory", commandId: "submit-tickets", directoryPath: "tickets" },
+      { kind: "ticket_directory", commandId: "submit-tickets", directoryPath: "tickets", submittedFrom: ticketDirectory },
       { actorId: "operator-2", channel: "ui" },
     );
 
@@ -54,22 +54,33 @@ describe("createLocalWorkflowSurface", () => {
         workspace: root,
         sourceLabel: "Inline goal",
       },
-      run: { lifecycle: "analyzing", source: { kind: "inline_goal" }, authority: { executionAuthority: "none" } },
+      run: {
+        title: "Fix one production workflow boundary.",
+        project: { schemaVersion: 1, projectId: expect.stringMatching(/^project-/), repositoryPath: root },
+        lifecycle: "analyzing",
+        source: { kind: "inline_goal", submittedFrom: { path: root, projectRelativePath: "." } },
+        authority: { executionAuthority: "none" },
+      },
       intake: { status: "closed", sourceCount: 1, sources: [{ relativePath: "$inline" }] },
       analysis: { status: "not_started" },
       planning: { status: "not_started", readiness: { executionAuthority: "none" } },
     });
     expect(tickets).toMatchObject({
       presentation: { title: "tickets", workspace: root, sourceLabel: "Tickets" },
-      run: { lifecycle: "analyzing", source: { kind: "ticket_directory" }, authority: { executionAuthority: "none" } },
+      run: {
+        title: "tickets",
+        lifecycle: "analyzing",
+        source: { kind: "ticket_directory", submittedFrom: { path: ticketDirectory, projectRelativePath: "tickets" } },
+        authority: { executionAuthority: "none" },
+      },
        intake: { status: "closed", sourceCount: 1, sources: [{ relativePath: "issue.md",
         trust: "untrusted_planning_data", mediaType: "text/plain; charset=utf-8" }] },
     });
     expect(inline.run.runId).not.toBe(tickets.run.runId);
     expect(surface.listRuns().map((run) => run.runId)).toEqual([tickets.run.runId, inline.run.runId]);
     expect(surface.listRuns()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ presentation: expect.objectContaining({ title: "Fix one production workflow boundary." }) }),
-      expect.objectContaining({ presentation: expect.objectContaining({ title: "tickets" }) }),
+      expect.objectContaining({ title: "Fix one production workflow boundary.", project: expect.objectContaining({ repositoryPath: root }) }),
+      expect.objectContaining({ title: "tickets", project: expect.objectContaining({ repositoryPath: root }) }),
     ]));
     expect(JSON.stringify(surface.listRuns())).not.toContain(hostileTicket);
     expect(surface.getRun(inline.run.runId)).toEqual(inline);

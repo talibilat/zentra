@@ -1,5 +1,5 @@
 import { constants, existsSync } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { lstat, open, realpath, unlink } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
 
@@ -30,6 +30,7 @@ export class HttpWorkflowClient {
     private readonly token: string,
     private readonly submissions: CliSubmissionCommandStore,
     private readonly requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    private readonly submittedFrom = process.cwd(),
   ) {}
 
   static async connect(cwd: string): Promise<HttpWorkflowClient> {
@@ -46,10 +47,17 @@ export class HttpWorkflowClient {
         throw new Error("service is not ready");
       }
       const token = await readPrivateToken(path.join(layout.runtimeDirectory, CLI_CONTROL_TOKEN_FILENAME));
+      const submittedFrom = await realpath(path.resolve(cwd));
+      const relative = path.relative(discovery.root, submittedFrom);
+      if (relative !== "" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+        throw new Error("working directory is outside the project root");
+      }
       return new HttpWorkflowClient(
         state.address.port,
         token,
         new CliSubmissionCommandStore(layout.runtimeDirectory),
+        REQUEST_TIMEOUT_MS,
+        submittedFrom,
       );
     } catch (error) {
       throw new WorkflowSurfaceError("unavailable", "workflow service is unavailable", { cause: error });
@@ -58,9 +66,10 @@ export class HttpWorkflowClient {
 
   async submitRun(input: RunSubmission, caller: WorkflowCallerContext): Promise<unknown> {
     if (caller.channel !== "cli") throw new WorkflowSurfaceError("invalid_transition", "HTTP workflow client is CLI-only");
-    const pending = await this.submissions.reserve(input, caller);
+    const submission = { ...input, submittedFrom: this.submittedFrom } as RunSubmission;
+    const pending = await this.submissions.reserve(submission, caller);
     try {
-      const result = await this.mutate("/runs", { ...input, commandId: pending.commandId }, caller, 201);
+      const result = await this.mutate("/runs", { ...submission, commandId: pending.commandId }, caller, 201);
       await this.submissions.acknowledge(pending);
       return result;
     } catch (error) {
@@ -190,7 +199,7 @@ export class CliSubmissionCommandStore {
   constructor(private readonly runtimeDirectory: string) {}
 
   async reserve(input: RunSubmission, caller: WorkflowCallerContext): Promise<PendingSubmissionCommand> {
-    const { commandId, ...source } = input;
+    const { commandId, submittedFrom: _submittedFrom, ...source } = input;
     const keySha256 = digestCanonical({ schemaVersion: 1, source, actor: caller });
     const filePath = path.join(this.runtimeDirectory, `${CLI_PENDING_SUBMISSION_PREFIX}${keySha256}.json`);
     const existing = await readPendingIfPresent(filePath);
