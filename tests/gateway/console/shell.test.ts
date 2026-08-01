@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import { SHELL_MARKUP, SHELL_SCRIPT } from "../../../src/gateway/console/shell.js";
+import { CONTROLS_SCRIPT } from "../../../src/gateway/console/controls-section.js";
 
 describe("console shell", () => {
   it("renders all twelve mock nav items plus the carried-over Controls entry, grouped correctly", () => {
@@ -93,5 +94,19 @@ describe("console shell", () => {
     const topbarEnd = SHELL_MARKUP.indexOf("</header>");
     expect(SHELL_MARKUP.indexOf('id="connection"')).toBeGreaterThan(topbarStart);
     expect(SHELL_MARKUP.indexOf('id="connection"')).toBeLessThan(topbarEnd);
+  });
+
+  it("renders the topbar via window.__consoleSections.shell and picking a run switcher row calls the existing selectRun", () => {
+    expect(SHELL_SCRIPT).toContain("window.__consoleSections.shell={render:renderTopbar}");
+    const renderTopbarBody = SHELL_SCRIPT.slice(SHELL_SCRIPT.indexOf("const renderTopbar="), SHELL_SCRIPT.indexOf('$("run-switcher-button")?.addEventListener("click"'));
+    expect(renderTopbarBody).toContain("row.addEventListener(\"click\",()=>{");
+    expect(renderTopbarBody).toContain("selectRun(id)");
+  });
+
+  it("refreshes the topbar every time Controls loads or switches a run", () => {
+    const refreshBody = CONTROLS_SCRIPT.slice(CONTROLS_SCRIPT.indexOf("const refresh=async"), CONTROLS_SCRIPT.indexOf("const selectRun="));
+    expect(refreshBody).toContain("window.__consoleSections.shell?.render?.()");
+    const selectRunBody = CONTROLS_SCRIPT.slice(CONTROLS_SCRIPT.indexOf("const selectRun=async"), CONTROLS_SCRIPT.indexOf("const loadDecision="));
+    expect(selectRunBody).toContain("window.__consoleSections.shell?.render?.()");
   });
 });

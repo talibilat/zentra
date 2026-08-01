@@ -155,6 +155,53 @@ for(const button of document.querySelectorAll(".nav-item:not(:disabled)")){
   button.addEventListener("click",()=>setActiveSection(button.dataset.navId));
 }
 setActiveSection("controls");
+const dotColorForLifecycle=(lifecycle)=>{
+  const name=String(lifecycle||"").toLowerCase();
+  if(name.includes("error")||name.includes("failed")||name.includes("rejected"))return "var(--err)";
+  if(name.includes("terminal")||name.includes("ended")||name.includes("done"))return "var(--ok)";
+  if(name.includes("degraded")||name.includes("waiting")||name.includes("stale"))return "var(--warn)";
+  return "var(--run)";
+};
+const renderTopbar=()=>{
+  const button=$("run-switcher-button");if(!button)return;
+  const titleEl=$("run-switcher-title");const dotEl=$("run-switcher-dot");const rows=$("run-switcher-rows");
+  const run=currentRun();
+  setText(titleEl,run?value(run,["runId","id"],"Run"):"No runs yet");
+  dotEl.style.background=run?dotColorForLifecycle(value(run,["lifecycle","state","status"],"")):"var(--faint)";
+  rows.replaceChildren();
+  if(!state.runs.length){
+    const empty=document.createElement("div");empty.className="run-switcher-empty";
+    setText(empty,"No runs on this machine yet.");rows.append(empty);return;
+  }
+  for(const candidate of state.runs){
+    const id=value(candidate,["runId","id"],"Unknown run");
+    const row=document.createElement("button");row.type="button";row.className="run-switcher-row";
+    row.dataset.selected=String(Boolean(run)&&value(run,["runId","id"])===id);
+    const dot=document.createElement("span");dot.className="run-dot";
+    dot.style.background=dotColorForLifecycle(value(candidate,["lifecycle","state","status"],""));
+    const titleSpan=document.createElement("span");titleSpan.className="run-switcher-row-title";setText(titleSpan,id);
+    row.append(dot,titleSpan);
+    row.addEventListener("click",()=>{$("run-switcher-menu").hidden=true;button.setAttribute("aria-expanded","false");selectRun(id)});
+    rows.append(row);
+  }
+};
+$("run-switcher-button")?.addEventListener("click",()=>{
+  const menu=$("run-switcher-menu");const opening=menu.hidden;
+  menu.hidden=!opening;$("run-switcher-button").setAttribute("aria-expanded",String(opening));
+});
+document.addEventListener("click",(event)=>{
+  const menu=$("run-switcher-menu");const wrap=$("run-switcher-button")?.closest(".run-switcher");
+  if(!menu||menu.hidden||!wrap||wrap.contains(event.target))return;
+  menu.hidden=true;$("run-switcher-button").setAttribute("aria-expanded","false");
+});
+$("console-search")?.addEventListener("input",(event)=>{
+  // Placeholder for forward compatibility: nothing filters on state.search yet.
+  // Trail (Phase 2 of the Agent Rail Console redesign) is what will read this.
+  state.search=event.target.value;
+});
+window.__consoleSections=window.__consoleSections||{};
+window.__consoleSections.shell={render:renderTopbar};
+renderTopbar();
 async function handoff(){
   const fragment=location.hash;history.replaceState(null,"","/");document.documentElement.dataset.location=location.href;
   const token=fragment.startsWith("#token=")?decodeURIComponent(fragment.slice(7)):"";
