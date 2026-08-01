@@ -137,6 +137,15 @@ export interface WorkflowRunSummary {
   readonly streamVersion: number;
   readonly approvalState: RunView["authority"]["approvalState"];
   readonly acceptedAt: string;
+  readonly presentation?: WorkflowRunPresentation;
+  readonly attentionRequired?: boolean;
+}
+
+export interface WorkflowRunPresentation {
+  readonly title: string;
+  readonly projectName: string;
+  readonly workspace: string;
+  readonly sourceLabel: "Inline goal" | "Tickets";
 }
 
 export interface WorkflowIntakeSource {
@@ -227,6 +236,9 @@ export interface WorkflowPlanningView {
 
 export interface WorkflowRunDetail {
   readonly schemaVersion: 1;
+  readonly acceptedAt?: string;
+  readonly updatedAt?: string;
+  readonly presentation?: WorkflowRunPresentation;
   readonly run: RunView;
   readonly intake: WorkflowIntakeView;
   readonly analysis: WorkflowAnalysisView;
@@ -287,6 +299,7 @@ export interface WorkflowSubmissionCommandEvidence {
   };
   readonly actor: DecisionActor;
   readonly acceptanceCommandId: string;
+  readonly presentation?: WorkflowRunPresentation;
   readonly evidenceSha256: string;
 }
 
@@ -317,10 +330,18 @@ export class WorkflowSurface<TResult = unknown> {
 
   private listRunsProjection(): readonly WorkflowRunSummary[] {
     const accepted = new Map<string, { readonly position: number; readonly recordedAt: string }>();
+    const submissions = new Map<string, WorkflowSubmissionCommandEvidence>();
     for (const event of iterateAllEvents(this.journal)) {
-      if (event.type !== "run.accepted" || accepted.has(event.streamId)) continue;
-      accepted.set(event.streamId, { position: event.globalPosition, recordedAt: event.recordedAt });
-      assertBoundedProjectionEntries(accepted.size, "workflow run listing");
+      if (event.type === "run.accepted" && !accepted.has(event.streamId)) {
+        accepted.set(event.streamId, { position: event.globalPosition, recordedAt: event.recordedAt });
+        assertBoundedProjectionEntries(accepted.size, "workflow run listing");
+      } else if (event.type === "workflow.run_submitted") {
+        if (submissions.has(event.correlationId)) {
+          throw new Error("workflow run has duplicate submission evidence");
+        }
+        submissions.set(event.correlationId, event.payload as WorkflowSubmissionCommandEvidence);
+        assertBoundedProjectionEntries(submissions.size, "workflow submission identity listing");
+      }
     }
     return json([...accepted.entries()]
       .map(([streamId, metadata]) => {
@@ -329,10 +350,18 @@ export class WorkflowSurface<TResult = unknown> {
         if (run === null || runStreamId(run.runId) !== streamId) {
           throw new Error("run.accepted stream identity is contradictory");
         }
-        return { run, metadata };
+        const acceptedEvent = this.runs.readStream(run.runId)[0];
+        const acceptanceCommandId = acceptedEvent === undefined
+          ? ""
+          : stringField(record(acceptedEvent.payload), "commandId");
+        return {
+          run,
+          metadata,
+          presentation: validatedSubmissionPresentation(run, submissions.get(run.runId), acceptanceCommandId),
+        };
       })
       .sort((left, right) => right.metadata.position - left.metadata.position)
-      .map(({ run, metadata }) => ({
+      .map(({ run, metadata, presentation }) => ({
         schemaVersion: 1 as const,
         runId: run.runId,
         projectId: run.projectId,
@@ -342,6 +371,8 @@ export class WorkflowSurface<TResult = unknown> {
         streamVersion: run.streamVersion,
         approvalState: run.authority.approvalState,
         acceptedAt: metadata.recordedAt,
+        ...(presentation === undefined ? {} : { presentation }),
+        attentionRequired: this.allAttention(run.runId).some((item) => item.status === "pending"),
       })));
   }
 
@@ -402,9 +433,17 @@ export class WorkflowSurface<TResult = unknown> {
   private runDetail(runId: string): WorkflowRunDetail | null {
     const run = this.runs.reopen(runId);
     if (run === null) return null;
+    const runEvents = this.runs.readStream(runId);
+    const acceptedAt = runEvents[0]?.recordedAt;
+    const updatedAt = runEvents.at(-1)?.recordedAt;
     const decisions = this.allAttention(runId);
+    const commandEvidence = this.commandEvidence(run);
+    const submission = commandEvidence.find((item): item is WorkflowSubmissionCommandEvidence => item.kind === "run_submission");
     return json({
       schemaVersion: 1 as const,
+      ...(acceptedAt === undefined ? {} : { acceptedAt }),
+      ...(updatedAt === undefined ? {} : { updatedAt }),
+      ...(submission?.presentation === undefined ? {} : { presentation: submission.presentation }),
       run,
       intake: this.intake(run),
       analysis: this.analysis(runId),
@@ -412,7 +451,7 @@ export class WorkflowSurface<TResult = unknown> {
       questions: decisions.filter((item) => item.kind === "question"),
       approvals: decisions.filter((item) => item.kind === "approval"),
       attention: decisions,
-      commandEvidence: this.commandEvidence(run),
+      commandEvidence,
       planning: this.planning(run, decisions),
     });
   }
@@ -913,6 +952,41 @@ function validateSubmission(input: RunSubmission): RunSubmission {
     return json(input);
   }
   throw new Error("unsupported run submission kind");
+}
+
+function validatedSubmissionPresentation(
+  run: RunView,
+  payload: WorkflowSubmissionCommandEvidence | undefined,
+  acceptanceCommandId: string,
+): WorkflowRunPresentation | undefined {
+  if (payload === undefined) return undefined;
+  const { evidenceSha256, ...body } = payload;
+  if (digestCanonical(body) !== evidenceSha256 || payload.kind !== "run_submission" ||
+    payload.runId !== run.runId || payload.source.kind !== run.source.kind ||
+    payload.source.referenceSha256 !== run.source.referenceSha256 ||
+    payload.actor.actorId !== run.actor.actorId || payload.actor.kind !== run.actor.kind) {
+    throw new Error("workflow submission evidence contradicts the accepted run");
+  }
+  if ((payload.actor.channel !== "cli" && payload.actor.channel !== "ui") ||
+    payload.acceptanceCommandId !== acceptanceCommandId) {
+    throw new Error("workflow submission evidence contradicts the acceptance command");
+  }
+  return validatePresentation(payload.presentation, run.source.kind);
+}
+
+function validatePresentation(
+  presentation: WorkflowRunPresentation | undefined,
+  sourceKind: RunView["source"]["kind"],
+): WorkflowRunPresentation | undefined {
+  if (presentation === undefined) return undefined;
+  const expectedSource = sourceKind === "inline_goal" ? "Inline goal" : "Tickets";
+  const values = [presentation.title, presentation.projectName, presentation.workspace, presentation.sourceLabel];
+  if (values.some((value) => typeof value !== "string" || value.trim() === "" ||
+    Buffer.byteLength(value, "utf8") > 4_096 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) ||
+    presentation.sourceLabel !== expectedSource) {
+    throw new Error("workflow submission presentation is invalid");
+  }
+  return presentation;
 }
 
 function validateCaller(caller: WorkflowCallerContext): WorkflowCallerContext {

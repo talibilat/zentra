@@ -223,7 +223,8 @@ describe("startZentraService", () => {
       "service.shutdown",
     ]));
     expect(traceLines.at(-1)?.kind).toBe("service.shutdown");
-    const projectedEvents = events.filter(({ correlationId }) => correlationId === events[0]!.correlationId);
+    const projectedEvents = events.filter(({ correlationId, type }) =>
+      correlationId === events[0]!.correlationId || type === "scheduler.daemon_started");
     expect(traceLines).toEqual(projectedEvents.map(storedEventToAgentTailEvent));
     const traceByKind = new Map(traceLines.map((event) => [event.kind, event]));
     expect(traceByKind.get("agenttrail.failed")).toMatchObject({
