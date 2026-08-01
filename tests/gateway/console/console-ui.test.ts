@@ -17,7 +17,7 @@ describe("composed console document", () => {
   it("includes every section's markup and preserves controls' DOM ids", () => {
     const html = consoleHtml();
     expect(html).toContain('id="goal-form"');
-    expect(html).toContain('id="agenttrail-frame"');
+    expect(html).toContain('id="trail-events"');
     expect(html).toContain('id="overview-root"');
   });
 });

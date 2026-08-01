@@ -126,7 +126,7 @@ describe("packaged first-delivery browser and security conformance", () => {
         const expected = (await journalEvents(installedRoot, project)).filter((event) => event.projectable);
         agreementHighWater = expected.at(-1)?.globalPosition ?? 0;
         agreementJournalEventCount = expected.length;
-        await browser.wait(`document.getElementById("agenttrail-frame").contentDocument?.body != null`, 20_000);
+        await browser.wait(`(async()=>{try{const response=await fetch("/agenttrail/api/v1/runs");return response.ok}catch{return false}})()`, 20_000);
         await waitFor(async () => {
           const result = await agentTrailExport(browser);
           exportedEvents = result.events;
