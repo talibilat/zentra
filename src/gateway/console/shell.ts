@@ -200,9 +200,8 @@ document.addEventListener("click",(event)=>{
   menu.hidden=true;$("run-switcher-button").setAttribute("aria-expanded","false");
 });
 $("console-search")?.addEventListener("input",(event)=>{
-  // Placeholder for forward compatibility: nothing filters on state.search yet.
-  // Trail (Phase 2 of the Agent Rail Console redesign) is what will read this.
   state.search=event.target.value;
+  if(document.querySelector('.section[data-section-id="trail"]')?.dataset.active==="true")window.__consoleSections.trail?.render?.();
 });
 window.__consoleSections=window.__consoleSections||{};
 window.__consoleSections.shell={render:renderTopbar};
@@ -216,7 +215,6 @@ async function handoff(){
     const result=await session.json();if(!session.ok)throw new Error(result.error||"session_failed");
     window.__consoleSections=window.__consoleSections||{};
     window.__consoleSections.controls?.setSession?.(result.bearerToken,result.csrfToken);
-    document.getElementById("agenttrail-frame").src="/agenttrail/";
     await window.__consoleSections.controls?.refresh?.();
     status("Secure local session established.","ok");
     document.querySelector(".shell").dataset.ready="true";document.documentElement.dataset.ready="true";

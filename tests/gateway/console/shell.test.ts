@@ -33,8 +33,12 @@ describe("console shell", () => {
     expect(SHELL_SCRIPT).toContain("window.__consoleSections.controls?.connect?.()");
   });
 
-  it("re-establishes the AgentTrail iframe src after session handoff, since Task 4 removed the old dynamic assignment from controls-section.ts", () => {
-    expect(SHELL_SCRIPT).toContain('document.getElementById("agenttrail-frame").src="/agenttrail/"');
+  it("removes the dead agenttrail-frame reference from handoff and wires console-search to Trail's render", () => {
+    expect(SHELL_SCRIPT).not.toContain("agenttrail-frame");
+    const searchIndex = SHELL_SCRIPT.indexOf('$("console-search")?.addEventListener("input"');
+    expect(searchIndex).toBeGreaterThan(-1);
+    const searchBranch = SHELL_SCRIPT.slice(searchIndex, searchIndex + 300);
+    expect(searchBranch).toContain("window.__consoleSections.trail?.render?.()");
   });
 
   it("never loads a font from an external host", () => {

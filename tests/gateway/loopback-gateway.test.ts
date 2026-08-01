@@ -29,13 +29,14 @@ describe("LoopbackGateway", () => {
       expect(html).toContain('failure.error==="cursor_unavailable"');
       expect(html).toContain("state.cursor=0");
       expect(html).toContain('setText(button,"Expand source text")');
-      expect(html).toContain('id="agenttrail-frame"');
-      expect(html).toContain('title="AgentTrail evidence views"');
       expect(html).toContain('data-nav-id="trail"');
       expect(html).toContain('id="agenttrail-status"');
       expect(html).toContain('change.type==="gateway.degraded"');
       expect(html).toContain('change.type==="gateway.backfill_target"');
       expect(html).toContain('change.type==="gateway.recovered"');
+      expect(html).toContain('data-trail-view="events"');
+      expect(html).toContain('id="trail-events"');
+      expect(html).toContain('id="trail-inspector"');
       expect(html).not.toMatch(/innerHTML|outerHTML/);
       const script = html.match(/<script>([\s\S]+)<\/script>/)![1]!;
       expect(page.headers.get("content-security-policy")).toContain(
