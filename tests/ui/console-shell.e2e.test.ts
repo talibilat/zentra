@@ -25,6 +25,60 @@ function label(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+/**
+ * A small fake AgentTrail HTTP backend for e2e use, scoped to this file. Mirrors the shape of
+ * `fakeAgentTrail` in tests/gateway/loopback-gateway.test.ts (that helper is not exported, so this
+ * is a smaller standalone copy) - it serves exactly the `GET /api/v1/runs/:traceId` endpoint that
+ * LoopbackGateway#trailResult proxies through when reshaping Trail data for the console.
+ *
+ * The two fixture events use distinct actors ("pod-a" and "pod-b") so that clicking the first
+ * actor filter pill in the rendered UI actually narrows the visible event count - a fixture with a
+ * single shared actor across both events would make that filter a no-op.
+ */
+async function fakeAgentTrailForE2e(traceId: string): Promise<{
+  readonly address: { readonly host: "127.0.0.1"; readonly port: number };
+  close(): Promise<void>;
+}> {
+  const { createServer: createHttpServer } = await import("node:http");
+  const server = createHttpServer((request, response) => {
+    if (request.url === `/api/v1/runs/${traceId}`) {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        run: { trace_id: traceId },
+        duration_seconds: 12,
+        events: [
+          {
+            event_id: "evt-1", offset_seconds: 1, sequence: 1, kind: "tool.call.attempt",
+            actor: { id: "pod-a" }, operation: { status: "running", name: "run_tests" },
+            relationships: [], payload: { preview: { ok: true } },
+          },
+          {
+            event_id: "evt-2", offset_seconds: 2, sequence: 2, kind: "verification.finished",
+            actor: { id: "pod-b" }, operation: { status: "failed", error: "assertion mismatch" },
+            relationships: [{ type: "caused_by", event_id: "evt-1" }], payload: { preview: { detail: "boom" } },
+          },
+        ],
+        actors: [{ id: "pod-a", role: "implementation" }, { id: "pod-b", role: "verification" }],
+      }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  const port = await new Promise<number>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") { reject(new Error("fake AgentTrail did not bind")); return; }
+      resolve(address.port);
+    });
+  });
+  return {
+    address: { host: "127.0.0.1", port },
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))),
+  };
+}
+
 async function consoleShellWorkflow(root: string): Promise<{ readonly workflow: WorkflowSurface; readonly journal: SqliteEventJournal }> {
   execFileSync("/usr/bin/git", ["init", root], { env: { HOME: root }, stdio: "ignore" });
   execFileSync("/usr/bin/git", ["config", "user.name", "Zentra Browser Test"], { cwd: root, env: { HOME: root } });
@@ -75,7 +129,7 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
     }
   }, 60_000);
 
-  it("switches to the Trail nav item and confirms the restyled chrome still targets the embedded AgentTrail route", async () => {
+  it("switches to the Trail nav item and shows the honest unavailable state when AgentTrail is not configured", async () => {
     const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-trail-e2e-")));
     temporaryDirectories.push(root);
     const fixture = await consoleShellWorkflow(root);
@@ -86,10 +140,54 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const driver = await ChromiumWorkflowDriver.open(session.url, root);
       await driver.click('[data-nav-id="trail"]');
       await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
-      const frameSrc = await driver.evaluate<string>(`document.getElementById("agenttrail-frame")?.getAttribute("src") || ""`);
-      expect(frameSrc).toBe("/agenttrail/");
+      await driver.waitFor(`document.getElementById("trail-events")?.textContent.includes("Trace evidence unavailable.")`);
+      const disabledTabs = await driver.evaluate<number>(`document.querySelectorAll('[data-trail-view][disabled]').length`);
+      expect(disabledTabs).toBe(3);
     } finally {
       await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("renders real Trail events and inspector detail from a live AgentTrail backend", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-trail-events-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    let upstream: Awaited<ReturnType<typeof fakeAgentTrailForE2e>> | null = null;
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      // The console's own workflow run id is what the gateway forwards verbatim as the upstream
+      // AgentTrail path segment (see LoopbackGateway#trailResult), so the fake AgentTrail backend
+      // is keyed by the real submitted run id rather than an invented trace id. This also avoids
+      // reaching for the page's module-scoped `state` object, which is not reachable from outside
+      // the console script's IIFE closure and therefore cannot be poked via `driver.evaluate`.
+      const submittedRunId = await driver.submitGoal("Prove Trail renders real events");
+      upstream = await fakeAgentTrailForE2e(submittedRunId);
+      gateway.setAgentTrailAddress(upstream.address);
+      await driver.click('[data-nav-id="trail"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
+      await driver.evaluate(`window.__consoleSections.trail.render()`);
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
+      await driver.click('#trail-filter-pills button');
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "1 of 2 events"`);
+      await driver.click('#trail-filter-pills button');
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
+      const eventButtons = await driver.evaluate<number>(`document.querySelectorAll("#trail-events button").length`);
+      expect(eventButtons).toBe(2);
+      await driver.evaluate(`document.querySelectorAll("#trail-events button")[1].click()`);
+      // The inspector's structured fields (event_id/actor/status/sequence/evidence) don't surface
+      // `operation.error`; only the raw payload JSON and the event list row's summary column do
+      // (see trail-section.ts's renderTrailInspectorEvent vs. renderTrailEvents). So the oracle
+      // here is the payload's distinctive "boom" detail flowing all the way from the fake
+      // AgentTrail backend, through the gateway's real reshape, into the rendered inspector panel.
+      await driver.waitFor(`document.getElementById("trail-inspector")?.textContent.includes("evt-2") && document.getElementById("trail-inspector")?.textContent.includes("boom")`);
+      expect(submittedRunId).toMatch(/^run-/);
+    } finally {
+      await gateway.close();
+      if (upstream !== null) await upstream.close();
       fixture.journal.close();
     }
   }, 60_000);
