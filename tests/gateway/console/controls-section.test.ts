@@ -24,4 +24,9 @@ describe("controls section", () => {
   it("notifies the Overview section whenever the selected run changes", () => {
     expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.overview?.render?.()");
   });
+
+  it("extracts pending attention card titles from item.packet, not the raw kind", () => {
+    expect(CONTROLS_SCRIPT).toContain('value(item.packet||{},["summary","question"],value(item,["message","kind"],"Decision"))');
+    expect(CONTROLS_SCRIPT).not.toContain('value(item,["title","question","kind"],"Decision")');
+  });
 });
