@@ -338,6 +338,92 @@ describe("LoopbackGateway", () => {
   });
 });
 
+describe("LoopbackGateway trail endpoint", () => {
+  it("reshapes AgentTrail's run detail into the console's trail view", async () => {
+    const upstream = await fakeAgentTrail();
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setAgentTrailAddress(upstream.address);
+    gateway.setReadiness("ready");
+    try {
+      const auth = await establish(session);
+      const body = await apiJson(session, auth, "/runs/trace-1/trail") as {
+        runId: string; durationSeconds: number; events: unknown[]; actors: unknown[];
+      };
+      expect(body.runId).toBe("trace-1");
+      expect(body.durationSeconds).toBe(42.5);
+      expect(body.events).toHaveLength(2);
+      expect(body.actors).toHaveLength(1);
+    } finally {
+      await gateway.close();
+      await upstream.close();
+    }
+  });
+
+  it("responds agenttrail_unavailable when AgentTrail's address is not configured", async () => {
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const auth = await establish(session);
+      const response = await api(session, auth, "/runs/trace-1/trail");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "agenttrail_unavailable" });
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("propagates not_found when AgentTrail has no such trace", async () => {
+    const upstream = await fakeAgentTrail();
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setAgentTrailAddress(upstream.address);
+    gateway.setReadiness("ready");
+    try {
+      const auth = await establish(session);
+      const response = await api(session, auth, "/runs/unknown-trace/trail");
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "not_found" });
+    } finally {
+      await gateway.close();
+      await upstream.close();
+    }
+  });
+
+  it("responds agenttrail_unavailable when the upstream body cannot be reshaped", async () => {
+    const upstream = await fakeAgentTrail();
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setAgentTrailAddress(upstream.address);
+    gateway.setReadiness("ready");
+    try {
+      const auth = await establish(session);
+      const response = await api(session, auth, "/runs/malformed-trace/trail");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "agenttrail_unavailable" });
+    } finally {
+      await gateway.close();
+      await upstream.close();
+    }
+  });
+
+  it("requires a bearer token like every other zentra route", async () => {
+    const upstream = await fakeAgentTrail();
+    const gateway = new LoopbackGateway({ workflow: workflow() });
+    const session = await gateway.start();
+    gateway.setAgentTrailAddress(upstream.address);
+    gateway.setReadiness("ready");
+    try {
+      const response = await fetch(`${session.origin}/api/v1/zentra/runs/trace-1/trail`);
+      expect(response.status).toBe(401);
+    } finally {
+      await gateway.close();
+      await upstream.close();
+    }
+  });
+});
+
 interface FakeChange {
   readonly globalPosition: number;
   readonly eventId: string;
@@ -450,6 +536,38 @@ async function fakeAgentTrail(traceId = "trace-1"): Promise<{
       response.setHeader("set-cookie", "upstream=unsafe");
       response.setHeader("access-control-allow-origin", "*");
       response.end(request.method === "HEAD" ? undefined : JSON.stringify([{ trace_id: traceId }]));
+      return;
+    }
+    if (request.url === `/api/v1/runs/${traceId}`) {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        run: { trace_id: traceId },
+        duration_seconds: 42.5,
+        events: [
+          {
+            event_id: "evt-1", offset_seconds: 1.5, sequence: 1, kind: "tool.call.attempt",
+            actor: { id: "pod-a" }, operation: { status: "running", name: "run_tests" },
+            relationships: [], payload: { preview: { ok: true } },
+          },
+          {
+            event_id: "evt-2", offset_seconds: 3.25, sequence: 2, kind: "verification.finished",
+            actor: { id: "pod-a" }, operation: { status: "failed", error: "assertion mismatch" },
+            relationships: [{ type: "caused_by", event_id: "evt-1" }], payload: { preview: { detail: "boom" } },
+          },
+        ],
+        actors: [{ id: "pod-a", role: "implementation" }],
+      }));
+      return;
+    }
+    if (request.url === "/api/v1/runs/unknown-trace") {
+      response.statusCode = 404;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    if (request.url === "/api/v1/runs/malformed-trace") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify("not an object"));
       return;
     }
     if (request.url === "/api/v1/events?cursor=7") {

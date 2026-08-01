@@ -15,6 +15,7 @@ import {
 } from "../surfaces/workflow-surface.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
 import { CONSOLE_SCRIPT_SHA256, consoleHtml } from "./console/console-ui.js";
+import { reshapeTrail, type TrailView } from "./console/trail-reshape.js";
 import { CLI_CONTROL_AUTHORIZATION_SCHEME } from "../surfaces/http-workflow-client.js";
 
 const TOKEN_BYTES = 32;
@@ -399,6 +400,9 @@ export class LoopbackGateway {
           return this.sourceTextResult(response, result, runId, sourceId);
         }
         if (request.method === "GET" && segments.length === 3 && segments[2] === "attention" && url.search === "") return this.jsonResult(response, await this.invoke("listAttention", runId));
+        if (request.method === "GET" && segments.length === 3 && segments[2] === "trail" && url.search === "") {
+          return this.trailResult(response, runId);
+        }
         if (request.method === "POST" && segments.length === 3 && segments[2] === "cancel" && url.search === "") {
           const body = await this.readBody(request, response); if (body === null) return;
           const [input, caller] = this.commandBody(body, authentication);
@@ -424,6 +428,54 @@ export class LoopbackGateway {
     } catch (error) {
       return this.surfaceError(response, error);
     }
+  }
+
+  private async trailResult(response: ServerResponse, runId: string): Promise<void> {
+    if (this.agentTrailAddress === null) return this.respond(response, 503, { error: "agenttrail_unavailable" });
+    const upstream = await this.fetchAgentTrailJson(`/api/v1/runs/${encodeURIComponent(runId)}`);
+    if (upstream === null) return this.respond(response, 503, { error: "agenttrail_unavailable" });
+    if (upstream.status === 404) return this.respond(response, 404, { error: "not_found" });
+    if (upstream.status < 200 || upstream.status >= 300) return this.respond(response, 503, { error: "agenttrail_unavailable" });
+    let reshaped: TrailView;
+    try {
+      reshaped = reshapeTrail(upstream.body);
+    } catch {
+      return this.respond(response, 503, { error: "agenttrail_unavailable" });
+    }
+    return this.jsonResult(response, reshaped);
+  }
+
+  private fetchAgentTrailJson(path: string): Promise<{ readonly status: number; readonly body: unknown } | null> {
+    const address = this.agentTrailAddress;
+    if (address === null) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const upstreamRequest = httpRequest({
+        host: address.host,
+        port: address.port,
+        method: "GET",
+        path,
+        agent: false,
+        headers: { accept: "application/json" },
+      }, (upstream) => {
+        const status = upstream.statusCode ?? 502;
+        let size = 0;
+        let oversized = false;
+        const chunks: Buffer[] = [];
+        upstream.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_AGENTTRAIL_RESPONSE_BYTES) { oversized = true; upstream.destroy(); return; }
+          chunks.push(chunk);
+        });
+        upstream.once("error", () => resolve(null));
+        upstream.once("end", () => {
+          if (oversized) { resolve(null); return; }
+          try { resolve({ status, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
+          catch { resolve(null); }
+        });
+      });
+      upstreamRequest.once("error", () => resolve(null));
+      upstreamRequest.end();
+    });
   }
 
   private async streamEvents(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
