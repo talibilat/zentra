@@ -305,4 +305,37 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       fixture.journal.close();
     }
   }, 60_000);
+
+  it("renders all six static preview sections and confirms their action controls are genuinely inert", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-static-sections-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      const sections: Array<[string, string]> = [
+        ["warnings", "Warning triage"],
+        ["security", "Taint security audit"],
+        ["cost", "Outcome cost attribution"],
+        ["compare", "Run comparison"],
+        ["imports", "Session imports"],
+        ["policies", "Warning policies"],
+      ];
+      for (const [navId, heading] of sections) {
+        await driver.click(`[data-nav-id="${navId}"]`);
+        await driver.waitFor(`document.querySelector('[data-section-id="${navId}"]')?.dataset.active === "true"`);
+        const headingText = await driver.evaluate<string>(`document.querySelector('[data-section-id="${navId}"] h1')?.textContent || ""`);
+        expect(headingText).toBe(heading);
+      }
+      await driver.click('[data-nav-id="warnings"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="warnings"]')?.dataset.active === "true"`);
+      const ackDisabled = await driver.evaluate<boolean>(`[...document.querySelectorAll('[data-section-id="warnings"] button')].some(button=>button.textContent==="Acknowledge"&&button.disabled===true)`);
+      expect(ackDisabled).toBe(true);
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
 });
