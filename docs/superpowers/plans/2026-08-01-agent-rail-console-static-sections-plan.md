@@ -34,6 +34,8 @@
 Create `tests/gateway/console/warnings-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { WARNINGS_MARKUP, WARNINGS_SCRIPT } from "../../../src/gateway/console/warnings-section.js";
@@ -62,7 +64,8 @@ describe("warnings section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = WARNINGS_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/warnings-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
@@ -160,6 +163,8 @@ git commit -m "Add Warnings console section with static example data"
 Create `tests/gateway/console/security-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { SECURITY_MARKUP, SECURITY_SCRIPT } from "../../../src/gateway/console/security-section.js";
@@ -188,7 +193,8 @@ describe("security section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = SECURITY_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/security-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
@@ -305,6 +311,8 @@ git commit -m "Add Security console section with static example data"
 Create `tests/gateway/console/cost-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { COST_MARKUP, COST_SCRIPT } from "../../../src/gateway/console/cost-section.js";
@@ -332,7 +340,8 @@ describe("cost section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = COST_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/cost-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
@@ -462,6 +471,8 @@ git commit -m "Add Cost console section with static example data"
 Create `tests/gateway/console/compare-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { COMPARE_MARKUP, COMPARE_SCRIPT } from "../../../src/gateway/console/compare-section.js";
@@ -491,7 +502,8 @@ describe("compare section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = COMPARE_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/compare-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
@@ -623,6 +635,8 @@ git commit -m "Add Compare console section with one static example comparison"
 Create `tests/gateway/console/imports-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { IMPORTS_MARKUP, IMPORTS_SCRIPT } from "../../../src/gateway/console/imports-section.js";
@@ -654,7 +668,8 @@ describe("imports section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = IMPORTS_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/imports-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
@@ -746,6 +761,8 @@ git commit -m "Add Imports console section with static example data"
 Create `tests/gateway/console/policies-section.test.ts`:
 
 ```typescript
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { POLICIES_MARKUP, POLICIES_SCRIPT } from "../../../src/gateway/console/policies-section.js";
@@ -773,7 +790,8 @@ describe("policies section", () => {
   });
 
   it("isolates font-stack interpolation inside single-quoted constants, never a double-quoted string", () => {
-    const lines = POLICIES_SCRIPT.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
+    const source = readFileSync("src/gateway/console/policies-section.ts", "utf8");
+    const lines = source.split("\n").filter((line) => line.includes("CONSOLE_FONT_STACK"));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/"[^"]*\$\{CONSOLE_FONT_STACK_(MONO|SANS)\}/);
