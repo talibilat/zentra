@@ -36,6 +36,9 @@ const renderCost=()=>{
   }
   const actorHeading=document.createElement("h2");actorHeading.style.cssText="margin:26px 0 12px;font:600 14px "+costFontSans;setText(actorHeading,"By actor");
   const actorTable=document.createElement("div");actorTable.style.cssText="max-width:900px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden";
+  const actorHeaderRow=document.createElement("div");actorHeaderRow.style.cssText="display:grid;grid-template-columns:1.3fr .8fr .8fr .8fr 2fr;gap:0;padding:10px 18px;border-bottom:1px solid var(--line);font:600 10px "+costFontMono+";color:var(--faint);letter-spacing:.8px";
+  for(const label of ["ACTOR","TOKENS IN","TOKENS OUT","COST","SHARE"]){const cell=document.createElement("span");if(label!=="ACTOR")cell.style.textAlign="right";setText(cell,label);actorHeaderRow.append(cell)}
+  actorTable.append(actorHeaderRow);
   const maxShare=Math.max(...COST_DEMO_DATA.rows.map((row)=>row.share));
   for(const row of COST_DEMO_DATA.rows){
     const rowEl=document.createElement("div");rowEl.style.cssText="display:grid;grid-template-columns:1.3fr .8fr .8fr .8fr 2fr;gap:0;padding:11px 18px;border-bottom:1px solid var(--line);align-items:center";
@@ -43,12 +46,13 @@ const renderCost=()=>{
     const tinEl=document.createElement("span");tinEl.style.cssText="text-align:right;font:500 12px "+costFontMono;setText(tinEl,row.tin);
     const toutEl=document.createElement("span");toutEl.style.cssText="text-align:right;font:500 12px "+costFontMono;setText(toutEl,row.tout);
     const costEl=document.createElement("span");costEl.style.cssText="text-align:right;font:600 12px "+costFontMono+";color:var(--warn)";setText(costEl,row.cost);
-    const barWrap=document.createElement("span");barWrap.style.cssText="padding-left:20px;display:block;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden";
+    const barWrap=document.createElement("span");barWrap.style.cssText="margin-left:20px;display:block;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden";
     const bar=document.createElement("span");bar.style.cssText="display:block;height:100%;background:var(--accent);width:"+Math.round(row.share/maxShare*100)+"%";
     barWrap.append(bar);
     rowEl.append(actorEl,tinEl,toutEl,costEl,barWrap);
     actorTable.append(rowEl);
   }
+  if(actorTable.lastElementChild)actorTable.lastElementChild.style.borderBottom="none";
   const hunkHeading=document.createElement("h2");hunkHeading.style.cssText="margin:26px 0 12px;font:600 14px "+costFontSans;setText(hunkHeading,"Hunk-level attribution");
   const hunkList=document.createElement("div");hunkList.style.cssText="max-width:900px;display:flex;flex-direction:column;gap:10px";
   for(const hunk of COST_DEMO_DATA.hunks){

@@ -24,7 +24,7 @@ describe("composed console document", () => {
 
   it("includes the six newly-wired sections' data-screen-label markers", () => {
     const html = consoleHtml();
-    for (const label of ["Warnings", "Security", "Cost", "Compare", "Imports", "Policies"]) {
+    for (const label of ["Warnings", "Security", "Cost", "Compare runs", "Imports", "Warning policies"]) {
       expect(html).toContain(`data-screen-label="${label}"`);
     }
   });
@@ -34,5 +34,12 @@ describe("composed console document", () => {
     const match = /<script>([\s\S]*)<\/script>/.exec(html);
     expect(match).not.toBeNull();
     expect(() => new Script(match![1]!)).not.toThrow();
+  });
+
+  it("concatenates all six new sections' scripts into the composed document, not just their markup", () => {
+    const html = consoleHtml();
+    for (const call of ["renderWarnings();", "renderSecurity();", "renderCost();", "renderCompare();", "renderImports();", "renderPolicies();"]) {
+      expect(html).toContain(call);
+    }
   });
 });

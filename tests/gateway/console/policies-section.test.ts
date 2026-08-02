@@ -39,4 +39,9 @@ describe("policies section", () => {
     expect(POLICIES_SCRIPT).toContain("window.__consoleSections.policies={render:renderPolicies}");
     expect(POLICIES_SCRIPT.trim().endsWith("renderPolicies();")).toBe(true);
   });
+
+  it("does not depend on the currently selected run", () => {
+    expect(POLICIES_SCRIPT).not.toContain("currentRun()");
+    expect(POLICIES_SCRIPT).not.toContain("state.selected");
+  });
 });

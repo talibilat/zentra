@@ -299,7 +299,7 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       expect(placeholderCount).toBeGreaterThanOrEqual(5);
 
       const warningsText = await driver.evaluate<string>(`document.getElementById("overview-root")?.textContent || ""`);
-      expect(warningsText).toContain("Warning triage lands in a later phase.");
+      expect(warningsText).toContain("Warning triage has no real backend yet - the Warnings section shows a static preview.");
     } finally {
       await gateway.close();
       fixture.journal.close();

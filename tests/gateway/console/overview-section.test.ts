@@ -16,7 +16,7 @@ describe("overview section", () => {
   });
 
   it("shows an honest placeholder for top warnings instead of fabricated warning cards", () => {
-    expect(OVERVIEW_SCRIPT).toContain("Warning triage lands in a later phase.");
+    expect(OVERVIEW_SCRIPT).toContain("Warning triage has no real backend yet - the Warnings section shows a static preview.");
   });
 
   it("builds the narrative from state.attention and state.history, not from fabricated demo data", () => {

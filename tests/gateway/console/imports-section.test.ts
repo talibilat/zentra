@@ -43,4 +43,9 @@ describe("imports section", () => {
     expect(IMPORTS_SCRIPT).toContain("window.__consoleSections.imports={render:renderImports}");
     expect(IMPORTS_SCRIPT.trim().endsWith("renderImports();")).toBe(true);
   });
+
+  it("does not depend on the currently selected run", () => {
+    expect(IMPORTS_SCRIPT).not.toContain("currentRun()");
+    expect(IMPORTS_SCRIPT).not.toContain("state.selected");
+  });
 });

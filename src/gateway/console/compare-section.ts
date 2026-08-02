@@ -1,6 +1,6 @@
 import { CONSOLE_FONT_STACK_MONO, CONSOLE_FONT_STACK_SANS } from "./design-tokens.js";
 
-export const COMPARE_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Compare" id="compare-root"></div>`;
+export const COMPARE_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Compare runs" id="compare-root"></div>`;
 
 export const COMPARE_SCRIPT = String.raw`const compareFontSans='${CONSOLE_FONT_STACK_SANS}';
 const compareFontMono='${CONSOLE_FONT_STACK_MONO}';
@@ -25,6 +25,7 @@ const compareRunCard=(label,color,run)=>{const card=document.createElement("div"
 const compareFactColumn=(title,color,sign,facts)=>{
   const section=document.createElement("section");section.style.cssText="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px";
   const heading=document.createElement("h2");heading.style.cssText="margin:0 0 12px;font:600 13px "+compareFontSans+";color:"+color;setText(heading,title+" ("+facts.length+" facts)");
+  section.append(heading);
   for(const fact of facts){
     const row=document.createElement("div");row.style.cssText="display:flex;gap:9px;padding:7px 0;border-bottom:1px solid var(--line);font:400 12px/1.5 "+compareFontSans+";color:var(--text)";
     const signEl=document.createElement("span");signEl.style.cssText="color:"+color+";font-family:"+compareFontMono+";flex:none";setText(signEl,sign);
@@ -35,7 +36,8 @@ const compareFactColumn=(title,color,sign,facts)=>{
     row.append(signEl,textEl);
     section.append(row);
   }
-  section.prepend(heading);
+  const lastFactRow=section.lastElementChild;
+  if(lastFactRow&&lastFactRow!==heading)lastFactRow.style.borderBottom="none";
   return section;
 };
 const renderCompare=()=>{
@@ -65,6 +67,7 @@ const renderCompare=()=>{
     rowEl.append(metricEl,aEl,bEl,deltaEl);
     deltaTable.append(rowEl);
   }
+  if(deltaTable.lastElementChild)deltaTable.lastElementChild.style.borderBottom="none";
   host.append(heading,note,runRow,divergence,factsGrid,deltaHeading,deltaTable);
 };
 window.__consoleSections=window.__consoleSections||{};

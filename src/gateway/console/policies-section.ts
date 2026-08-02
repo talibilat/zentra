@@ -1,6 +1,6 @@
 import { CONSOLE_FONT_STACK_MONO, CONSOLE_FONT_STACK_SANS } from "./design-tokens.js";
 
-export const POLICIES_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Policies" id="policies-root"></div>`;
+export const POLICIES_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Warning policies" id="policies-root"></div>`;
 
 export const POLICIES_SCRIPT = String.raw`const policiesFontSans='${CONSOLE_FONT_STACK_SANS}';
 const policiesFontMono='${CONSOLE_FONT_STACK_MONO}';
@@ -37,6 +37,7 @@ const renderPolicies=()=>{
     rowEl.append(opEl,loopEl,retryEl,countEl,ruleCell);
     table.append(rowEl);
   }
+  if(table.lastElementChild)table.lastElementChild.style.borderBottom="none";
   host.append(heading,note,infoBar,table);
 };
 window.__consoleSections=window.__consoleSections||{};
