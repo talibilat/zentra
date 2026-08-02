@@ -22,6 +22,13 @@ describe("composed console document", () => {
     expect(html).toContain('id="overview-root"');
   });
 
+  it("includes the six newly-wired sections' data-screen-label markers", () => {
+    const html = consoleHtml();
+    for (const label of ["Warnings", "Security", "Cost", "Compare", "Imports", "Policies"]) {
+      expect(html).toContain(`data-screen-label="${label}"`);
+    }
+  });
+
   it("produces a script that parses as valid JavaScript", () => {
     const html = consoleHtml();
     const match = /<script>([\s\S]*)<\/script>/.exec(html);

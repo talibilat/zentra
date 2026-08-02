@@ -2,6 +2,12 @@ import { CONSOLE_DESIGN_TOKENS, CONSOLE_FONT_STACK_MONO, CONSOLE_FONT_STACK_SANS
 import { CONTROLS_MARKUP } from "./controls-section.js";
 import { TRAIL_MARKUP } from "./trail-section.js";
 import { OVERVIEW_MARKUP } from "./overview-section.js";
+import { WARNINGS_MARKUP } from "./warnings-section.js";
+import { SECURITY_MARKUP } from "./security-section.js";
+import { COST_MARKUP } from "./cost-section.js";
+import { COMPARE_MARKUP } from "./compare-section.js";
+import { IMPORTS_MARKUP } from "./imports-section.js";
+import { POLICIES_MARKUP } from "./policies-section.js";
 
 interface NavItem { readonly id: string; readonly label: string; readonly icon: string; readonly enabled: boolean; }
 interface NavGroup { readonly label: string; readonly items: readonly NavItem[]; }
@@ -11,13 +17,13 @@ const NAV_GROUPS: readonly NavGroup[] = [
   { label: "OBSERVE", items: [
     { id: "overview", label: "Overview", icon: "◉", enabled: true },
     { id: "trail", label: "Trail", icon: "⬡", enabled: true },
-    { id: "warnings", label: "Warnings", icon: "△", enabled: false },
-    { id: "security", label: "Security", icon: "⛨", enabled: false },
-    { id: "cost", label: "Cost", icon: "◔", enabled: false },
+    { id: "warnings", label: "Warnings", icon: "△", enabled: true },
+    { id: "security", label: "Security", icon: "⛨", enabled: true },
+    { id: "cost", label: "Cost", icon: "◔", enabled: true },
   ] },
   { label: "ANALYZE", items: [
-    { id: "compare", label: "Compare runs", icon: "⑂", enabled: false },
-    { id: "imports", label: "Imports", icon: "⇥", enabled: false },
+    { id: "compare", label: "Compare runs", icon: "⑂", enabled: true },
+    { id: "imports", label: "Imports", icon: "⇥", enabled: true },
   ] },
   { label: "ZENTRA", items: [
     { id: "pods", label: "Pods", icon: "⬢", enabled: false },
@@ -25,7 +31,7 @@ const NAV_GROUPS: readonly NavGroup[] = [
     { id: "github", label: "GitHub broker", icon: "⎇", enabled: false },
     { id: "journal", label: "Journal", icon: "≣", enabled: false },
   ] },
-  { label: "CONFIG", items: [{ id: "policies", label: "Warning policies", icon: "⚙", enabled: false }] },
+  { label: "CONFIG", items: [{ id: "policies", label: "Warning policies", icon: "⚙", enabled: true }] },
 ];
 
 function renderNav(): string {
@@ -142,6 +148,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed0c8;background:#07100d
     <section class="section" data-section-id="controls">${CONTROLS_MARKUP}</section>
     <section class="section" data-section-id="overview">${OVERVIEW_MARKUP}</section>
     <section class="section" data-section-id="trail">${TRAIL_MARKUP}</section>
+    <section class="section" data-section-id="warnings">${WARNINGS_MARKUP}</section>
+    <section class="section" data-section-id="security">${SECURITY_MARKUP}</section>
+    <section class="section" data-section-id="cost">${COST_MARKUP}</section>
+    <section class="section" data-section-id="compare">${COMPARE_MARKUP}</section>
+    <section class="section" data-section-id="imports">${IMPORTS_MARKUP}</section>
+    <section class="section" data-section-id="policies">${POLICIES_MARKUP}</section>
   </div>
 </div>
 </body></html>`;
