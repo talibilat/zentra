@@ -106,7 +106,7 @@ const renderOverview=()=>{
   setText(warningsHeading,"Top warnings");
   const warningsEmpty=document.createElement("p");
   warningsEmpty.className="empty";
-  setText(warningsEmpty,"Warning triage lands in a later phase.");
+  setText(warningsEmpty,"Warning triage has no real backend yet - the Warnings section shows a static preview.");
   warningsSection.append(warningsHeading,warningsEmpty);
 
   sidebar.append(outcomeSection,warningsSection);

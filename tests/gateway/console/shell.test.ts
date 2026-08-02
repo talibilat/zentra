@@ -121,4 +121,23 @@ describe("console shell", () => {
     expect(SHELL_SCRIPT).toContain('terminalOutcome==="completed"');
     expect(SHELL_SCRIPT).toContain('terminalOutcome==="cancelled"');
   });
+
+  it("enables the Warnings/Security/Cost/Compare/Imports/Warning-policies nav items and embeds their sections", () => {
+    for (const id of ["warnings", "security", "cost", "compare", "imports", "policies"]) {
+      const start = SHELL_MARKUP.indexOf(`data-nav-id="${id}"`);
+      expect(start).toBeGreaterThan(-1);
+      const tag = SHELL_MARKUP.slice(start, SHELL_MARKUP.indexOf("</button>", start));
+      expect(tag).not.toContain("disabled");
+      expect(tag).not.toContain('class="badge"');
+    }
+    for (const id of ["warnings", "security", "cost", "compare", "imports", "policies"]) {
+      expect(SHELL_MARKUP).toContain(`data-section-id="${id}"`);
+    }
+    expect(SHELL_MARKUP).toContain('id="warnings-root"');
+    expect(SHELL_MARKUP).toContain('id="security-root"');
+    expect(SHELL_MARKUP).toContain('id="cost-root"');
+    expect(SHELL_MARKUP).toContain('id="compare-root"');
+    expect(SHELL_MARKUP).toContain('id="imports-root"');
+    expect(SHELL_MARKUP).toContain('id="policies-root"');
+  });
 });
