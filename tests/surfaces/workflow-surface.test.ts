@@ -11,7 +11,9 @@ import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.j
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { PlanningCoordinator } from "../../src/planning/planning-coordinator.js";
 import { APPROVED_VALIDATION_EXECUTABLE, ProjectConfigSchema, createValidationIdentitySnapshot } from "../../src/projects/project-config.js";
+import { PodRegistry } from "../../src/pods/pod-registry.js";
 import { RunService } from "../../src/runs/run-service.js";
+import { charter } from "../pods/pod-fixtures.js";
 import {
   WorkflowSurface,
   WorkflowSurfaceError,
@@ -69,6 +71,27 @@ describe("WorkflowSurface", () => {
     const reopened = new SqliteEventJournal(database);
     expect(surfaceFor(reopened).getRun("run-new")).toEqual(first);
     reopened.close();
+  });
+
+  it("lists registered pods by bounded replay of pod.registered events", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    const registry = new PodRegistry(journal);
+    registry.register({ charter: charter({ podId: "pod-a" }), correlationId: "trace-a" });
+    registry.register({ charter: charter({ podId: "pod-b" }), correlationId: "trace-b" });
+
+    const pods = surfaceFor(journal).listPods();
+
+    expect(pods.map((pod) => pod.podId)).toEqual(["pod-a", "pod-b"]);
+    expect(pods[0]).toMatchObject({ podId: "pod-a", projectId: "zentra", lifecycle: "registered", revision: 1 });
+    journal.close();
+  });
+
+  it("returns an empty list when no pods are registered", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    expect(surfaceFor(journal).listPods()).toEqual([]);
+    journal.close();
   });
 
   it("keeps run detail metadata-only and reads verified text through exact run and source binding", () => {

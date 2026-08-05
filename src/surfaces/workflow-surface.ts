@@ -41,6 +41,8 @@ import {
 import type { PlanningAuthorityEnvelope } from "../planning/planning-contracts.js";
 import type { PlanningView } from "../planning/planning-projection.js";
 import { PlanningCoordinator } from "../planning/planning-coordinator.js";
+import type { PodView } from "../pods/pod-projection.js";
+import { PodRegistry } from "../pods/pod-registry.js";
 import {
   RunIntakeCompletedPayloadSchema,
   runStreamId,
@@ -330,6 +332,10 @@ export class WorkflowSurface<TResult = unknown> {
 
   listRuns(): readonly WorkflowRunSummary[] {
     return this.guard(() => this.listRunsProjection());
+  }
+
+  listPods(): readonly PodView[] {
+    return this.guard(() => new PodRegistry(this.journal).list());
   }
 
   private listRunsProjection(): readonly WorkflowRunSummary[] {
