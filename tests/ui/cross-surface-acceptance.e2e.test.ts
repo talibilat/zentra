@@ -136,7 +136,7 @@ describe("workflow UI and CLI acceptance", () => {
       "button:Cancel run",
       "button:⬡ Trail",
     ]));
-    expect(browserResult.focusOrder.slice(0, 13)).toEqual([
+    expect(browserResult.focusOrder.slice(0, 14)).toEqual([
       "button::▶ Controls",
       "button::◉ Overview",
       "button::⬡ Trail",
@@ -145,6 +145,7 @@ describe("workflow UI and CLI acceptance", () => {
       "button::◔ Cost",
       "button::⑂ Compare runs",
       "button::⇥ Imports",
+      "button::⬢ Pods",
       "button::⚙ Warning policies",
       expect.stringMatching(/^button:run-switcher-button:tickets/u),
       "textarea:goal:Goal",

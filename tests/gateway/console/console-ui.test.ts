@@ -20,6 +20,7 @@ describe("composed console document", () => {
     expect(html).toContain('id="goal-form"');
     expect(html).toContain('id="trail-events"');
     expect(html).toContain('id="overview-root"');
+    expect(html).toContain('id="pods-list"');
   });
 
   it("includes the six newly-wired sections' data-screen-label markers", () => {
@@ -27,6 +28,11 @@ describe("composed console document", () => {
     for (const label of ["Warnings", "Security", "Cost", "Compare runs", "Imports", "Warning policies"]) {
       expect(html).toContain(`data-screen-label="${label}"`);
     }
+  });
+
+  it("includes the Pods section's data-screen-label marker", () => {
+    const html = consoleHtml();
+    expect(html).toContain('data-screen-label="Pods"');
   });
 
   it("produces a script that parses as valid JavaScript", () => {
@@ -41,5 +47,10 @@ describe("composed console document", () => {
     for (const call of ["renderWarnings();", "renderSecurity();", "renderCost();", "renderCompare();", "renderImports();", "renderPolicies();"]) {
       expect(html).toContain(call);
     }
+  });
+
+  it("concatenates PODS_SCRIPT into the composed document", () => {
+    const html = consoleHtml();
+    expect(html).toContain("window.__consoleSections.pods={render:renderPods,load:loadPods}");
   });
 });

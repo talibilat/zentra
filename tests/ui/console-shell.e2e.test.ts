@@ -13,6 +13,8 @@ import { createLocalWorkflowSurface } from "../../src/surfaces/local-workflow.js
 import type { WorkflowSurface } from "../../src/surfaces/workflow-surface.js";
 import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 import { ChromiumWorkflowDriver, acceptanceBrowser } from "./chromium-acceptance.js";
+import { PodRegistry } from "../../src/pods/pod-registry.js";
+import { charter } from "../pods/pod-fixtures.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -333,6 +335,30 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       await driver.waitFor(`document.querySelector('[data-section-id="warnings"]')?.dataset.active === "true"`);
       const ackDisabled = await driver.evaluate<boolean>(`[...document.querySelectorAll('[data-section-id="warnings"] button')].some(button=>button.textContent==="Acknowledge"&&button.disabled===true)`);
       expect(ackDisabled).toBe(true);
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("enables the Pods nav item and renders a registered pod's detail on click", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-pods-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    new PodRegistry(fixture.journal).register({ charter: charter({ podId: "pod-e2e" }), correlationId: "trace-e2e" });
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="pods"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="pods"]')?.dataset.active === "true"`);
+      await driver.waitFor(`document.getElementById("pods-list")?.textContent.includes("pod-e2e")`);
+      await driver.click('#pods-list button.run-card');
+      await driver.waitFor(`document.getElementById("pod-detail")?.textContent.includes("Implement the pod aggregate.")`);
+      const detailText = await driver.evaluate<string>(`document.getElementById("pod-detail")?.textContent || ""`);
+      expect(detailText).toContain("pod-e2e");
+      expect(detailText).toContain("Registered");
     } finally {
       await gateway.close();
       fixture.journal.close();
