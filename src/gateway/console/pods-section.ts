@@ -3,7 +3,7 @@ export const PODS_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px
 export const PODS_SCRIPT = String.raw`let podsState=[];let podsSelectedId=null;let podsLoadFailed=false;
 const loadPods=async()=>{
   try{const result=await request("/api/v1/zentra/pods");podsState=list(result,["pods"]);podsLoadFailed=false}
-  catch(error){podsState=[];podsLoadFailed=true}
+  catch{podsState=[];podsLoadFailed=true}
   if(podsSelectedId&&!podsState.some(pod=>pod.podId===podsSelectedId))podsSelectedId=null;
   renderPods();
 };
@@ -46,6 +46,7 @@ const renderPodDetail=()=>{
   appendJson(host,"Checkpoints",pod.checkpoints);
   appendJson(host,"Evidence",pod.evidence);
   appendJson(host,"Attention",pod.attention);
+  appendJson(host,"Cancellation",pod.cancellation);
   appendJson(host,"Reconciliation",pod.reconciliation);
 };
 const renderPods=()=>{renderPodsList();renderPodDetail()};
