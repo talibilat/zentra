@@ -244,6 +244,22 @@ describe("LoopbackGateway", () => {
     } finally { await gateway.close(); }
   });
 
+  it("exposes pods as a read-only, bearer-authenticated route", async () => {
+    const surface = workflow();
+    const gateway = new LoopbackGateway({ workflow: surface });
+    const session = await gateway.start(); gateway.setReadiness("ready");
+    try {
+      expect((await fetch(`${session.origin}/api/v1/zentra/pods`)).status).toBe(401);
+      const auth = await establish(session);
+      expect(await apiJson(session, auth, "/pods")).toEqual([
+        { podId: "pod-1", projectId: "zentra", lifecycle: "registered", revision: 1 },
+      ]);
+      expect(surface.listPods).toHaveBeenCalledTimes(1);
+      surface.listPods.mockReturnValueOnce([]);
+      expect(await apiJson(session, auth, "/pods")).toEqual([]);
+    } finally { await gateway.close(); }
+  });
+
   it("serves exact-limit source text independently from bounded JSON envelope overhead", async () => {
     const surface = workflow();
     const gateway = new LoopbackGateway({ workflow: surface });
@@ -459,6 +475,7 @@ function workflow(changes: FakeChange[] = []) {
   return {
     submitRun: vi.fn((input: unknown) => { append("run.accepted"); return { runId: "run-new", input }; }),
     listRuns: vi.fn(() => [{ runId: "run-1", lifecycle: "waiting" }]),
+    listPods: vi.fn(() => [{ podId: "pod-1", projectId: "zentra", lifecycle: "registered", revision: 1 }]),
     getRun: vi.fn((runId: string) => runId === "missing" ? null : ({ run: { runId, streamVersion: 4 }, planning: { readiness: { ready: false } } })),
     getSourceText: vi.fn((runId: string, sourceId: string) => ({ schemaVersion: 1, runId, sourceId,
       relativePath: "hostile.html", sizeBytes: 45, acceptedMaxBytes: 1024 * 1024, digest: "a".repeat(64),
