@@ -24,4 +24,8 @@ describe("controls section", () => {
   it("notifies the Overview section whenever the selected run changes", () => {
     expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.overview?.render?.()");
   });
+
+  it("reloads the Pods section on refresh", () => {
+    expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.pods?.load?.()");
+  });
 });

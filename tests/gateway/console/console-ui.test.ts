@@ -48,4 +48,9 @@ describe("composed console document", () => {
       expect(html).toContain(call);
     }
   });
+
+  it("concatenates PODS_SCRIPT into the composed document", () => {
+    const html = consoleHtml();
+    expect(html).toContain("window.__consoleSections.pods={render:renderPods,load:loadPods}");
+  });
 });
