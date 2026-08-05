@@ -27,6 +27,7 @@ Wire the Pods nav item to real data: a `GET /api/v1/zentra/pods` route backed by
 - Any mutation from the console for pods (register, admit, start, cancel, etc.) — read-only, consistent with every other console surface.
 - A `GET /pods/:podId` detail route. `PodRegistry.list()` already calls `inspect()` per pod internally, so the list response already contains full `PodView` detail for every pod — a separate detail fetch would just refetch data the list call already returned. Add it later only if something needs a single pod without the full list (e.g. a deep link).
 - Trail sub-steps 2/3 — unrelated, tracked separately.
+- A response-size ceiling on `GET /pods`. Unlike `sourceTextResult()`, this route returns the full `PodView[]` with no truncation. Acceptable at realistic local-orchestrator pod counts, but a known limitation worth revisiting if pod volume grows.
 
 ## Architecture
 
@@ -70,7 +71,7 @@ New file, same `<NAME>_MARKUP`/`<NAME>_SCRIPT` export pair as every other sectio
 ## Error handling
 
 - Empty pod list: "No pods yet." empty state, same convention as `renderRuns()`.
-- `listPods()` failure (500 `internal`, or any other `WorkflowSurfaceError` code): surfaces through the existing `status()` banner (`"Section unavailable: " + error.message`), same as Trail's `catch` behavior. No new error UI.
+- `listPods()` failure (500 `internal`, or any other `WorkflowSurfaceError` code): `loadPods()`'s `catch` sets a local `podsLoadFailed` flag (mirroring Trail's `trailLoadFailed`) and clears `podsState`, rather than raising through the shared `status()` banner. `renderPodsList()` then renders an inline "Pods unavailable." empty-state message in place of the list, same pattern as Trail's "Trace evidence unavailable." No new error UI beyond that inline message.
 - No 404 case exists for this route (list-only, no `:podId` param).
 
 ## Security
