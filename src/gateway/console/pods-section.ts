@@ -1,4 +1,4 @@
-export const PODS_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Pods"><section class="workspace" aria-label="Pods"><section class="panel"><h2>Pods</h2><div id="pods-list" class="stack"></div></section><section class="panel"><h2>Pod detail</h2><div id="pod-detail"></div></section></section></div>`;
+export const PODS_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Pods"><section class="workspace" data-columns="2" aria-label="Pods"><section class="panel"><h2>Pods</h2><div id="pods-list" class="stack"></div></section><section class="panel"><h2>Pod detail</h2><div id="pod-detail"></div></section></section></div>`;
 
 export const PODS_SCRIPT = String.raw`let podsState=[];let podsSelectedId=null;let podsLoadFailed=false;
 const loadPods=async()=>{
