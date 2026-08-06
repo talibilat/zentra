@@ -34,6 +34,8 @@ const renderGitHubBrokerDetail=()=>{
     field("Operation",githubBrokerOperationLabel(entry.operation)),
     field("Repository",entry.repository),
     field("Status",label(entry.status)),
+    entry.operation==="push"?field("Target ref",entry.detail.targetRef||"Unknown"):field("Head ref",entry.detail.headRef||"Unknown"),
+    entry.operation==="push"?field("Source commit",entry.detail.sourceCommit||"Unknown"):field("Base",entry.detail.base||"Unknown"),
   );
   host.append(heading,facts);
   appendJson(host,"Detail",entry.detail);

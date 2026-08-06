@@ -40,4 +40,9 @@ describe("github broker section", () => {
     expect(GITHUB_BROKER_SCRIPT).toContain("No GitHub broker activity yet.");
     expect(GITHUB_BROKER_SCRIPT).toContain("GitHub broker activity unavailable.");
   });
+
+  it("curates operation-specific detail fields for both push and pull request", () => {
+    expect(GITHUB_BROKER_SCRIPT).toContain("Target ref");
+    expect(GITHUB_BROKER_SCRIPT).toContain("Head ref");
+  });
 });
