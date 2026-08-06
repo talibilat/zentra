@@ -21,6 +21,7 @@ describe("composed console document", () => {
     expect(html).toContain('id="trail-events"');
     expect(html).toContain('id="overview-root"');
     expect(html).toContain('id="pods-list"');
+    expect(html).toContain('id="milestones-list"');
   });
 
   it("includes the six newly-wired sections' data-screen-label markers", () => {
@@ -33,6 +34,16 @@ describe("composed console document", () => {
   it("includes the Pods section's data-screen-label marker", () => {
     const html = consoleHtml();
     expect(html).toContain('data-screen-label="Pods"');
+  });
+
+  it("includes the Milestones section's data-screen-label marker", () => {
+    const html = consoleHtml();
+    expect(html).toContain('data-screen-label="Milestones"');
+  });
+
+  it("concatenates MILESTONES_SCRIPT into the composed document", () => {
+    const html = consoleHtml();
+    expect(html).toContain("window.__consoleSections.milestones={render:renderMilestones,load:loadMilestones}");
   });
 
   it("produces a script that parses as valid JavaScript", () => {

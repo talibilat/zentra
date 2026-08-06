@@ -9,6 +9,7 @@ import { COMPARE_MARKUP } from "./compare-section.js";
 import { IMPORTS_MARKUP } from "./imports-section.js";
 import { POLICIES_MARKUP } from "./policies-section.js";
 import { PODS_MARKUP } from "./pods-section.js";
+import { MILESTONES_MARKUP } from "./milestones-section.js";
 
 interface NavItem { readonly id: string; readonly label: string; readonly icon: string; readonly enabled: boolean; }
 interface NavGroup { readonly label: string; readonly items: readonly NavItem[]; }
@@ -28,7 +29,7 @@ const NAV_GROUPS: readonly NavGroup[] = [
   ] },
   { label: "ZENTRA", items: [
     { id: "pods", label: "Pods", icon: "⬢", enabled: true },
-    { id: "milestones", label: "Milestones", icon: "⊕", enabled: false },
+    { id: "milestones", label: "Milestones", icon: "⊕", enabled: true },
     { id: "github", label: "GitHub broker", icon: "⎇", enabled: false },
     { id: "journal", label: "Journal", icon: "≣", enabled: false },
   ] },
@@ -156,6 +157,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed0c8;background:#07100d
     <section class="section" data-section-id="compare">${COMPARE_MARKUP}</section>
     <section class="section" data-section-id="imports">${IMPORTS_MARKUP}</section>
     <section class="section" data-section-id="pods">${PODS_MARKUP}</section>
+    <section class="section" data-section-id="milestones">${MILESTONES_MARKUP}</section>
     <section class="section" data-section-id="policies">${POLICIES_MARKUP}</section>
   </div>
 </div>
