@@ -28,4 +28,8 @@ describe("controls section", () => {
   it("reloads the Pods section on refresh", () => {
     expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.pods?.load?.()");
   });
+
+  it("reloads the Milestones section on refresh", () => {
+    expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.milestones?.load?.()");
+  });
 });

@@ -19,12 +19,12 @@ describe("console shell", () => {
     }
   });
 
-  it("marks Controls, Overview, Trail, and Pods as enabled nav targets", () => {
-    for (const enabled of ["data-nav-id=\"controls\"", "data-nav-id=\"overview\"", "data-nav-id=\"trail\"", "data-nav-id=\"pods\""]) {
+  it("marks Controls, Overview, Trail, Pods, and Milestones as enabled nav targets", () => {
+    for (const enabled of ["data-nav-id=\"controls\"", "data-nav-id=\"overview\"", "data-nav-id=\"trail\"", "data-nav-id=\"pods\"", "data-nav-id=\"milestones\""]) {
       expect(SHELL_MARKUP).toContain(enabled);
     }
     expect(SHELL_MARKUP).not.toContain('data-nav-id="pods" disabled');
-    expect(SHELL_MARKUP).toContain('data-nav-id="milestones" disabled');
+    expect(SHELL_MARKUP).not.toContain('data-nav-id="milestones" disabled');
     expect(SHELL_MARKUP).toContain('data-nav-id="journal" disabled');
   });
 

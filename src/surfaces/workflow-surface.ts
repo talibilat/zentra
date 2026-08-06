@@ -38,6 +38,7 @@ import {
   readStreamEvents,
   type EventJournal,
 } from "../journal/journal.js";
+import { MilestoneRegistry, type MilestoneRecord, type MilestoneSummary } from "../milestones/milestone-registry.js";
 import type { PlanningAuthorityEnvelope } from "../planning/planning-contracts.js";
 import type { PlanningView } from "../planning/planning-projection.js";
 import { PlanningCoordinator } from "../planning/planning-coordinator.js";
@@ -336,6 +337,14 @@ export class WorkflowSurface<TResult = unknown> {
 
   listPods(): readonly PodView[] {
     return this.guard(() => new PodRegistry(this.journal).list());
+  }
+
+  listMilestones(): readonly MilestoneSummary[] {
+    return this.guard(() => new MilestoneRegistry(this.journal).list());
+  }
+
+  getMilestone(milestoneId: string): MilestoneRecord | null {
+    return this.guard(() => new MilestoneRegistry(this.journal).inspect(milestoneId));
   }
 
   private listRunsProjection(): readonly WorkflowRunSummary[] {

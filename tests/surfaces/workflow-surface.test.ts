@@ -9,6 +9,8 @@ import { AttentionService } from "../../src/attention/attention-service.js";
 import { digestCanonical } from "../../src/contracts/authority-attention.js";
 import { computeIntakeSnapshotSha256 } from "../../src/intake/intake-contracts.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
+import type { MilestonePlan } from "../../src/contracts/milestone.js";
 import { PlanningCoordinator } from "../../src/planning/planning-coordinator.js";
 import { APPROVED_VALIDATION_EXECUTABLE, ProjectConfigSchema, createValidationIdentitySnapshot } from "../../src/projects/project-config.js";
 import { PodRegistry } from "../../src/pods/pod-registry.js";
@@ -91,6 +93,59 @@ describe("WorkflowSurface", () => {
     const directory = temporaryDirectory();
     const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
     expect(surfaceFor(journal).listPods()).toEqual([]);
+    journal.close();
+  });
+
+  it("lists registered milestones by bounded replay", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    const registry = new MilestoneRegistry(journal);
+    registry.register({
+      milestoneId: "milestone-a", projectId: "zentra", title: "First milestone",
+      correlationId: "trace-a", tracePath: "/tmp/trace-a.jsonl", plan: milestonePlan("milestone-a", "task-a"),
+    });
+    registry.register({
+      milestoneId: "milestone-b", projectId: "zentra", title: "Second milestone",
+      correlationId: "trace-b", tracePath: "/tmp/trace-b.jsonl", plan: milestonePlan("milestone-b", "task-b"),
+    });
+
+    const milestones = surfaceFor(journal).listMilestones();
+
+    expect(milestones.map((milestone) => milestone.milestoneId)).toEqual(["milestone-a", "milestone-b"]);
+    expect(milestones[0]).toMatchObject({ milestoneId: "milestone-a", projectId: "zentra", title: "First milestone", lifecycle: "ready", taskCount: 1 });
+    journal.close();
+  });
+
+  it("returns an empty list when no milestones are registered", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    expect(surfaceFor(journal).listMilestones()).toEqual([]);
+    journal.close();
+  });
+
+  it("gets full milestone detail including plan and tasks", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    const registry = new MilestoneRegistry(journal);
+    registry.register({
+      milestoneId: "milestone-a", projectId: "zentra", title: "First milestone",
+      correlationId: "trace-a", tracePath: "/tmp/trace-a.jsonl", plan: milestonePlan("milestone-a", "task-a"),
+    });
+
+    const milestone = surfaceFor(journal).getMilestone("milestone-a");
+
+    expect(milestone).toMatchObject({
+      milestoneId: "milestone-a", projectId: "zentra", title: "First milestone", lifecycle: "ready",
+      plan: { milestoneId: "milestone-a", goal: "Goal for milestone-a" },
+    });
+    expect(milestone!.tasks["task-a"]).toBeDefined();
+    journal.close();
+  });
+
+  it("returns null from getMilestone for an unknown id", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    expect(surfaceFor(journal).getMilestone("missing")).toBeNull();
     journal.close();
   });
 
@@ -631,6 +686,26 @@ function seedPlanningRun(journal: SqliteEventJournal): void {
         costUsdNano: 10, modelReceiptSha256: "6".repeat(64) }, commandId: "analysis-completed", authority: "none",
     },
   }]);
+}
+
+function milestonePlan(milestoneId: string, taskId: string): MilestonePlan {
+  return {
+    milestoneId,
+    projectId: "zentra",
+    goal: `Goal for ${milestoneId}`,
+    tasks: [{
+      taskId,
+      title: "Task",
+      description: "Task description.",
+      dependencies: [],
+      ownedPaths: ["src/**"],
+      forbiddenPaths: [".env"],
+      acceptanceCriteria: ["Done."],
+      roleAssignment: { role: "planner", agentId: "opencode-general", harness: "opencode" },
+      risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+      budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000 },
+    }],
+  };
 }
 
 function temporaryDirectory(): string {
