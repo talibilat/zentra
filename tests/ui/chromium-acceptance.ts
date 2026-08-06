@@ -164,7 +164,7 @@ export class ChromiumWorkflowDriver {
       .map((node) => `${node.role?.value ?? "unknown"}:${node.name!.value}`);
     await evaluate(this.cdp, `document.activeElement instanceof HTMLElement && document.activeElement.blur()`);
     const focusOrder: string[] = [];
-    for (let index = 0; index < 15; index += 1) {
+    for (let index = 0; index < 16; index += 1) {
       await this.cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       await this.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       focusOrder.push(await evaluate<string>(this.cdp, `(()=>{const element=document.activeElement;if(!(element instanceof HTMLElement))return "";const labelled=element.getAttribute("aria-label");const label=element.id?document.querySelector('label[for="'+CSS.escape(element.id)+'"]')?.textContent:null;return [element.tagName.toLowerCase(),element.id||"",labelled||label||element.textContent||""].map(value=>String(value).trim()).join(":")})()`));
