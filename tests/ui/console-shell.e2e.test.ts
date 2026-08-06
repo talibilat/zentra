@@ -1,5 +1,6 @@
 // tests/ui/console-shell.e2e.test.ts
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -409,6 +410,47 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const detailText = await driver.evaluate<string>(`document.getElementById("milestone-detail")?.textContent || ""`);
       expect(detailText).toContain("milestone-e2e");
       expect(detailText).toContain("Ready");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("enables the GitHub broker nav item and renders real broker activity on click", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-github-broker-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const action = {
+      operation: "push" as const, repository: "talibilat/zentra", targetRef: "refs/heads/zentra/grant-e2e",
+      sourceCommit: "1".repeat(40), expectedOldOid: "0".repeat(40), force: false as const,
+    };
+    const actionDigest = createHash("sha256").update(JSON.stringify(action), "utf8").digest("hex");
+    const common = { requestId: "grant-e2e", grantId: "grant-e2e", actionDigest };
+    fixture.journal.append("github-grant:grant-e2e", 0, [{
+      streamId: "github-grant:grant-e2e", type: "capsule.github_grant_consumed",
+      payload: { ...common, audience: "zentra.github-broker", expiresAt: "2099-01-01T00:00:00.000Z", policyDigest: "a".repeat(64) },
+      causationId: null, correlationId: "grant-e2e",
+    }, {
+      streamId: "github-grant:grant-e2e", type: "capsule.github_broker_accepted",
+      payload: { ...common, policyDigest: "a".repeat(64), ...action }, causationId: null, correlationId: "grant-e2e",
+    }, {
+      streamId: "github-grant:grant-e2e", type: "capsule.github_broker_reconciled",
+      payload: { ...common, ...action, attempt: 1, outcome: "completed", observedRemoteOid: action.sourceCommit },
+      causationId: null, correlationId: "grant-e2e",
+    }]);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="github"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="github"]')?.dataset.active === "true"`);
+      await driver.waitFor(`document.getElementById("github-broker-list")?.textContent.includes("talibilat/zentra")`);
+      await driver.click('#github-broker-list button.run-card');
+      await driver.waitFor(`document.getElementById("github-broker-detail")?.textContent.includes("grant-e2e")`);
+      const detailText = await driver.evaluate<string>(`document.getElementById("github-broker-detail")?.textContent || ""`);
+      expect(detailText).toContain("Push");
+      expect(detailText).toContain("Completed");
     } finally {
       await gateway.close();
       fixture.journal.close();
