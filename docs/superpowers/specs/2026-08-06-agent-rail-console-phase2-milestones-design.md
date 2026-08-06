@@ -94,6 +94,8 @@ Both of these hit this project twice already (once when #120 enabled six nav ite
 
 No change to the trust boundary. Read-only, same bearer-session auth as every other route. `MilestoneRecord`'s nested structures (plan, tasks, authority envelope) were checked for sensitive fields — they carry task descriptions, file paths, model/role identifiers, and digests, no credentials or tokens, consistent with what's already surfaced elsewhere in the console. Loopback-only, single-user session; no new network egress or subprocess execution.
 
+One caveat on "read-only": `getMilestone()`'s underlying `MilestoneRegistry.inspect()` can, in one specific state — a milestone paused at a capability boundary whose task head has since moved — append a `milestone.capability_boundary_resolved` self-heal event to the journal via `reconcileCapabilityTaskProjection()` as a side effect of the read. This is pre-existing `MilestoneRegistry` behavior (the CLI's `milestone status` command already exercises the same method) and not something introduced by this console surface; the write is bounded and idempotent, a convergent self-heal already accepted elsewhere. `listMilestones()` has no such reconciliation call and remains genuinely pure-read.
+
 ## Testing
 
 Test-driven development, per `AGENTS.md`.
