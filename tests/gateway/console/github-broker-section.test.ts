@@ -44,5 +44,6 @@ describe("github broker section", () => {
   it("curates operation-specific detail fields for both push and pull request", () => {
     expect(GITHUB_BROKER_SCRIPT).toContain("Target ref");
     expect(GITHUB_BROKER_SCRIPT).toContain("Head ref");
+    expect(GITHUB_BROKER_SCRIPT).toContain("Draft");
   });
 });

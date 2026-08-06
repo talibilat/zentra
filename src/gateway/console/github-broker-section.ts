@@ -37,6 +37,7 @@ const renderGitHubBrokerDetail=()=>{
     entry.operation==="push"?field("Target ref",entry.detail.targetRef||"Unknown"):field("Head ref",entry.detail.headRef||"Unknown"),
     entry.operation==="push"?field("Source commit",entry.detail.sourceCommit||"Unknown"):field("Base",entry.detail.base||"Unknown"),
   );
+  if(entry.operation==="create_pull_request")facts.append(field("Draft",entry.detail.draft?"Yes":"No"));
   host.append(heading,facts);
   appendJson(host,"Detail",entry.detail);
 };
