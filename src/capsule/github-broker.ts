@@ -792,8 +792,8 @@ export function listGitHubBrokerActivity(journal: EventJournal): readonly GitHub
   for (const stream of streams.values()) {
     const denied = stream.events.find((event) => event.type === "capsule.github_broker_denied");
     const accepted = stream.events.find((event) => event.type === "capsule.github_broker_accepted");
-    const observed = stream.events.find((event) => event.type === "capsule.github_broker_observed");
-    const reconciled = stream.events.find((event) => event.type === "capsule.github_broker_reconciled");
+    const observed = stream.events.findLast((event) => event.type === "capsule.github_broker_observed");
+    const reconciled = stream.events.findLast((event) => event.type === "capsule.github_broker_reconciled");
     const action = accepted ?? denied;
     if (action === undefined) continue;
     const operation = action.payload.operation as "push" | "create_pull_request";
@@ -817,5 +817,5 @@ export function listGitHubBrokerActivity(journal: EventJournal): readonly GitHub
       activity.push({ grantId: stream.grantId, requestId, operation, repository, status: "denied", detail: action.payload });
     }
   }
-  return activity.sort((a, b) => a.grantId.localeCompare(b.grantId));
+  return Object.freeze(activity.sort((a, b) => a.grantId.localeCompare(b.grantId)));
 }

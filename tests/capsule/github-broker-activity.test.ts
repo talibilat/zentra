@@ -58,6 +58,31 @@ function appendReconciledCompleted(journal: SqliteEventJournal, grantId: string,
   }]);
 }
 
+function appendObservedDenied(journal: SqliteEventJournal, grantId: string, action: typeof pushAction): void {
+  appendAccepted(journal, grantId, action);
+  const actionDigest = createHash("sha256").update(JSON.stringify(action), "utf8").digest("hex");
+  journal.append(`github-grant:${grantId}`, 2, [{
+    streamId: `github-grant:${grantId}`, type: "capsule.github_broker_observed",
+    payload: { requestId: grantId, grantId, actionDigest, operation: "push", repository: action.repository, target: action.targetRef, outcome: "denied" },
+    causationId: null, correlationId: grantId,
+  }]);
+}
+
+function appendReconciledTwiceUncertainThenCompleted(journal: SqliteEventJournal, grantId: string, action: typeof pushAction): void {
+  appendObservedUncertain(journal, grantId, action);
+  const actionDigest = createHash("sha256").update(JSON.stringify(action), "utf8").digest("hex");
+  journal.append(`github-grant:${grantId}`, 3, [{
+    streamId: `github-grant:${grantId}`, type: "capsule.github_broker_reconciled",
+    payload: { requestId: grantId, grantId, actionDigest, ...action, attempt: 1, outcome: "uncertain", observedRemoteOid: null },
+    causationId: null, correlationId: grantId,
+  }]);
+  journal.append(`github-grant:${grantId}`, 4, [{
+    streamId: `github-grant:${grantId}`, type: "capsule.github_broker_reconciled",
+    payload: { requestId: grantId, grantId, actionDigest, ...action, attempt: 2, outcome: "completed", observedRemoteOid: action.sourceCommit },
+    causationId: null, correlationId: grantId,
+  }]);
+}
+
 describe("listGitHubBrokerActivity", () => {
   it("returns an empty list when no broker activity exists", () => {
     const journal = new SqliteEventJournal(":memory:");
@@ -125,6 +150,23 @@ describe("listGitHubBrokerActivity", () => {
     }]);
     const activity = listGitHubBrokerActivity(journal);
     expect(activity).toEqual([expect.objectContaining({ grantId: "failed-grant", status: "failed" })]);
+  });
+
+  it("lists an observed-denied grant", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    appendObservedDenied(journal, "denied-observed-grant", pushAction);
+    const activity = listGitHubBrokerActivity(journal);
+    expect(activity).toEqual([expect.objectContaining({ grantId: "denied-observed-grant", status: "observed_denied" })]);
+  });
+
+  it("uses the latest reconciled event, not the first, when a grant was retried", () => {
+    const journal = new SqliteEventJournal(":memory:");
+    appendReconciledTwiceUncertainThenCompleted(journal, "retried-grant", pushAction);
+    const activity = listGitHubBrokerActivity(journal);
+    expect(activity).toEqual([expect.objectContaining({
+      grantId: "retried-grant", status: "completed",
+      detail: expect.objectContaining({ observedRemoteOid: pushAction.sourceCommit }),
+    })]);
   });
 
   it("lists multiple independent grant streams together", () => {
