@@ -15,6 +15,8 @@ import { seedAgentTrailReady } from "../fixtures/service-ready.js";
 import { ChromiumWorkflowDriver, acceptanceBrowser } from "./chromium-acceptance.js";
 import { PodRegistry } from "../../src/pods/pod-registry.js";
 import { charter } from "../pods/pod-fixtures.js";
+import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
+import type { MilestonePlan } from "../../src/contracts/milestone.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -25,6 +27,26 @@ afterEach(() => {
 /** Mirrors the client-side `label()` formatter embedded in controls-section.ts so the test's expectation is derived the same way the UI derives it, without depending on the UI's own rendered output as its oracle. */
 function label(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function milestonePlanFixture(milestoneId: string, taskId: string): MilestonePlan {
+  return {
+    milestoneId,
+    projectId: "zentra",
+    goal: `Goal for ${milestoneId}`,
+    tasks: [{
+      taskId,
+      title: "Task",
+      description: "Task description.",
+      dependencies: [],
+      ownedPaths: ["src/**"],
+      forbiddenPaths: [".env"],
+      acceptanceCriteria: ["Done."],
+      roleAssignment: { role: "planner", agentId: "opencode-general", harness: "opencode" },
+      risk: { level: "low", authority: "read_only", requiresReview: false, requiresApproval: false },
+      budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 1000, maxOutputTokens: 1000 },
+    }],
+  };
 }
 
 /**
@@ -359,6 +381,34 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const detailText = await driver.evaluate<string>(`document.getElementById("pod-detail")?.textContent || ""`);
       expect(detailText).toContain("pod-e2e");
       expect(detailText).toContain("Registered");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("enables the Milestones nav item and renders a registered milestone's plan on click", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-milestones-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    new MilestoneRegistry(fixture.journal).register({
+      milestoneId: "milestone-e2e", projectId: "zentra", title: "E2E milestone",
+      correlationId: "trace-milestone-e2e", tracePath: "/tmp/milestone-e2e.jsonl",
+      plan: milestonePlanFixture("milestone-e2e", "task-e2e"),
+    });
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="milestones"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="milestones"]')?.dataset.active === "true"`);
+      await driver.waitFor(`document.getElementById("milestones-list")?.textContent.includes("E2E milestone")`);
+      await driver.click('#milestones-list button.run-card');
+      await driver.waitFor(`document.getElementById("milestone-detail")?.textContent.includes("Goal for milestone-e2e")`);
+      const detailText = await driver.evaluate<string>(`document.getElementById("milestone-detail")?.textContent || ""`);
+      expect(detailText).toContain("milestone-e2e");
+      expect(detailText).toContain("Ready");
     } finally {
       await gateway.close();
       fixture.journal.close();
