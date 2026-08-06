@@ -22,6 +22,7 @@ describe("composed console document", () => {
     expect(html).toContain('id="overview-root"');
     expect(html).toContain('id="pods-list"');
     expect(html).toContain('id="milestones-list"');
+    expect(html).toContain('id="github-broker-list"');
   });
 
   it("includes the six newly-wired sections' data-screen-label markers", () => {
@@ -44,6 +45,16 @@ describe("composed console document", () => {
   it("concatenates MILESTONES_SCRIPT into the composed document", () => {
     const html = consoleHtml();
     expect(html).toContain("window.__consoleSections.milestones={render:renderMilestones,load:loadMilestones}");
+  });
+
+  it("includes the GitHub broker section's data-screen-label marker", () => {
+    const html = consoleHtml();
+    expect(html).toContain('data-screen-label="GitHub broker"');
+  });
+
+  it("concatenates GITHUB_BROKER_SCRIPT into the composed document", () => {
+    const html = consoleHtml();
+    expect(html).toContain("window.__consoleSections.github={render:renderGitHubBroker,load:loadGitHubBrokerActivity}");
   });
 
   it("produces a script that parses as valid JavaScript", () => {

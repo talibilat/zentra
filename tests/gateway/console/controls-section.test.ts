@@ -32,4 +32,8 @@ describe("controls section", () => {
   it("reloads the Milestones section on refresh", () => {
     expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.milestones?.load?.()");
   });
+
+  it("reloads the GitHub broker section on refresh", () => {
+    expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.github?.load?.()");
+  });
 });
