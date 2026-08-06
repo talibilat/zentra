@@ -9,8 +9,8 @@ const loadMilestones=async()=>{
 };
 const selectMilestone=async(id)=>{
   milestoneSelectedId=id;
-  try{milestoneDetail=await request("/api/v1/zentra/milestones/"+encodeURIComponent(id));milestoneDetailLoadFailed=false}
-  catch{milestoneDetail=null;milestoneDetailLoadFailed=true}
+  try{const result=await request("/api/v1/zentra/milestones/"+encodeURIComponent(id));if(milestoneSelectedId!==id)return;milestoneDetail=result;milestoneDetailLoadFailed=false}
+  catch{if(milestoneSelectedId!==id)return;milestoneDetail=null;milestoneDetailLoadFailed=true}
   renderMilestones();
 };
 const renderMilestonesList=()=>{
@@ -30,7 +30,7 @@ const renderMilestoneDetail=()=>{
   const host=$("milestone-detail");host.replaceChildren();
   if(!milestoneSelectedId){const empty=document.createElement("p");empty.className="empty";setText(empty,"Select a milestone to inspect its plan, tasks, and history.");host.append(empty);return}
   const milestone=milestoneDetail;
-  if(!milestone){const empty=document.createElement("p");empty.className="empty";setText(empty,"Milestone detail unavailable.");host.append(empty);return}
+  if(!milestone){const empty=document.createElement("p");empty.className="empty";setText(empty,milestoneDetailLoadFailed?"Milestone detail unavailable.":"Loading milestone detail.");host.append(empty);return}
   const heading=document.createElement("h3");setText(heading,milestone.title);
   const facts=document.createElement("dl");facts.className="facts";
   const taskCount=Object.keys(milestone.tasks||{}).length;

@@ -44,4 +44,8 @@ describe("milestones section", () => {
     expect(MILESTONES_SCRIPT).toContain("Select a milestone to inspect its plan, tasks, and history.");
     expect(MILESTONES_SCRIPT).toContain("Milestone detail unavailable.");
   });
+
+  it("distinguishes an in-flight detail fetch from a genuinely failed one", () => {
+    expect(MILESTONES_SCRIPT).toContain("Loading milestone detail.");
+  });
 });
