@@ -396,6 +396,9 @@ export class LoopbackGateway {
         const milestoneId = decodeSegment(segments[1]!, response); if (milestoneId === null) return;
         return this.jsonResult(response, await this.invoke("getMilestone", milestoneId));
       }
+      if (request.method === "GET" && segments.length === 1 && segments[0] === "github-broker" && url.search === "") {
+        return this.jsonResult(response, await this.invoke("listGitHubBrokerActivity"));
+      }
       if (request.method === "POST" && segments.length === 1 && segments[0] === "runs" && url.search === "") {
         const body = await this.readBody(request, response); if (body === null) return;
         const [input, caller] = this.commandBody(body, authentication);

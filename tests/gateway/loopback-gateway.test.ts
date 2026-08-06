@@ -281,6 +281,22 @@ describe("LoopbackGateway", () => {
     } finally { await gateway.close(); }
   });
 
+  it("exposes github broker activity as a read-only, bearer-authenticated route", async () => {
+    const surface = workflow();
+    const gateway = new LoopbackGateway({ workflow: surface });
+    const session = await gateway.start(); gateway.setReadiness("ready");
+    try {
+      expect((await fetch(`${session.origin}/api/v1/zentra/github-broker`)).status).toBe(401);
+      const auth = await establish(session);
+      expect(await apiJson(session, auth, "/github-broker")).toEqual([
+        { grantId: "grant-1", requestId: "grant-1", operation: "push", repository: "talibilat/zentra", status: "completed", detail: {} },
+      ]);
+      expect(surface.listGitHubBrokerActivity).toHaveBeenCalledTimes(1);
+      surface.listGitHubBrokerActivity.mockReturnValueOnce([]);
+      expect(await apiJson(session, auth, "/github-broker")).toEqual([]);
+    } finally { await gateway.close(); }
+  });
+
   it("serves exact-limit source text independently from bounded JSON envelope overhead", async () => {
     const surface = workflow();
     const gateway = new LoopbackGateway({ workflow: surface });
@@ -499,6 +515,7 @@ function workflow(changes: FakeChange[] = []) {
     listPods: vi.fn(() => [{ podId: "pod-1", projectId: "zentra", lifecycle: "registered", revision: 1 }]),
     listMilestones: vi.fn(() => [{ milestoneId: "milestone-1", projectId: "zentra", title: "First milestone", lifecycle: "ready", terminalOutcome: null, streamVersion: 3, traceId: "trace-1", tracePath: null, taskCount: 1, result: null }]),
     getMilestone: vi.fn((milestoneId: string) => milestoneId === "missing" ? null : ({ milestoneId, projectId: "zentra", title: "First milestone", lifecycle: "ready", streamVersion: 3, plan: { milestoneId, tasks: [] } })),
+    listGitHubBrokerActivity: vi.fn(() => [{ grantId: "grant-1", requestId: "grant-1", operation: "push", repository: "talibilat/zentra", status: "completed", detail: {} }]),
     getRun: vi.fn((runId: string) => runId === "missing" ? null : ({ run: { runId, streamVersion: 4 }, planning: { readiness: { ready: false } } })),
     getSourceText: vi.fn((runId: string, sourceId: string) => ({ schemaVersion: 1, runId, sourceId,
       relativePath: "hostile.html", sizeBytes: 45, acceptedMaxBytes: 1024 * 1024, digest: "a".repeat(64),
