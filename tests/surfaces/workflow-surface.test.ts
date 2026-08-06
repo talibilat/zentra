@@ -149,6 +149,26 @@ describe("WorkflowSurface", () => {
     journal.close();
   });
 
+  it("lists github broker activity via listGitHubBrokerActivity", () => {
+    const directory = temporaryDirectory();
+    const journal = new SqliteEventJournal(path.join(directory, "workflow.sqlite"));
+    const actionDigest = "a".repeat(64);
+    journal.append("github-grant:grant-1", 0, [{
+      streamId: "github-grant:grant-1", type: "capsule.github_broker_denied",
+      payload: {
+        requestId: "grant-1", grantId: "grant-1", policyDigest: "a".repeat(64), actionDigest,
+        operation: "push", repository: "talibilat/zentra", targetRef: "refs/heads/zentra/grant-1",
+        sourceCommit: "1".repeat(40), expectedOldOid: "0".repeat(40), force: false,
+      },
+      causationId: null, correlationId: "grant-1",
+    }]);
+
+    const activity = surfaceFor(journal).listGitHubBrokerActivity();
+
+    expect(activity).toEqual([expect.objectContaining({ grantId: "grant-1", status: "denied", operation: "push" })]);
+    journal.close();
+  });
+
   it("keeps run detail metadata-only and reads verified text through exact run and source binding", () => {
     const fixture = basicFixture();
     seedIntakeAndAnalysisRun(fixture.journal);

@@ -23,6 +23,7 @@ import {
 import type { AttentionView } from "../attention/attention-projection.js";
 import type { DecisionActor } from "../attention/attention-contracts.js";
 import { AttentionService } from "../attention/attention-service.js";
+import { listGitHubBrokerActivity, type GitHubBrokerActivity } from "../capsule/github-broker.js";
 import {
   IntakeSnapshotClosedPayloadSchema,
   SourceDiscoveredPayloadSchema,
@@ -345,6 +346,10 @@ export class WorkflowSurface<TResult = unknown> {
 
   getMilestone(milestoneId: string): MilestoneRecord | null {
     return this.guard(() => new MilestoneRegistry(this.journal).inspect(milestoneId));
+  }
+
+  listGitHubBrokerActivity(): readonly GitHubBrokerActivity[] {
+    return this.guard(() => listGitHubBrokerActivity(this.journal));
   }
 
   private listRunsProjection(): readonly WorkflowRunSummary[] {

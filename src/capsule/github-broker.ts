@@ -5,7 +5,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { readStreamEvents, type EventJournal } from "../journal/journal.js";
+import { assertBoundedProjectionEntries, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import type { IntegrationLease, IntegrationLeaseKey } from "../integration/integration-lease.js";
 import { parseCapsuleEventPayload, type CapsuleEventType } from "./capsule-events.js";
 import { runBoundedProcess } from "./docker-client.js";
@@ -764,4 +764,58 @@ async function withRepositoryLock<T>(repository: string, operation: () => Promis
     release();
     if (repositoryLocks.get(repository) === queued) repositoryLocks.delete(repository);
   }
+}
+
+export interface GitHubBrokerActivity {
+  readonly grantId: string;
+  readonly requestId: string;
+  readonly operation: "push" | "create_pull_request";
+  readonly repository: string;
+  readonly status: "denied" | "accepted" | "observed_denied" | "observed_uncertain" | "completed" | "failed" | "uncertain";
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+export function listGitHubBrokerActivity(journal: EventJournal): readonly GitHubBrokerActivity[] {
+  const streams = new Map<string, { readonly grantId: string; readonly events: { readonly type: string; readonly payload: Record<string, unknown> }[] }>();
+  for (const event of iterateAllEvents(journal)) {
+    if (!event.streamId.startsWith("github-grant:") || !event.type.startsWith("capsule.github_")) continue;
+    const grantId = event.streamId.slice("github-grant:".length);
+    let stream = streams.get(grantId);
+    if (stream === undefined) {
+      stream = { grantId, events: [] };
+      streams.set(grantId, stream);
+      assertBoundedProjectionEntries(streams.size, "github broker activity list");
+    }
+    stream.events.push({ type: event.type, payload: event.payload as Record<string, unknown> });
+  }
+  const activity: GitHubBrokerActivity[] = [];
+  for (const stream of streams.values()) {
+    const denied = stream.events.find((event) => event.type === "capsule.github_broker_denied");
+    const accepted = stream.events.find((event) => event.type === "capsule.github_broker_accepted");
+    const observed = stream.events.find((event) => event.type === "capsule.github_broker_observed");
+    const reconciled = stream.events.find((event) => event.type === "capsule.github_broker_reconciled");
+    const action = accepted ?? denied;
+    if (action === undefined) continue;
+    const operation = action.payload.operation as "push" | "create_pull_request";
+    const repository = action.payload.repository as string;
+    const requestId = action.payload.requestId as string;
+    if (reconciled !== undefined) {
+      activity.push({
+        grantId: stream.grantId, requestId, operation, repository,
+        status: reconciled.payload.outcome as "completed" | "failed" | "uncertain",
+        detail: { ...action.payload, ...reconciled.payload },
+      });
+    } else if (observed !== undefined) {
+      activity.push({
+        grantId: stream.grantId, requestId, operation, repository,
+        status: observed.payload.outcome === "denied" ? "observed_denied" : "observed_uncertain",
+        detail: { ...action.payload, ...observed.payload },
+      });
+    } else if (accepted !== undefined) {
+      activity.push({ grantId: stream.grantId, requestId, operation, repository, status: "accepted", detail: action.payload });
+    } else {
+      activity.push({ grantId: stream.grantId, requestId, operation, repository, status: "denied", detail: action.payload });
+    }
+  }
+  return activity.sort((a, b) => a.grantId.localeCompare(b.grantId));
 }
