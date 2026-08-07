@@ -30,6 +30,22 @@ describe("journal section", () => {
     expect(JOURNAL_SCRIPT).toContain("Projection status unavailable in this environment.");
   });
 
+  it("shows the whole-fetch-failure message in both renderJournalRetention and renderJournalProjection, not just one", () => {
+    const retentionBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalRetention="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalProjection="),
+    );
+    const projectionBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalProjection="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalStatus="),
+    );
+    expect(retentionBody).toContain("Journal status unavailable.");
+    expect(projectionBody).toContain("Journal status unavailable.");
+    // The projection panel must not silently return without rendering anything
+    // when the whole fetch fails - it should not bail out before appending a message.
+    expect(projectionBody).not.toMatch(/if\(journalLoadFailed\)return;/);
+  });
+
   it("renders recovery outcome and the retention/archive facts", () => {
     for (const term of ["Retained through", "Archive head", "Archive segments", "Retention policy", "Recovery"]) {
       expect(JOURNAL_SCRIPT).toContain(term);

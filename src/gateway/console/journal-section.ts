@@ -23,7 +23,7 @@ const renderJournalRetention=()=>{
 };
 const renderJournalProjection=()=>{
   const host=$("journal-projection");host.replaceChildren();
-  if(journalLoadFailed)return;
+  if(journalLoadFailed){const empty=document.createElement("p");empty.className="empty";setText(empty,"Journal status unavailable.");host.append(empty);return}
   const projection=journalStatus&&journalStatus.projection;
   if(!projection){const empty=document.createElement("p");empty.className="empty";setText(empty,"Projection status unavailable in this environment.");host.append(empty);return}
   const facts=document.createElement("dl");facts.className="facts";
