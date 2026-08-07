@@ -19,14 +19,14 @@ describe("console shell", () => {
     }
   });
 
-  it("marks Controls, Overview, Trail, Pods, Milestones, and GitHub broker as enabled nav targets", () => {
-    for (const enabled of ["data-nav-id=\"controls\"", "data-nav-id=\"overview\"", "data-nav-id=\"trail\"", "data-nav-id=\"pods\"", "data-nav-id=\"milestones\"", "data-nav-id=\"github\""]) {
+  it("marks Controls, Overview, Trail, Pods, Milestones, GitHub broker, and Journal as enabled nav targets", () => {
+    for (const enabled of ["data-nav-id=\"controls\"", "data-nav-id=\"overview\"", "data-nav-id=\"trail\"", "data-nav-id=\"pods\"", "data-nav-id=\"milestones\"", "data-nav-id=\"github\"", "data-nav-id=\"journal\""]) {
       expect(SHELL_MARKUP).toContain(enabled);
     }
     expect(SHELL_MARKUP).not.toContain('data-nav-id="pods" disabled');
     expect(SHELL_MARKUP).not.toContain('data-nav-id="milestones" disabled');
     expect(SHELL_MARKUP).not.toContain('data-nav-id="github" disabled');
-    expect(SHELL_MARKUP).toContain('data-nav-id="journal" disabled');
+    expect(SHELL_MARKUP).not.toContain('data-nav-id="journal" disabled');
   });
 
   it("owns the single page-level session handoff and wires Controls' connect hook after it", () => {

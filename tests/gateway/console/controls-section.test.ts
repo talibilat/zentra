@@ -36,4 +36,8 @@ describe("controls section", () => {
   it("reloads the GitHub broker section on refresh", () => {
     expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.github?.load?.()");
   });
+
+  it("hooks Journal's load into refresh", () => {
+    expect(CONTROLS_SCRIPT).toContain("window.__consoleSections.journal?.load?.()");
+  });
 });
