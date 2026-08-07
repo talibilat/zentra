@@ -39,6 +39,7 @@ import {
   readStreamEvents,
   type EventJournal,
 } from "../journal/journal.js";
+import { getJournalStatus, type JournalStatus } from "../journal/journal-status.js";
 import { MilestoneRegistry, type MilestoneRecord, type MilestoneSummary } from "../milestones/milestone-registry.js";
 import type { PlanningAuthorityEnvelope } from "../planning/planning-contracts.js";
 import type { PlanningView } from "../planning/planning-projection.js";
@@ -322,6 +323,7 @@ export class WorkflowSurface<TResult = unknown> {
     private readonly runAdvancer: RunAdvancer,
     private readonly artifactTextReader?: IntakeArtifactTextReader,
     private readonly projectIdentity?: ProjectIdentity,
+    private readonly databasePath?: string,
   ) {}
 
   submitRun(input: RunSubmission, caller: WorkflowCallerContext): TResult {
@@ -346,6 +348,10 @@ export class WorkflowSurface<TResult = unknown> {
 
   getMilestone(milestoneId: string): MilestoneRecord | null {
     return this.guard(() => new MilestoneRegistry(this.journal).inspect(milestoneId));
+  }
+
+  getJournalStatus(): JournalStatus {
+    return this.guard(() => getJournalStatus(this.journal, this.databasePath));
   }
 
   listGitHubBrokerActivity(): readonly GitHubBrokerActivity[] {
