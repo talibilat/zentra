@@ -167,8 +167,9 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       await driver.click('[data-nav-id="trail"]');
       await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
       await driver.waitFor(`document.getElementById("trail-events")?.textContent.includes("Select a run to see its trail.")`);
+      // Swimlane is enabled (Tasks 1-2), so only Graph and Tree remain disabled - Phase 2 views.
       const disabledTabs = await driver.evaluate<number>(`document.querySelectorAll('[data-trail-view][disabled]').length`);
-      expect(disabledTabs).toBe(3);
+      expect(disabledTabs).toBe(2);
     } finally {
       await gateway.close();
       fixture.journal.close();
@@ -242,6 +243,49 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       // AgentTrail backend, through the gateway's real reshape, into the rendered inspector panel.
       await driver.waitFor(`document.getElementById("trail-inspector")?.textContent.includes("evt-2") && document.getElementById("trail-inspector")?.textContent.includes("boom")`);
       expect(submittedRunId).toMatch(/^run-/);
+    } finally {
+      await gateway.close();
+      if (upstream !== null) await upstream.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("switches to Swimlane and shows one lane per actor with a clickable marker", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-trail-swimlane-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    let upstream: Awaited<ReturnType<typeof fakeAgentTrailForE2e>> | null = null;
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      const submittedRunId = await driver.submitGoal("Prove Swimlane renders real per-actor lanes");
+      // fakeAgentTrailForE2e already seeds two distinct actors (pod-a, pod-b), each with one
+      // event, which is exactly what Swimlane needs to prove real per-actor separation rather
+      // than a single lane that would also render for a single-actor fixture.
+      upstream = await fakeAgentTrailForE2e(submittedRunId);
+      gateway.setAgentTrailAddress(upstream.address);
+      await driver.click('[data-nav-id="trail"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="trail"]')?.dataset.active === "true"`);
+      await driver.evaluate(`window.__consoleSections.trail.load()`);
+      await driver.waitFor(`document.getElementById("trail-event-count")?.textContent === "2 of 2 events"`);
+      await driver.click('[data-trail-view="swimlane"]');
+      // renderTrailSwimlane appends one lane <div> directly under #trail-events per distinct
+      // actor with visible events, so with pod-a and pod-b each contributing one event, exactly
+      // two lanes should render - proving the view genuinely separates actors into lanes rather
+      // than collapsing them into one.
+      const laneCount = await driver.evaluate<number>(`document.querySelectorAll("#trail-events > div").length`);
+      expect(laneCount).toBe(2);
+      const markerCount = await driver.evaluate<number>(`document.querySelectorAll("#trail-events button").length`);
+      expect(markerCount).toBe(2);
+      await driver.evaluate(`document.querySelector("#trail-events button")?.click()`);
+      // Clicking a lane marker opens the same shared inspector panel used by the Events view -
+      // renderTrailInspectorEvent renders an "EVENT" section label for the selected event, so its
+      // presence proves the marker click routed into the shared inspector rather than a
+      // swimlane-only detail view.
+      const inspectorText = await driver.evaluate<string>(`document.getElementById("trail-inspector")?.textContent || ""`);
+      expect(inspectorText).toContain("EVENT");
     } finally {
       await gateway.close();
       if (upstream !== null) await upstream.close();
