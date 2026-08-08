@@ -6,7 +6,7 @@ export const TRAIL_MARKUP = `<div style="flex:1;min-height:0;display:flex;flex-d
     <div style='display:flex;gap:4px'>
       <button type="button" data-trail-view="graph" disabled aria-disabled="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--faint);opacity:.55;cursor:not-allowed;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Graph<span class="badge" style='font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px'>Phase 2</span></button>
       <button type="button" data-trail-view="tree" disabled aria-disabled="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--faint);opacity:.55;cursor:not-allowed;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Tree<span class="badge" style='font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px'>Phase 2</span></button>
-      <button type="button" data-trail-view="swimlane" disabled aria-disabled="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--faint);opacity:.55;cursor:not-allowed;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Swimlane<span class="badge" style='font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px'>Phase 2</span></button>
+      <button type="button" data-trail-view="swimlane" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dim);cursor:pointer;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Swimlane</button>
       <button type="button" data-trail-view="events" aria-current="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid var(--accent);background:rgba(122,162,255,.12);color:var(--accent);cursor:default;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Events</button>
     </div>
     <span style='width:1px;height:22px;background:var(--line)'></span>
@@ -38,6 +38,7 @@ let trailFilterActor=null;
 let trailFilterKind=null;
 let trailFailedOnly=false;
 let trailScrubT=1;
+let trailActiveView="events";
 const trailActorById=(id)=>trailActors.find(actor=>actor.id===id)||{id,role:null,color:"var(--faint)",glyph:"?"};
 const trailKindColor=(kind)=>{const palette=["var(--run)","var(--ok)","var(--warn)","var(--accent)","var(--orch)","var(--err)"];const prefix=kind.split(".")[0]||kind;let hash=0;for(let index=0;index<prefix.length;index+=1)hash=(hash*31+prefix.charCodeAt(index))|0;return palette[Math.abs(hash)%palette.length]};
 const trailFormatClock=(seconds)=>{const total=Math.max(0,Math.round(seconds));const minutes=Math.floor(total/60);const rest=String(total%60).padStart(2,"0");return minutes+":"+rest};
@@ -122,9 +123,51 @@ const renderTrailScrubber=()=>{
   setText($("trail-clock"),trailFormatClock(trailScrubT*maxOffset)+" / "+trailFormatClock(maxOffset));
   const scrub=$("trail-scrub");if(scrub)scrub.value=String(Math.round(trailScrubT*1000));
 };
+const trailActorUsageLabel=(actor)=>actor.usage.totalTokens.available?actor.usage.totalTokens.value+" tokens":null;
+const renderTrailSwimlane=()=>{
+  const host=$("trail-events");host.replaceChildren();
+  const visible=trailVisibleEvents();
+  setText($("trail-event-count"),visible.length+" of "+trailEvents.length+" events");
+  if(!visible.length){const empty=document.createElement("p");empty.className="empty";setText(empty,trailLoadFailed?"Trace evidence unavailable.":!trailRunId?"Select a run to see its trail.":"No events match the current filters.");host.append(empty);return}
+  const maxOffset=trailMaxOffset()||1;
+  const lanesByActor=new Map();
+  for(const trailEvent of visible){
+    if(!lanesByActor.has(trailEvent.actorId))lanesByActor.set(trailEvent.actorId,[]);
+    lanesByActor.get(trailEvent.actorId).push(trailEvent);
+  }
+  const actorsInOrder=[...lanesByActor.keys()].map(id=>trailActorById(id)).sort((a,b)=>{
+    const aFirst=lanesByActor.get(a.id).reduce((min,e)=>Math.min(min,e.offsetSeconds),Infinity);
+    const bFirst=lanesByActor.get(b.id).reduce((min,e)=>Math.min(min,e.offsetSeconds),Infinity);
+    return aFirst-bFirst;
+  });
+  for(const actor of actorsInOrder){
+    const lane=document.createElement("div");lane.style.cssText="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)";
+    const header=document.createElement("div");header.style.cssText="width:170px;flex:none;display:flex;flex-direction:column;gap:2px";
+    const nameRow=document.createElement("div");nameRow.style.cssText="display:flex;align-items:center;gap:6px";
+    const glyph=document.createElement("span");glyph.style.cssText="width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font:700 10px monospace;color:#0a0e17;background:"+actor.color;setText(glyph,actor.glyph);
+    const idLabel=document.createElement("span");idLabel.style.cssText="font:600 11.5px sans-serif;color:var(--text)";setText(idLabel,actor.id);
+    nameRow.append(glyph,idLabel);
+    const metaRow=document.createElement("span");metaRow.style.cssText="font:400 10px monospace;color:var(--faint)";
+    const usageLabel=trailActorUsageLabel(actor);
+    setText(metaRow,label(actor.status)+(actor.model?" · "+actor.model:"")+(usageLabel?" · "+usageLabel:""));
+    header.append(nameRow,metaRow);
+    const track=document.createElement("div");track.style.cssText="position:relative;flex:1;height:24px;background:var(--panel2);border-radius:6px";
+    for(const trailEvent of lanesByActor.get(actor.id)){
+      const marker=document.createElement("button");marker.type="button";
+      const left=Math.min(100,(trailEvent.offsetSeconds/maxOffset)*100);
+      const selected=trailEvent.id===trailSelectedEvent;
+      marker.style.cssText="position:absolute;top:50%;left:"+left+"%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;border:"+(selected?"2px solid var(--accent)":"1px solid var(--panel)")+";background:"+(trailEvent.failed?"var(--err)":"var(--ok)")+";cursor:pointer;padding:0";
+      marker.title=trailEvent.name+" · "+trailFormatClock(trailEvent.offsetSeconds);
+      marker.addEventListener("click",()=>{trailSelectedEvent=trailEvent.id;renderTrailView()});
+      track.append(marker);
+    }
+    lane.append(header,track);
+    host.append(lane);
+  }
+};
 const renderTrailView=()=>{
   renderTrailPills();
-  renderTrailEvents();
+  if(trailActiveView==="swimlane")renderTrailSwimlane();else renderTrailEvents();
   const selected=trailSelectedEvent?trailEvents.find(event=>event.id===trailSelectedEvent):null;
   if(selected)renderTrailInspectorEvent(selected);else renderTrailInspectorDefault();
   renderTrailScrubber();
@@ -144,6 +187,21 @@ const loadTrail=async()=>{
 };
 $("trail-scrub")?.addEventListener("input",(event)=>{trailScrubT=Number(event.target.value)/1000;renderTrailView()});
 $("trail-jump-live")?.addEventListener("click",()=>{trailScrubT=1;renderTrailView()});
+for(const button of document.querySelectorAll("[data-trail-view]")){
+  button.addEventListener("click",()=>{
+    if(button.disabled)return;
+    trailActiveView=button.dataset.trailView;
+    for(const other of document.querySelectorAll("[data-trail-view]")){
+      const active=other===button;
+      other.setAttribute("aria-current",String(active));
+      other.style.border=active?"1px solid var(--accent)":"1px solid transparent";
+      other.style.background=active?"rgba(122,162,255,.12)":"transparent";
+      other.style.color=active?"var(--accent)":"var(--dim)";
+      other.style.cursor=active?"default":"pointer";
+    }
+    renderTrailView();
+  });
+}
 window.__consoleSections=window.__consoleSections||{};
 window.__consoleSections.trail={render:renderTrailView,load:loadTrail};
 renderTrailView();`;

@@ -13,7 +13,7 @@ describe("trail-section markup", () => {
 
   it("renders all four target tabs, with only Events enabled", () => {
     expect(TRAIL_MARKUP).toContain('data-trail-view="events"');
-    for (const disabled of ["graph", "tree", "swimlane"]) {
+    for (const disabled of ["graph", "tree"]) {
       const start = TRAIL_MARKUP.indexOf(`data-trail-view="${disabled}"`);
       expect(start).toBeGreaterThan(-1);
       const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
@@ -24,6 +24,14 @@ describe("trail-section markup", () => {
     const eventsStart = TRAIL_MARKUP.indexOf('data-trail-view="events"');
     const eventsTag = TRAIL_MARKUP.slice(eventsStart, TRAIL_MARKUP.indexOf("</button>", eventsStart));
     expect(eventsTag).not.toContain("disabled");
+  });
+
+  it("enables the Swimlane tab", () => {
+    const start = TRAIL_MARKUP.indexOf('data-trail-view="swimlane"');
+    expect(start).toBeGreaterThan(-1);
+    const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
+    expect(tag).not.toContain("disabled");
+    expect(tag).not.toContain('class="badge"');
   });
 
   it("has containers for the filter pills, event list, inspector, and scrubber", () => {
@@ -104,5 +112,26 @@ describe("trail-section script", () => {
     expect(TRAIL_SCRIPT).toContain("trailFailedOnly");
     expect(TRAIL_SCRIPT).toContain("state.search");
     expect(TRAIL_SCRIPT).toContain("trailScrubT");
+  });
+
+  it("switches between Events and Swimlane without a second fetch", () => {
+    expect(TRAIL_SCRIPT).toContain("trailActiveView");
+    const requestCalls = TRAIL_SCRIPT.match(/request\(/g) ?? [];
+    expect(requestCalls.length).toBe(1);
+  });
+
+  it("renders swimlane lanes from the same filtered event list the Events view uses, not a separate computation", () => {
+    const swimlaneIndex = TRAIL_SCRIPT.indexOf("const renderTrailSwimlane=");
+    expect(swimlaneIndex).toBeGreaterThan(-1);
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", swimlaneIndex + 1);
+    const body = TRAIL_SCRIPT.slice(swimlaneIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain("trailVisibleEvents()");
+  });
+
+  it("selects a swimlane marker into the same trailSelectedEvent the inspector reads", () => {
+    const swimlaneIndex = TRAIL_SCRIPT.indexOf("const renderTrailSwimlane=");
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", swimlaneIndex + 1);
+    const body = TRAIL_SCRIPT.slice(swimlaneIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain("trailSelectedEvent=");
   });
 });
