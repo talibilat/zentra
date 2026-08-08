@@ -55,6 +55,7 @@ export interface LocalWorkflowSurfaceOptions {
   readonly runAdvancer?: RunAdvancer;
   readonly traceProjectionFailed?: () => boolean;
   readonly afterSubmissionReserved?: (runId: string) => void | Promise<void>;
+  readonly databasePath?: string;
 }
 
 export type LocalWorkflowSurface = WorkflowSurface<Promise<WorkflowRunDetail>>;
@@ -161,6 +162,7 @@ export async function createLocalWorkflowSurface(
     options.runAdvancer ?? unavailableAdvancer,
     artifacts,
     project,
+    options.databasePath,
   );
   return surface;
 }

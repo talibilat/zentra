@@ -503,6 +503,44 @@ describe("WorkflowSurface", () => {
   });
 });
 
+describe("getJournalStatus", () => {
+  it("returns a JournalStatus with retention data when databasePath is supplied", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-workflow-surface-journal-"));
+    try {
+      const databasePath = path.join(directory, "events.sqlite");
+      const journal = new SqliteEventJournal(databasePath);
+      const runs = new RunService(journal);
+      const attention = new AttentionService(journal);
+      const planning = new PlanningCoordinator(journal, runs, attention, []);
+      const surface = new WorkflowSurface(
+        journal, runs, attention, planning,
+        { submit: () => { throw new Error("not used"); } },
+        { advance: () => { throw new Error("not used"); } },
+        undefined, undefined, databasePath,
+      );
+      const status = surface.getJournalStatus();
+      expect(status.retention).not.toBeNull();
+      expect(status.retention?.recoveryOutcome).toBe("clean");
+      journal.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns retention: null when databasePath is omitted", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-workflow-surface-journal-"));
+    try {
+      const journal = new SqliteEventJournal(path.join(directory, "events.sqlite"));
+      const surface = surfaceFor(journal);
+      const status = surface.getJournalStatus();
+      expect(status.retention).toBeNull();
+      journal.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 function basicFixture() {
   const directory = temporaryDirectory();
   return { directory, journal: new SqliteEventJournal(path.join(directory, "events.sqlite")) };

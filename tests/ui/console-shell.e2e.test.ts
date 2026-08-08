@@ -126,6 +126,7 @@ async function consoleShellWorkflow(root: string): Promise<{ readonly workflow: 
   }).eventId;
   const workflow = await createLocalWorkflowSurface({
     journal, process, serviceReadyEventId, projectRoot: root, projectRevision: await resolveProjectRevision(root),
+    databasePath: path.join(root, "workflow.sqlite"),
   });
   return { workflow, journal };
 }
@@ -451,6 +452,31 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       const detailText = await driver.evaluate<string>(`document.getElementById("github-broker-detail")?.textContent || ""`);
       expect(detailText).toContain("Push");
       expect(detailText).toContain("Completed");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
+
+  it("enables the Journal nav item and renders real retention and recovery status", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-journal-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="journal"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="journal"]')?.dataset.active === "true"`);
+      await driver.waitFor(`document.getElementById("journal-retention")?.textContent.includes("Clean")`);
+      const retentionText = await driver.evaluate<string>(`document.getElementById("journal-retention")?.textContent || ""`);
+      expect(retentionText).toContain("Retain Forever");
+      // consoleShellWorkflow's journal is a plain SqliteEventJournal, not wrapped in a
+      // ProjectingEventJournal, so the honest-unavailable path for the projection card is
+      // itself the real end-to-end behavior being proven here, not a compromise.
+      const projectionText = await driver.evaluate<string>(`document.getElementById("journal-projection")?.textContent || ""`);
+      expect(projectionText).toContain("Projection status unavailable in this environment.");
     } finally {
       await gateway.close();
       fixture.journal.close();

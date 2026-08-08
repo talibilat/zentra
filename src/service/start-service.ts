@@ -455,6 +455,7 @@ export async function startZentraService(
       projectRevision,
       traceProjectionFailed: () => journal.projectionFailed || sink!.streamFailed === true,
       runAdvancer,
+      databasePath: layout.databasePath,
     };
     const workflow = await (dependencies.createWorkflowSurface?.(workflowOptions) ??
       createLocalWorkflowSurface(workflowOptions));

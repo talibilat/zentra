@@ -233,6 +233,24 @@ export class JournalRetentionService {
     return { mode: "retain_forever", automaticDeletion: false };
   }
 
+  metadataSummary(): {
+    readonly globalPosition: number;
+    readonly retainedThroughPosition: number;
+    readonly archiveHeadPosition: number;
+    readonly archiveSegmentCount: number;
+    readonly policy: RetentionPolicy;
+  } {
+    this.assertIdentities();
+    const metadata = this.metadata();
+    return {
+      globalPosition: metadata.globalPosition,
+      retainedThroughPosition: metadata.retainedThroughPosition,
+      archiveHeadPosition: metadata.archiveHeadPosition,
+      archiveSegmentCount: metadata.archiveSegmentCount,
+      policy: this.policy(),
+    };
+  }
+
   archive(input: {
     readonly throughPosition: number;
     readonly maxEvents: number;

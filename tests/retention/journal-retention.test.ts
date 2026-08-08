@@ -106,6 +106,36 @@ describe("JournalRetentionService", () => {
     expect(statSync(archived.manifestPath).mode & 0o777).toBe(0o400);
   });
 
+  it("summarizes journal metadata without rescanning archived segments", () => {
+    const { databasePath } = fixture();
+    const retention = new JournalRetentionService(databasePath);
+    retention.archive({ throughPosition: 12, maxEvents: 12 });
+
+    const summary = retention.metadataSummary();
+    // 24 fixture events + 3 audit events appended by archive() itself
+    // (journal.archive.proposed / .started / .completed).
+    expect(summary).toEqual({
+      globalPosition: 27,
+      retainedThroughPosition: 0,
+      archiveHeadPosition: 12,
+      archiveSegmentCount: 1,
+      policy: { mode: "retain_forever", automaticDeletion: false },
+    });
+
+    // Corrupt the archived segment file metadataSummary() must NOT read, to prove it never
+    // rescans archive segments the way verify() does (verify() would fail against this corruption).
+    const archiveRoot = `${databasePath}.archives`;
+    const segmentFile = readdirSync(archiveRoot).find((name) => name.endsWith(".events.jsonl"));
+    if (segmentFile === undefined) throw new Error("expected an archived segment file");
+    const segmentPath = path.join(archiveRoot, segmentFile);
+    chmodSync(segmentPath, 0o600);
+    writeFileSync(segmentPath, "corrupted");
+    chmodSync(segmentPath, 0o400);
+    expect(() => retention.metadataSummary()).not.toThrow();
+    expect(retention.metadataSummary()).toEqual(summary);
+    expect(() => retention.verify()).toThrow();
+  });
+
   it("requires a verified archive, cursor safety, an audited request, and exact confirmation", () => {
     const { databasePath } = fixture();
     const retention = new JournalRetentionService(databasePath);

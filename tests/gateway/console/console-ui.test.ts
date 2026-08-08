@@ -75,4 +75,15 @@ describe("composed console document", () => {
     const html = consoleHtml();
     expect(html).toContain("window.__consoleSections.pods={render:renderPods,load:loadPods}");
   });
+
+  it("includes the Journal section markup", () => {
+    const html = consoleHtml();
+    expect(html).toContain('id="journal-retention"');
+    expect(html).toContain('id="journal-projection"');
+  });
+
+  it("concatenates JOURNAL_SCRIPT into the composed document", () => {
+    const html = consoleHtml();
+    expect(html).toContain("window.__consoleSections.journal={render:renderJournalStatus,load:loadJournalStatus}");
+  });
 });
