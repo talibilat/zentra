@@ -73,9 +73,9 @@ function actorGlyph(actorId: string, role: string | null): string {
 function actorUsageMetric(usage: Record<string, unknown>, key: string): TrailActorUsageMetric {
   const raw = usage[key];
   if (!isRecord(raw)) return { available: false, value: null };
-  const available = raw["available"] === true;
   const value = typeof raw["value"] === "number" ? raw["value"] : null;
-  return { available, value: available ? value : null };
+  const available = raw["available"] === true && value !== null;
+  return { available, value };
 }
 
 function actorUsage(actor: Record<string, unknown>): TrailActorUsage {

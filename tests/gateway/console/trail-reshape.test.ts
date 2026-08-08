@@ -138,4 +138,15 @@ describe("reshapeTrail actor detail", () => {
       costUsd: { available: false, value: null },
     });
   });
+
+  it("treats a metric as unavailable when available is true but value is not a number", () => {
+    const view = reshapeTrail({
+      ...RUN_DETAIL,
+      actors: [{
+        id: "pod-c", role: null,
+        usage: { input_tokens: { available: true, value: "120" } },
+      }],
+    });
+    expect(view.actors[0]!.usage.inputTokens).toEqual({ available: false, value: null });
+  });
 });
