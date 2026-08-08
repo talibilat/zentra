@@ -57,4 +57,8 @@ describe("journal section", () => {
       expect(JOURNAL_SCRIPT).toContain(term);
     }
   });
+
+  it("renders the high-water position fact called for by the design spec", () => {
+    expect(JOURNAL_SCRIPT).toContain("High water");
+  });
 });

@@ -30,6 +30,7 @@ const renderJournalProjection=()=>{
   facts.append(
     field("Cursor",projection.cursorName),
     field("Position",String(projection.position)),
+    field("High water",String(projection.highWaterPosition)),
     field("Lag",String(projection.lag)),
     field("Replay count",String(projection.replayCount)),
     field("Active",projection.active?"Yes":"No"),
