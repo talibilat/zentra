@@ -134,4 +134,22 @@ describe("trail-section script", () => {
     const body = TRAIL_SCRIPT.slice(swimlaneIndex, nextConst > -1 ? nextConst : undefined);
     expect(body).toContain("trailSelectedEvent=");
   });
+
+  it("gives the unmatched-actor fallback a complete TrailActor shape so Swimlane can't crash on a missing actor", () => {
+    expect(TRAIL_SCRIPT).toContain(
+      '{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}}}',
+    );
+  });
+
+  it("skips restyling disabled tab buttons in the tab-click loop, leaving Graph/Tree visually disabled", () => {
+    const loopIndex = TRAIL_SCRIPT.indexOf('for(const other of document.querySelectorAll("[data-trail-view]")){');
+    expect(loopIndex).toBeGreaterThan(-1);
+    const closeIndex = TRAIL_SCRIPT.indexOf("\n    }", loopIndex);
+    const body = TRAIL_SCRIPT.slice(loopIndex, closeIndex);
+    const disabledCheckIndex = body.indexOf("if(other.disabled)continue;");
+    expect(disabledCheckIndex).toBeGreaterThan(-1);
+    const styleMutationIndex = body.indexOf("other.style.");
+    expect(styleMutationIndex).toBeGreaterThan(-1);
+    expect(disabledCheckIndex).toBeLessThan(styleMutationIndex);
+  });
 });
