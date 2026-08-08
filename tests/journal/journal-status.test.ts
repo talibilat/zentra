@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -94,6 +94,29 @@ describe("getJournalStatus", () => {
       const status = getJournalStatus(projected, undefined);
       expect(status.projection).toEqual({
         cursorName: "journal-status-test-cursor",
+        position: 1,
+        highWaterPosition: 1,
+        lag: 0,
+        replayCount: 0,
+        active: false,
+      });
+    } finally {
+      inner.close();
+    }
+  });
+
+  it("degrades retention to null instead of throwing when the retention side fails, leaving projection intact", () => {
+    const { directory, databasePath } = fixture();
+    const inner = new SqliteEventJournal(databasePath);
+    const projected = new ProjectingEventJournal(inner, { append: () => {} }, "journal-status-broken-retention-cursor");
+    const notAJournalDatabase = path.join(directory, "not-a-journal.sqlite");
+    writeFileSync(notAJournalDatabase, "this is not a sqlite journal database\n");
+    expect(() => JournalRetentionService.openReadOnly(notAJournalDatabase).metadataSummary()).toThrow();
+    try {
+      const status = getJournalStatus(projected, notAJournalDatabase);
+      expect(status.retention).toBeNull();
+      expect(status.projection).toEqual({
+        cursorName: "journal-status-broken-retention-cursor",
         position: 1,
         highWaterPosition: 1,
         lag: 0,

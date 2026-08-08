@@ -27,9 +27,17 @@ export interface JournalStatus {
 
 export function getJournalStatus(journal: EventJournal, databasePath: string | undefined): JournalStatus {
   return {
-    retention: databasePath === undefined ? null : buildRetentionStatus(databasePath),
+    retention: databasePath === undefined ? null : safeBuildRetentionStatus(databasePath),
     projection: buildProjectionStatus(journal),
   };
+}
+
+function safeBuildRetentionStatus(databasePath: string): JournalStatus["retention"] {
+  try {
+    return buildRetentionStatus(databasePath);
+  } catch {
+    return null;
+  }
 }
 
 function buildRetentionStatus(databasePath: string): JournalStatus["retention"] {
