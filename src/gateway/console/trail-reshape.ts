@@ -16,11 +16,26 @@ export interface TrailEvent {
   readonly payload: unknown;
 }
 
+export interface TrailActorUsageMetric {
+  readonly available: boolean;
+  readonly value: number | null;
+}
+
+export interface TrailActorUsage {
+  readonly inputTokens: TrailActorUsageMetric;
+  readonly outputTokens: TrailActorUsageMetric;
+  readonly totalTokens: TrailActorUsageMetric;
+  readonly costUsd: TrailActorUsageMetric;
+}
+
 export interface TrailActor {
   readonly id: string;
   readonly role: string | null;
   readonly color: string;
   readonly glyph: string;
+  readonly model: string | null;
+  readonly status: string;
+  readonly usage: TrailActorUsage;
 }
 
 export interface TrailView {
@@ -53,6 +68,24 @@ function actorGlyph(actorId: string, role: string | null): string {
   const source = role !== null && role.length > 0 ? role : actorId;
   const letter = source.charAt(0).toUpperCase();
   return letter.length > 0 ? letter : "?";
+}
+
+function actorUsageMetric(usage: Record<string, unknown>, key: string): TrailActorUsageMetric {
+  const raw = usage[key];
+  if (!isRecord(raw)) return { available: false, value: null };
+  const available = raw["available"] === true;
+  const value = typeof raw["value"] === "number" ? raw["value"] : null;
+  return { available, value: available ? value : null };
+}
+
+function actorUsage(actor: Record<string, unknown>): TrailActorUsage {
+  const usage = isRecord(actor["usage"]) ? actor["usage"] : {};
+  return {
+    inputTokens: actorUsageMetric(usage, "input_tokens"),
+    outputTokens: actorUsageMetric(usage, "output_tokens"),
+    totalTokens: actorUsageMetric(usage, "total_tokens"),
+    costUsd: actorUsageMetric(usage, "cost_usd"),
+  };
 }
 
 function isEventFailed(kind: string, status: string): boolean {
@@ -107,7 +140,9 @@ export function reshapeTrail(raw: unknown): TrailView {
   const actors: TrailActor[] = rawActors.filter(isRecord).map((actor) => {
     const id = String(actor["id"] ?? "unknown");
     const role = typeof actor["role"] === "string" ? actor["role"] : null;
-    return { id, role, color: actorColor(id), glyph: actorGlyph(id, role) };
+    const model = typeof actor["model"] === "string" ? actor["model"] : null;
+    const status = typeof actor["status"] === "string" ? actor["status"] : "unknown";
+    return { id, role, color: actorColor(id), glyph: actorGlyph(id, role), model, status, usage: actorUsage(actor) };
   });
 
   return { runId, durationSeconds, events, actors };

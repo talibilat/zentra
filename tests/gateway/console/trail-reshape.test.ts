@@ -95,3 +95,47 @@ describe("reshapeTrail", () => {
     expect(view.durationSeconds).toBe(0);
   });
 });
+
+const RUN_DETAIL_WITH_ACTOR_DETAIL = {
+  ...RUN_DETAIL,
+  actors: [
+    {
+      id: "pod-a", role: "implementation", model: "claude-sonnet-5", status: "running",
+      usage: {
+        input_tokens: { available: true, value: 120 },
+        output_tokens: { available: true, value: 340 },
+        total_tokens: { available: true, value: 460 },
+        cost_usd: { available: false, value: null },
+      },
+    },
+    { id: "pod-b", role: null },
+  ],
+};
+
+describe("reshapeTrail actor detail", () => {
+  it("maps model, status, and usage metrics from the raw actor payload", () => {
+    const view = reshapeTrail(RUN_DETAIL_WITH_ACTOR_DETAIL);
+    const actor = view.actors[0]!;
+    expect(actor.model).toBe("claude-sonnet-5");
+    expect(actor.status).toBe("running");
+    expect(actor.usage).toEqual({
+      inputTokens: { available: true, value: 120 },
+      outputTokens: { available: true, value: 340 },
+      totalTokens: { available: true, value: 460 },
+      costUsd: { available: false, value: null },
+    });
+  });
+
+  it("defaults model to null, status to unknown, and every usage metric to unavailable when absent", () => {
+    const view = reshapeTrail(RUN_DETAIL_WITH_ACTOR_DETAIL);
+    const actor = view.actors[1]!;
+    expect(actor.model).toBeNull();
+    expect(actor.status).toBe("unknown");
+    expect(actor.usage).toEqual({
+      inputTokens: { available: false, value: null },
+      outputTokens: { available: false, value: null },
+      totalTokens: { available: false, value: null },
+      costUsd: { available: false, value: null },
+    });
+  });
+});
