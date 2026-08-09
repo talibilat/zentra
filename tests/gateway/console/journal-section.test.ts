@@ -3,15 +3,26 @@ import { describe, expect, it } from "vitest";
 import { JOURNAL_MARKUP, JOURNAL_SCRIPT } from "../../../src/gateway/console/journal-section.js";
 
 describe("journal section", () => {
-  it("is a single-panel status dashboard, not a two-column list+detail layout", () => {
-    expect(JOURNAL_MARKUP).not.toContain('data-columns="2"');
+  it("keeps the Status panel single-column, not a two-column list+detail layout", () => {
+    // Scoped to the status panel only: #126 adds a genuinely two-column
+    // list+detail Events panel (data-columns="2"), so the original
+    // whole-markup assertion no longer holds for JOURNAL_MARKUP as a whole.
+    const statusPanel = JOURNAL_MARKUP.slice(
+      JOURNAL_MARKUP.indexOf('data-journal-panel="status"'),
+      JOURNAL_MARKUP.indexOf('data-journal-panel="events"'),
+    );
+    expect(statusPanel).not.toContain('data-columns="2"');
     expect(JOURNAL_MARKUP).toContain('data-screen-label="Journal"');
   });
 
   it("fetches status from the real API, not a static demo dataset", () => {
     expect(JOURNAL_SCRIPT).toContain('request("/api/v1/zentra/journal")');
     expect(JOURNAL_SCRIPT).not.toContain("DEMO_DATA");
-    const requestCalls = JOURNAL_SCRIPT.match(/request\(/g) ?? [];
+    // Scoped to the status-loading code only: #126 adds a second, independent
+    // request() call for loadJournalEvents, so the whole-script count is no
+    // longer 1.
+    const statusScript = JOURNAL_SCRIPT.slice(0, JOURNAL_SCRIPT.indexOf("let journalActiveView"));
+    const requestCalls = statusScript.match(/request\(/g) ?? [];
     expect(requestCalls.length).toBe(1);
   });
 
@@ -60,5 +71,32 @@ describe("journal section", () => {
 
   it("renders the high-water position fact called for by the design spec", () => {
     expect(JOURNAL_SCRIPT).toContain("High water");
+  });
+
+  it("has a Status/Events tab switcher within the Journal screen", () => {
+    expect(JOURNAL_MARKUP).toContain('data-journal-view="status"');
+    expect(JOURNAL_MARKUP).toContain('data-journal-view="events"');
+  });
+
+  it("has filter inputs and a load-more affordance for the Events tab", () => {
+    expect(JOURNAL_MARKUP).toContain('id="journal-events-stream-filter"');
+    expect(JOURNAL_MARKUP).toContain('id="journal-events-type-filter"');
+    expect(JOURNAL_MARKUP).toContain('id="journal-events-load-more"');
+  });
+
+  it("fetches journal events from the real API, not a static demo dataset", () => {
+    expect(JOURNAL_SCRIPT).toContain('"/api/v1/zentra/journal/events');
+    expect(JOURNAL_SCRIPT).not.toContain("DEMO_DATA");
+  });
+
+  it("renders an honest message for a zero-match page that still has more to scan, distinct from true end-of-results", () => {
+    expect(JOURNAL_SCRIPT).toContain("No matching events in this range.");
+    expect(JOURNAL_SCRIPT).toContain("No events found.");
+    expect(JOURNAL_SCRIPT).toContain("Journal events unavailable.");
+  });
+
+  it("appends load-more results instead of replacing the existing list", () => {
+    const loadMoreIndex = JOURNAL_SCRIPT.indexOf("journal-events-load-more");
+    expect(loadMoreIndex).toBeGreaterThan(-1);
   });
 });
