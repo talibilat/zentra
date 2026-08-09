@@ -93,10 +93,12 @@ const renderJournalEventsList=()=>{
     const position=document.createElement("span");setText(position,String(event.globalPosition));
     const stream=document.createElement("strong");setText(stream,event.streamId);
     const type=document.createElement("span");setText(type,event.type);
-    row.append(position,stream,type);
+    const recordedAt=document.createElement("span");setText(recordedAt,event.recordedAt);
+    row.append(position,stream,type,recordedAt);
     row.addEventListener("click",()=>{journalSelectedEventId=event.eventId;renderJournalEvents()});
     host.append(row);
   }
+  if(journalEventsLoadFailed){const failure=document.createElement("p");failure.className="empty";setText(failure,"Journal events unavailable.");host.append(failure)}
   const loadMore=$("journal-events-load-more");
   if(loadMore)loadMore.style.display=journalEventsHasMore?"block":"none";
 };
