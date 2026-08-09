@@ -640,4 +640,46 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       fixture.journal.close();
     }
   }, 60_000);
+
+  it("paginates real journal events with Load more once a page fills up", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-journal-events-loadmore-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    // DEFAULT_LIMIT in src/journal/journal-events.ts is 50, so 60 events sharing a
+    // distinct type guarantees hasMore:true on the first filtered page and gives an
+    // exact, deterministic count for the appended second page.
+    const seededEventCount = 60;
+    fixture.journal.append("loadmore:e2e", 0, Array.from({ length: seededEventCount }, (_, index) => ({
+      streamId: "loadmore:e2e", type: "loadmore.event", payload: { index }, causationId: null, correlationId: "loadmore:e2e",
+    })));
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="journal"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="journal"]')?.dataset.active === "true"`);
+      await driver.click('[data-journal-view="events"]');
+      // Wait for the tab's automatic unfiltered first load to land before applying the type
+      // filter below, so the filtered request is the only fetch in flight and its response
+      // can't be raced (and overwritten) by the earlier unfiltered one.
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length > 0`);
+      await driver.evaluate(`document.getElementById("journal-events-type-filter").value = "loadmore.event"`);
+      await driver.click('#journal-events-apply-filter');
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length === 50`);
+      const firstPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.run-card").length`);
+      const loadMoreDisplayAfterFirstPage = await driver.evaluate<string>(`document.getElementById("journal-events-load-more")?.style.display || ""`);
+      expect(firstPageRowCount).toBe(50);
+      expect(loadMoreDisplayAfterFirstPage).toBe("block");
+      await driver.click('#journal-events-load-more');
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length === ${seededEventCount}`);
+      const secondPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.run-card").length`);
+      const loadMoreDisplayAfterSecondPage = await driver.evaluate<string>(`document.getElementById("journal-events-load-more")?.style.display || ""`);
+      expect(secondPageRowCount).toBe(seededEventCount);
+      expect(loadMoreDisplayAfterSecondPage).toBe("none");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
 });
