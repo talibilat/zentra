@@ -11,16 +11,11 @@ describe("trail-section markup", () => {
     expect(TRAIL_MARKUP).not.toContain("<iframe");
   });
 
-  it("renders all four target tabs, with only Events enabled", () => {
+  it("renders all four target tabs", () => {
     expect(TRAIL_MARKUP).toContain('data-trail-view="events"');
-    for (const disabled of ["graph", "tree"]) {
-      const start = TRAIL_MARKUP.indexOf(`data-trail-view="${disabled}"`);
-      expect(start).toBeGreaterThan(-1);
-      const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
-      expect(tag).toContain("disabled");
-      expect(tag).toContain('aria-disabled="true"');
-      expect(tag).toContain('class="badge"');
-    }
+    expect(TRAIL_MARKUP).toContain('data-trail-view="graph"');
+    expect(TRAIL_MARKUP).toContain('data-trail-view="tree"');
+    expect(TRAIL_MARKUP).toContain('data-trail-view="swimlane"');
     const eventsStart = TRAIL_MARKUP.indexOf('data-trail-view="events"');
     const eventsTag = TRAIL_MARKUP.slice(eventsStart, TRAIL_MARKUP.indexOf("</button>", eventsStart));
     expect(eventsTag).not.toContain("disabled");
@@ -32,6 +27,16 @@ describe("trail-section markup", () => {
     const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
     expect(tag).not.toContain("disabled");
     expect(tag).not.toContain('class="badge"');
+  });
+
+  it("enables the Graph and Tree tabs", () => {
+    for (const view of ["graph", "tree"]) {
+      const start = TRAIL_MARKUP.indexOf(`data-trail-view="${view}"`);
+      expect(start).toBeGreaterThan(-1);
+      const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
+      expect(tag).not.toContain("disabled");
+      expect(tag).not.toContain('class="badge"');
+    }
   });
 
   it("has containers for the filter pills, event list, inspector, and scrubber", () => {
@@ -151,6 +156,23 @@ describe("trail-section script", () => {
     const styleMutationIndex = body.indexOf("other.style.");
     expect(styleMutationIndex).toBeGreaterThan(-1);
     expect(disabledCheckIndex).toBeLessThan(styleMutationIndex);
+  });
+
+  it("renders graph/tree nodes and sets trailFilterActor on click, not a new selection variable", () => {
+    const graphTreeIndex = TRAIL_SCRIPT.indexOf("const renderTrailGraphTree=");
+    expect(graphTreeIndex).toBeGreaterThan(-1);
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", graphTreeIndex + 1);
+    const body = TRAIL_SCRIPT.slice(graphTreeIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain("trailFilterActor=");
+    expect(body).not.toContain("trailSelectedActor");
+  });
+
+  it("dispatches to the graph/tree renderer for both new tabs", () => {
+    const dispatchIndex = TRAIL_SCRIPT.indexOf("const renderTrailView=");
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", dispatchIndex + 1);
+    const body = TRAIL_SCRIPT.slice(dispatchIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain('trailActiveView==="graph"');
+    expect(body).toContain('trailActiveView==="tree"');
   });
 });
 
