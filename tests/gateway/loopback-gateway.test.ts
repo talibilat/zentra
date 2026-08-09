@@ -309,6 +309,28 @@ describe("LoopbackGateway", () => {
     } finally { await gateway.close(); }
   });
 
+  it("exposes paged journal events as a read-only, bearer-authenticated route", async () => {
+    const surface = workflow();
+    const gateway = new LoopbackGateway({ workflow: surface });
+    const session = await gateway.start(); gateway.setReadiness("ready");
+    try {
+      expect((await fetch(`${session.origin}/api/v1/zentra/journal/events`)).status).toBe(401);
+      const auth = await establish(session);
+      const page = { events: [], nextPosition: 0, hasMore: false };
+      surface.listJournalEvents.mockReturnValueOnce(page);
+      expect(await apiJson(session, auth, "/journal/events?afterPosition=10&streamPrefix=run%3A&typePrefix=run.&limit=25")).toEqual(page);
+      expect(surface.listJournalEvents).toHaveBeenCalledWith({ afterPosition: 10, streamPrefix: "run:", typePrefix: "run.", limit: 25 });
+      expect(await apiJson(session, auth, "/journal/events")).toEqual(page);
+      expect(surface.listJournalEvents).toHaveBeenCalledWith({});
+      expect((await api(session, auth, "/journal/events?afterPosition=not-a-number")).status).toBe(400);
+      expect((await api(session, auth, "/journal/events?afterPosition=-1")).status).toBe(400);
+      expect((await api(session, auth, "/journal/events?afterPosition=1.5")).status).toBe(400);
+      expect((await api(session, auth, "/journal/events?limit=0")).status).toBe(400);
+      expect((await api(session, auth, "/journal/events?limit=-5")).status).toBe(400);
+      expect((await api(session, auth, "/journal/events?limit=not-a-number")).status).toBe(400);
+    } finally { await gateway.close(); }
+  });
+
   it("serves exact-limit source text independently from bounded JSON envelope overhead", async () => {
     const surface = workflow();
     const gateway = new LoopbackGateway({ workflow: surface });
@@ -529,6 +551,7 @@ function workflow(changes: FakeChange[] = []) {
     getMilestone: vi.fn((milestoneId: string) => milestoneId === "missing" ? null : ({ milestoneId, projectId: "zentra", title: "First milestone", lifecycle: "ready", streamVersion: 3, plan: { milestoneId, tasks: [] } })),
     listGitHubBrokerActivity: vi.fn(() => [{ grantId: "grant-1", requestId: "grant-1", operation: "push", repository: "talibilat/zentra", status: "completed", detail: {} }]),
     getJournalStatus: vi.fn(() => ({ retention: null, projection: null })),
+    listJournalEvents: vi.fn(() => ({ events: [], nextPosition: 0, hasMore: false })),
     getRun: vi.fn((runId: string) => runId === "missing" ? null : ({ run: { runId, streamVersion: 4 }, planning: { readiness: { ready: false } } })),
     getSourceText: vi.fn((runId: string, sourceId: string) => ({ schemaVersion: 1, runId, sourceId,
       relativePath: "hostile.html", sizeBytes: 45, acceptedMaxBytes: 1024 * 1024, digest: "a".repeat(64),

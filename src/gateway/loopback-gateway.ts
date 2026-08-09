@@ -14,6 +14,7 @@ import {
   type WorkflowSurfaceErrorCode,
 } from "../surfaces/workflow-surface.js";
 import { MAX_RETAINED_ARTIFACT_BYTES } from "../contracts/artifact.js";
+import type { JournalEventQuery } from "../journal/journal-events.js";
 import { CONSOLE_SCRIPT_SHA256, consoleHtml } from "./console/console-ui.js";
 import { reshapeTrail, type TrailView } from "./console/trail-reshape.js";
 import { CLI_CONTROL_AUTHORIZATION_SCHEME } from "../surfaces/http-workflow-client.js";
@@ -402,6 +403,10 @@ export class LoopbackGateway {
       if (request.method === "GET" && segments.length === 1 && segments[0] === "journal" && url.search === "") {
         return this.jsonResult(response, await this.invoke("getJournalStatus"));
       }
+      if (request.method === "GET" && segments.length === 2 && segments[0] === "journal" && segments[1] === "events") {
+        const query = decodeJournalEventQuery(url.searchParams, response); if (query === null) return;
+        return this.jsonResult(response, await this.invoke("listJournalEvents", query));
+      }
       if (request.method === "POST" && segments.length === 1 && segments[0] === "runs" && url.search === "") {
         const body = await this.readBody(request, response); if (body === null) return;
         const [input, caller] = this.commandBody(body, authentication);
@@ -699,6 +704,24 @@ function isObject(value: unknown): value is Record<string, unknown> { return typ
 function decodeSegment(value: string, response: ServerResponse): string | null {
   try { const decoded = decodeURIComponent(value); if (decoded.length === 0 || decoded.includes("/")) throw new Error(); return decoded; }
   catch { response.statusCode = 400; response.end(JSON.stringify({ error: "invalid_request" })); return null; }
+}
+
+function decodeJournalEventQuery(searchParams: URLSearchParams, response: ServerResponse): JournalEventQuery | null {
+  const invalid = (): null => { response.statusCode = 400; response.end(JSON.stringify({ error: "invalid_request" })); return null; };
+  const afterPositionRaw = searchParams.get("afterPosition");
+  const limitRaw = searchParams.get("limit");
+  const afterPosition = afterPositionRaw === null ? undefined : Number(afterPositionRaw);
+  const limit = limitRaw === null ? undefined : Number(limitRaw);
+  if (afterPosition !== undefined && (!Number.isInteger(afterPosition) || afterPosition < 0)) return invalid();
+  if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) return invalid();
+  const streamPrefix = searchParams.get("streamPrefix");
+  const typePrefix = searchParams.get("typePrefix");
+  return {
+    ...(afterPosition === undefined ? {} : { afterPosition }),
+    ...(streamPrefix === null ? {} : { streamPrefix }),
+    ...(typePrefix === null ? {} : { typePrefix }),
+    ...(limit === undefined ? {} : { limit }),
+  };
 }
 
 function listenLoopback(server: Server, host: "127.0.0.1" | "::1"): Promise<number> {
