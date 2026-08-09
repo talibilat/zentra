@@ -83,7 +83,13 @@ async function fakeAgentTrailForE2e(traceId: string): Promise<{
             relationships: [{ type: "caused_by", event_id: "evt-1" }], payload: { preview: { detail: "boom" } },
           },
         ],
-        actors: [{ id: "pod-a", role: "implementation" }, { id: "pod-b", role: "verification" }],
+        actors: [
+          {
+            id: "pod-a", role: "implementation", model: "claude-sonnet-5", status: "running",
+            usage: { total_tokens: { available: true, value: 460 } },
+          },
+          { id: "pod-b", role: "verification" },
+        ],
       }));
       return;
     }
@@ -279,6 +285,14 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       expect(laneCount).toBe(2);
       const markerCount = await driver.evaluate<number>(`document.querySelectorAll("#trail-events button").length`);
       expect(markerCount).toBe(2);
+      // pod-a's fixture actor carries model/status/usage (pod-b deliberately does not, to prove the
+      // populated fields are actually threaded through rather than always falling back to defaults).
+      // pod-a's event has the earlier offset, so its lane renders first.
+      const firstLaneText = await driver.evaluate<string>(`document.querySelector("#trail-events > div")?.textContent || ""`);
+      expect(firstLaneText).toContain("implementation");
+      expect(firstLaneText).toContain(label("running"));
+      expect(firstLaneText).toContain("claude-sonnet-5");
+      expect(firstLaneText).toContain("460 tokens");
       await driver.evaluate(`document.querySelector("#trail-events button")?.click()`);
       // Clicking a lane marker opens the same shared inspector panel used by the Events view -
       // renderTrailInspectorEvent renders an "EVENT" section label for the selected event, so its

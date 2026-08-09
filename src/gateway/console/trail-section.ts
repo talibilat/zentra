@@ -125,7 +125,7 @@ const renderTrailScrubber=()=>{
 };
 const trailActorUsageLabel=(actor)=>actor.usage.totalTokens.available?actor.usage.totalTokens.value+" tokens":null;
 const renderTrailSwimlane=()=>{
-  const host=$("trail-events");host.replaceChildren();
+  const host=$("trail-events");if(!host)return;host.replaceChildren();
   const visible=trailVisibleEvents();
   setText($("trail-event-count"),visible.length+" of "+trailEvents.length+" events");
   if(!visible.length){const empty=document.createElement("p");empty.className="empty";setText(empty,trailLoadFailed?"Trace evidence unavailable.":!trailRunId?"Select a run to see its trail.":"No events match the current filters.");host.append(empty);return}
@@ -144,19 +144,19 @@ const renderTrailSwimlane=()=>{
     const lane=document.createElement("div");lane.style.cssText="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)";
     const header=document.createElement("div");header.style.cssText="width:170px;flex:none;display:flex;flex-direction:column;gap:2px";
     const nameRow=document.createElement("div");nameRow.style.cssText="display:flex;align-items:center;gap:6px";
-    const glyph=document.createElement("span");glyph.style.cssText="width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font:700 10px monospace;color:#0a0e17;background:"+actor.color;setText(glyph,actor.glyph);
-    const idLabel=document.createElement("span");idLabel.style.cssText="font:600 11.5px sans-serif;color:var(--text)";setText(idLabel,actor.id);
+    const glyph=document.createElement("span");glyph.style.cssText="width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font:700 10px "+trailFontMono+";color:#0a0e17;background:"+actor.color;setText(glyph,actor.glyph);
+    const idLabel=document.createElement("span");idLabel.style.cssText="font:600 11.5px "+trailFontSans+";color:var(--text);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";setText(idLabel,actor.id);
     nameRow.append(glyph,idLabel);
-    const metaRow=document.createElement("span");metaRow.style.cssText="font:400 10px monospace;color:var(--faint)";
+    const metaRow=document.createElement("span");metaRow.style.cssText="font:400 10px "+trailFontMono+";color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
     const usageLabel=trailActorUsageLabel(actor);
-    setText(metaRow,label(actor.status)+(actor.model?" · "+actor.model:"")+(usageLabel?" · "+usageLabel:""));
+    setText(metaRow,(actor.role?actor.role+" · ":"")+label(actor.status)+(actor.model?" · "+actor.model:"")+(usageLabel?" · "+usageLabel:""));
     header.append(nameRow,metaRow);
     const track=document.createElement("div");track.style.cssText="position:relative;flex:1;height:24px;background:var(--panel2);border-radius:6px";
     for(const trailEvent of lanesByActor.get(actor.id)){
       const marker=document.createElement("button");marker.type="button";
       const left=Math.min(100,(trailEvent.offsetSeconds/maxOffset)*100);
       const selected=trailEvent.id===trailSelectedEvent;
-      marker.style.cssText="position:absolute;top:50%;left:"+left+"%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;border:"+(selected?"2px solid var(--accent)":"1px solid var(--panel)")+";background:"+(trailEvent.failed?"var(--err)":"var(--ok)")+";cursor:pointer;padding:0";
+      marker.style.cssText="position:absolute;top:50%;left:"+left+"%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;border:1px solid var(--panel);background:"+(trailEvent.failed?"var(--err)":"var(--ok)")+";cursor:pointer;padding:0"+(selected?";box-shadow:0 0 0 2px var(--accent)":"");
       marker.title=trailEvent.name+" · "+trailFormatClock(trailEvent.offsetSeconds);
       marker.addEventListener("click",()=>{trailSelectedEvent=trailEvent.id;renderTrailView()});
       track.append(marker);
