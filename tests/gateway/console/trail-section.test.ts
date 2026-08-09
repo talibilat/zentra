@@ -140,9 +140,9 @@ describe("trail-section script", () => {
     expect(body).toContain("trailSelectedEvent=");
   });
 
-  it("gives the unmatched-actor fallback a complete TrailActor shape so Swimlane can't crash on a missing actor", () => {
+  it("gives the unmatched-actor fallback a complete TrailActor shape so Swimlane/Graph/Tree can't crash on a missing actor", () => {
     expect(TRAIL_SCRIPT).toContain(
-      '{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}}}',
+      '{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}},parentId:null,childIds:[]}',
     );
   });
 

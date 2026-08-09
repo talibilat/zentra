@@ -39,7 +39,7 @@ let trailFilterKind=null;
 let trailFailedOnly=false;
 let trailScrubT=1;
 let trailActiveView="events";
-const trailActorById=(id)=>trailActors.find(actor=>actor.id===id)||{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}}};
+const trailActorById=(id)=>trailActors.find(actor=>actor.id===id)||{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}},parentId:null,childIds:[]};
 const trailKindColor=(kind)=>{const palette=["var(--run)","var(--ok)","var(--warn)","var(--accent)","var(--orch)","var(--err)"];const prefix=kind.split(".")[0]||kind;let hash=0;for(let index=0;index<prefix.length;index+=1)hash=(hash*31+prefix.charCodeAt(index))|0;return palette[Math.abs(hash)%palette.length]};
 const trailFormatClock=(seconds)=>{const total=Math.max(0,Math.round(seconds));const minutes=Math.floor(total/60);const rest=String(total%60).padStart(2,"0");return minutes+":"+rest};
 const trailMaxOffset=()=>trailEvents.reduce((max,event)=>Math.max(max,event.offsetSeconds),0);
