@@ -146,7 +146,7 @@ describe("trail-section script", () => {
     );
   });
 
-  it("skips restyling disabled tab buttons in the tab-click loop, leaving Graph/Tree visually disabled", () => {
+  it("guards the tab-click restyle loop against disabled buttons, even though none are currently disabled", () => {
     const loopIndex = TRAIL_SCRIPT.indexOf('for(const other of document.querySelectorAll("[data-trail-view]")){');
     expect(loopIndex).toBeGreaterThan(-1);
     const closeIndex = TRAIL_SCRIPT.indexOf("\n    }", loopIndex);

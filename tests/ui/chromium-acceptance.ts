@@ -195,6 +195,11 @@ export class ChromiumWorkflowDriver {
     return await evaluate<T>(this.cdp, expression);
   }
 
+  // Overrides open()'s default 390x844 mobile emulation for tests asserting real on-screen geometry at desktop width.
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+  }
+
   private async openPendingDecision(runId: string, action: string): Promise<void> {
     await this.selectRun(runId);
     await waitFor(this.cdp, `document.querySelector(".attention-card") !== null`);

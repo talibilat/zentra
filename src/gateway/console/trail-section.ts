@@ -199,19 +199,23 @@ const trailTreeLayout=(forest)=>{
 };
 const trailActorStatusColor=(status)=>{
   const normalized=(status||"").toLowerCase();
-  if(normalized==="failed"||normalized==="error"||normalized==="errored")return "var(--err)";
-  if(normalized==="completed"||normalized==="done")return "var(--ok)";
-  if(normalized==="running"||normalized==="waiting")return "var(--warn)";
-  return "var(--line)";
+  if(normalized==="completed")return "var(--ok)";
+  if(normalized==="failed"||normalized==="denied"||normalized==="timed_out")return "var(--err)";
+  if(normalized==="waiting"||normalized==="cancelled"||normalized==="cancelling")return "var(--warn)";
+  if(normalized==="running")return "var(--run)";
+  return "var(--faint)";
 };
+const trailEventsAtHorizon=()=>{const horizon=trailScrubT*trailMaxOffset();return trailEvents.filter(event=>event.offsetSeconds<=horizon)};
 const renderTrailGraphTree=(layoutKind)=>{
   const host=$("trail-events");if(!host)return;host.replaceChildren();
   const visible=trailVisibleEvents();
   setText($("trail-event-count"),visible.length+" of "+trailEvents.length+" events");
-  if(!visible.length){const empty=document.createElement("p");empty.className="empty";setText(empty,trailLoadFailed?"Trace evidence unavailable.":!trailRunId?"Select a run to see its trail.":"No events match the current filters.");host.append(empty);return}
-  const visibleActorIds=new Set(visible.map(event=>event.actorId));
-  const actors=trailActors.filter(actor=>visibleActorIds.has(actor.id));
+  if(trailLoadFailed){const empty=document.createElement("p");empty.className="empty";setText(empty,"Trace evidence unavailable.");host.append(empty);return}
+  if(!trailRunId){const empty=document.createElement("p");empty.className="empty";setText(empty,"Select a run to see its trail.");host.append(empty);return}
+  const horizonActorIds=new Set(trailEventsAtHorizon().map(event=>event.actorId));
+  const actors=trailActors.filter(actor=>horizonActorIds.has(actor.id));
   if(!actors.length){const empty=document.createElement("p");empty.className="empty";setText(empty,"No events match the current filters.");host.append(empty);return}
+  const matchingActorIds=new Set(visible.map(event=>event.actorId));
   const forest=trailBuildForest(actors);
   const layout=layoutKind==="graph"?trailRadialLayout(forest):trailTreeLayout(forest);
   const positions=layout.positions;
@@ -229,6 +233,7 @@ const renderTrailGraphTree=(layoutKind)=>{
   for(const actor of actors){
     if(!actor.parentId||!positionedIds.has(actor.parentId)||!positionedIds.has(actor.id))continue;
     const p=positions[actor.id],pp=positions[actor.parentId];
+    const dim=!matchingActorIds.has(actor.id)||!matchingActorIds.has(actor.parentId);
     const path=document.createElementNS(svgNamespace,"path");
     let d;
     if(layoutKind==="tree"){
@@ -241,29 +246,40 @@ const renderTrailGraphTree=(layoutKind)=>{
     path.setAttribute("stroke","var(--line)");
     path.setAttribute("stroke-width","1.4");
     path.setAttribute("fill","none");
+    path.style.opacity=dim?"0.25":"1";
     svg.append(path);
   }
   canvas.append(svg);
 
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
   for(const actor of actors){
     const p=positions[actor.id];if(!p)continue;
     const isRoot=forest.depth.get(actor.id)===0;
     const size=isRoot?58:44;
     const color=trailActorStatusColor(actor.status);
+    const dim=!matchingActorIds.has(actor.id);
     const node=document.createElement("button");node.type="button";
-    node.style.cssText="position:absolute;left:"+p.x+"px;top:"+p.y+"px;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;background:transparent;border:none;cursor:pointer;padding:0";
+    node.style.cssText="position:absolute;left:"+p.x+"px;top:"+p.y+"px;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;background:transparent;border:none;cursor:pointer;padding:0;opacity:"+(dim?"0.3":"1");
     const dot=document.createElement("div");
     dot.style.cssText="width:"+size+"px;height:"+size+"px;border-radius:"+(isRoot?"14px":"50%")+";display:flex;align-items:center;justify-content:center;font:700 13px "+trailFontMono+";color:#0a0e17;background:"+actor.color+";border:2px solid "+(actor.id===trailFilterActor?"var(--accent)":color);
     setText(dot,actor.glyph);
     const idLabel=document.createElement("span");idLabel.style.cssText="font:500 10px "+trailFontMono+";color:var(--faint);max-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";setText(idLabel,actor.id);
     node.append(dot,idLabel);
+    const usageLabel=trailActorUsageLabel(actor);
+    node.title=(actor.role?actor.role+" · ":"")+label(actor.status)+(actor.model?" · "+actor.model:"")+(usageLabel?" · "+usageLabel:"");
     node.addEventListener("click",()=>{trailFilterActor=trailFilterActor===actor.id?null:actor.id;renderTrailView()});
     canvas.append(node);
+    minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y);
   }
 
   const scroller=document.createElement("div");scroller.style.cssText="overflow:auto;width:100%;height:100%";
   scroller.append(canvas);
   host.append(scroller);
+  if(Number.isFinite(minX)){
+    const centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
+    scroller.scrollLeft=Math.max(0,centerX-scroller.clientWidth/2);
+    scroller.scrollTop=Math.max(0,centerY-scroller.clientHeight/2);
+  }
 };
 const renderTrailSwimlane=()=>{
   const host=$("trail-events");if(!host)return;host.replaceChildren();

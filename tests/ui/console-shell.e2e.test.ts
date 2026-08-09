@@ -317,6 +317,15 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
     let upstream: Awaited<ReturnType<typeof fakeAgentTrailForE2e>> | null = null;
     try {
       const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      // The default driver viewport is a narrow mobile emulation (390x844) used to exercise
+      // responsive layout elsewhere in this suite. The Graph/Tree pane's fixed-width 360px
+      // inspector aside isn't part of this fix's scope and doesn't collapse responsively, so on
+      // the narrow default viewport #trail-events is squeezed to near-zero width regardless of
+      // scroll position - that would make any genuine on-screen geometry assertion meaningless.
+      // Switch to a realistic desktop width so the visibility assertions below actually exercise
+      // the Critical off-screen-rendering fix (a sane default scroll position) rather than a
+      // separate, pre-existing narrow-viewport layout gap.
+      await driver.setViewport(1280, 800);
       const submittedRunId = await driver.submitGoal("Prove Graph/Tree renders connected actor nodes");
       // fakeAgentTrailForE2e's pod-a actor carries child_ids: ["pod-b"] and pod-b carries
       // parent_id: "pod-a", so trailBuildForest treats pod-a as the sole root and pod-b as its
@@ -332,9 +341,31 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       expect(graphNodeCount).toBe(2);
       const edgeCount = await driver.evaluate<number>(`document.querySelectorAll("#trail-events svg path").length`);
       expect(edgeCount).toBe(1);
+      // The Critical off-screen bug let the graph render entirely outside the scroller's visible
+      // client rect while every DOM-count assertion above still passed. Assert a node's rendered
+      // position actually falls inside the scroller's visible viewport, not just that it exists in
+      // the DOM, so a regression back to a top-left default scroll position would be caught here.
+      const graphNodeVisible = await driver.evaluate<boolean>(`(() => {
+        const scroller = document.querySelector("#trail-events > div");
+        const node = document.querySelector("#trail-events button");
+        if (!scroller || !node) return false;
+        const scrollerRect = scroller.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        return nodeRect.left >= scrollerRect.left && nodeRect.right <= scrollerRect.right && nodeRect.top >= scrollerRect.top && nodeRect.bottom <= scrollerRect.bottom;
+      })()`);
+      expect(graphNodeVisible).toBe(true);
       await driver.click('[data-trail-view="tree"]');
       const treeNodeCount = await driver.evaluate<number>(`document.querySelectorAll("#trail-events button").length`);
       expect(treeNodeCount).toBe(2);
+      const treeNodeVisible = await driver.evaluate<boolean>(`(() => {
+        const scroller = document.querySelector("#trail-events > div");
+        const node = document.querySelector("#trail-events button");
+        if (!scroller || !node) return false;
+        const scrollerRect = scroller.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        return nodeRect.left >= scrollerRect.left && nodeRect.right <= scrollerRect.right && nodeRect.top >= scrollerRect.top && nodeRect.bottom <= scrollerRect.bottom;
+      })()`);
+      expect(treeNodeVisible).toBe(true);
       // Clicking a node sets trailFilterActor, which the shared filter-pill state already
       // reflects visually - confirm via the event count line narrowing, not a new selection concept.
       await driver.evaluate(`document.querySelectorAll("#trail-events button")[0]?.click()`);
