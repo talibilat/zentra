@@ -182,4 +182,12 @@ describe("reshapeTrail span and parent-child fields", () => {
     expect(view.actors[1]!.parentId).toBe("pod-a");
     expect(view.actors[1]!.childIds).toEqual([]);
   });
+
+  it("strips non-string entries out of child_ids instead of leaking them through", () => {
+    const view = reshapeTrail({
+      ...RUN_DETAIL,
+      actors: [{ id: "pod-a", role: null, child_ids: ["pod-b", 42, null, "pod-c"] }],
+    });
+    expect(view.actors[0]!.childIds).toEqual(["pod-b", "pod-c"]);
+  });
 });
