@@ -124,6 +124,79 @@ const renderTrailScrubber=()=>{
   const scrub=$("trail-scrub");if(scrub)scrub.value=String(Math.round(trailScrubT*1000));
 };
 const trailActorUsageLabel=(actor)=>actor.usage.totalTokens.available?actor.usage.totalTokens.value+" tokens":null;
+const trailBuildForest=(actors)=>{
+  const byId=new Map(actors.map(actor=>[actor.id,actor]));
+  const childrenMap=new Map();
+  actors.forEach(actor=>childrenMap.set(actor.id,(actor.childIds||[]).filter(id=>byId.has(id))));
+  const hasParent=new Set();
+  actors.forEach(actor=>{if(actor.parentId&&byId.has(actor.parentId))hasParent.add(actor.id)});
+  const roots=actors.filter(actor=>!hasParent.has(actor.id)).map(actor=>actor.id);
+  const depth=new Map();
+  const assignDepth=(id,d)=>{depth.set(id,d);(childrenMap.get(id)||[]).forEach(c=>assignDepth(c,d+1))};
+  roots.forEach(r=>assignDepth(r,0));
+  return {byId,childrenMap,roots,depth};
+};
+const trailLeafCount=(id,childrenMap,leaves)=>{
+  const kids=childrenMap.get(id)||[];
+  if(!kids.length){leaves[id]=1;return 1}
+  let sum=0;kids.forEach(c=>{sum+=trailLeafCount(c,childrenMap,leaves)});
+  leaves[id]=sum;return sum;
+};
+const trailRadialLayout=(forest)=>{
+  const {childrenMap,roots}=forest;
+  const leaves={};
+  roots.forEach(r=>trailLeafCount(r,childrenMap,leaves));
+  const totalLeaves=roots.reduce((sum,r)=>sum+(leaves[r]||1),0)||1;
+  const cx=560,cy=380,step=132;
+  const positions={};
+  const place=(id,a0,a1,depth)=>{
+    const mid=(a0+a1)/2;
+    const r=depth*step;
+    positions[id]={x:cx+r*Math.cos(mid),y:cy+r*Math.sin(mid)};
+    const kids=childrenMap.get(id)||[];
+    if(kids.length){
+      let a=a0;
+      kids.forEach(child=>{
+        const frac=(leaves[child]||1)/(leaves[id]||1);
+        const next=a+(a1-a0)*frac;
+        place(child,a,next,depth+1);
+        a=next;
+      });
+    }
+  };
+  let a0=-Math.PI/2;
+  const sweep=Math.PI*2;
+  roots.forEach(root=>{
+    const frac=(leaves[root]||1)/totalLeaves;
+    const a1=a0+sweep*frac;
+    place(root,a0,a1,roots.length>1?0.7:0);
+    a0=a1;
+  });
+  return {positions,world:{w:1120,h:760}};
+};
+const trailTreeLayout=(forest)=>{
+  const {childrenMap,roots}=forest;
+  const positions={};
+  let leafIdx=0;
+  const rowH=118,colW=120;
+  const walk=(id,depth)=>{
+    const kids=childrenMap.get(id)||[];
+    let x;
+    if(!kids.length){x=leafIdx++}
+    else{
+      const xs=kids.map(c=>walk(c,depth+1));
+      x=(xs[0]+xs[xs.length-1])/2;
+    }
+    positions[id]={gx:x,y:60+depth*rowH};
+    return x;
+  };
+  roots.forEach(r=>walk(r,0));
+  const total=Math.max(leafIdx,1);
+  const width=Math.max(total*colW,720);
+  Object.values(positions).forEach(p=>{p.x=60+(p.gx+0.5)*(width/total)});
+  const maxDepth=Math.max(0,...[...forest.depth.values()]);
+  return {positions,world:{w:width+120,h:60+(maxDepth+1)*rowH+80}};
+};
 const renderTrailSwimlane=()=>{
   const host=$("trail-events");if(!host)return;host.replaceChildren();
   const visible=trailVisibleEvents();

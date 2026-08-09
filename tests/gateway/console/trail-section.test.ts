@@ -153,3 +153,77 @@ describe("trail-section script", () => {
     expect(disabledCheckIndex).toBeLessThan(styleMutationIndex);
   });
 });
+
+function extractFunctions(...names: string[]): any {
+  const source = names
+    .map((name) => {
+      const start = TRAIL_SCRIPT.indexOf(`const ${name}=`);
+      if (start === -1) throw new Error(`function ${name} not found in TRAIL_SCRIPT`);
+      let depth = 0;
+      let end = start;
+      let sawBrace = false;
+      for (let index = start; index < TRAIL_SCRIPT.length; index += 1) {
+        const char = TRAIL_SCRIPT[index];
+        if (char === "{" || char === "(") depth += 1;
+        if (char === "{") sawBrace = true;
+        if (char === "}" || char === ")") depth -= 1;
+        // Arrow functions like `(actors)=>{...}` return depth to 0 right after the
+        // parameter list closes, before the body is ever reached. Only treat depth 0
+        // as "done" once we've actually entered a `{` body block.
+        if (sawBrace && depth === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+      return TRAIL_SCRIPT.slice(start, end + 1);
+    })
+    .join("\n");
+  const fn = new Function(`${source}\nreturn {${names.join(",")}};`);
+  return fn();
+}
+
+describe("trail-section layout functions", () => {
+  it("buildForest groups actors into a parent/child tree with computed depth", () => {
+    const { trailBuildForest } = extractFunctions("trailBuildForest");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a", "child-b"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+      { id: "child-b", parentId: "root", childIds: [] },
+    ];
+    const forest = trailBuildForest(actors);
+    expect(forest.roots).toEqual(["root"]);
+    expect(forest.childrenMap.get("root")).toEqual(["child-a", "child-b"]);
+    expect(forest.depth.get("root")).toBe(0);
+    expect(forest.depth.get("child-a")).toBe(1);
+  });
+
+  it("treats an actor whose parentId points at a missing actor as a root", () => {
+    const { trailBuildForest } = extractFunctions("trailBuildForest");
+    const actors = [{ id: "orphan", parentId: "missing-parent", childIds: [] }];
+    const forest = trailBuildForest(actors);
+    expect(forest.roots).toEqual(["orphan"]);
+  });
+
+  it("radialLayout positions every actor with finite x/y coordinates", () => {
+    const { trailBuildForest, trailRadialLayout } = extractFunctions("trailBuildForest", "trailLeafCount", "trailRadialLayout");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+    ];
+    const layout = trailRadialLayout(trailBuildForest(actors));
+    for (const id of ["root", "child-a"]) {
+      expect(Number.isFinite(layout.positions[id].x)).toBe(true);
+      expect(Number.isFinite(layout.positions[id].y)).toBe(true);
+    }
+  });
+
+  it("treeLayout positions deeper actors at a greater y than their parent", () => {
+    const { trailBuildForest, trailTreeLayout } = extractFunctions("trailBuildForest", "trailTreeLayout");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+    ];
+    const layout = trailTreeLayout(trailBuildForest(actors));
+    expect(layout.positions["child-a"].y).toBeGreaterThan(layout.positions["root"].y);
+  });
+});
