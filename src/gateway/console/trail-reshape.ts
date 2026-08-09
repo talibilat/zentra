@@ -14,6 +14,8 @@ export interface TrailEvent {
   readonly sequence: number | null;
   readonly evidence: readonly TrailEvidenceLink[];
   readonly payload: unknown;
+  readonly spanId: string | null;
+  readonly parentSpanId: string | null;
 }
 
 export interface TrailActorUsageMetric {
@@ -36,6 +38,8 @@ export interface TrailActor {
   readonly model: string | null;
   readonly status: string;
   readonly usage: TrailActorUsage;
+  readonly parentId: string | null;
+  readonly childIds: readonly string[];
 }
 
 export interface TrailView {
@@ -134,6 +138,8 @@ export function reshapeTrail(raw: unknown): TrailView {
         refEventId: String(relationship["event_id"] ?? ""),
       })),
       payload: event["payload"] ?? null,
+      spanId: typeof event["span_id"] === "string" ? event["span_id"] : null,
+      parentSpanId: typeof event["parent_span_id"] === "string" ? event["parent_span_id"] : null,
     };
   });
 
@@ -142,7 +148,21 @@ export function reshapeTrail(raw: unknown): TrailView {
     const role = typeof actor["role"] === "string" ? actor["role"] : null;
     const model = typeof actor["model"] === "string" ? actor["model"] : null;
     const status = typeof actor["status"] === "string" ? actor["status"] : "unknown";
-    return { id, role, color: actorColor(id), glyph: actorGlyph(id, role), model, status, usage: actorUsage(actor) };
+    const parentId = typeof actor["parent_id"] === "string" ? actor["parent_id"] : null;
+    const childIds = Array.isArray(actor["child_ids"])
+      ? actor["child_ids"].filter((child): child is string => typeof child === "string")
+      : [];
+    return {
+      id,
+      role,
+      color: actorColor(id),
+      glyph: actorGlyph(id, role),
+      model,
+      status,
+      usage: actorUsage(actor),
+      parentId,
+      childIds,
+    };
   });
 
   return { runId, durationSeconds, events, actors };

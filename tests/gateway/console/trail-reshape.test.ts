@@ -150,3 +150,36 @@ describe("reshapeTrail actor detail", () => {
     expect(view.actors[0]!.usage.inputTokens).toEqual({ available: false, value: null });
   });
 });
+
+describe("reshapeTrail span and parent-child fields", () => {
+  it("maps span_id and parent_span_id per event, defaulting to null when absent", () => {
+    const view = reshapeTrail({
+      ...RUN_DETAIL,
+      events: [
+        { ...RUN_DETAIL.events[0], span_id: "span-1", parent_span_id: null },
+        { ...RUN_DETAIL.events[1], span_id: "span-2", parent_span_id: "span-1" },
+        RUN_DETAIL.events[2],
+      ],
+    });
+    expect(view.events[0]!.spanId).toBe("span-1");
+    expect(view.events[0]!.parentSpanId).toBeNull();
+    expect(view.events[1]!.spanId).toBe("span-2");
+    expect(view.events[1]!.parentSpanId).toBe("span-1");
+    expect(view.events[2]!.spanId).toBeNull();
+    expect(view.events[2]!.parentSpanId).toBeNull();
+  });
+
+  it("maps actor parent_id and child_ids, defaulting to null/empty when absent", () => {
+    const view = reshapeTrail({
+      ...RUN_DETAIL,
+      actors: [
+        { id: "pod-a", role: "implementation", parent_id: null, child_ids: ["pod-b"] },
+        { id: "pod-b", role: null, parent_id: "pod-a" },
+      ],
+    });
+    expect(view.actors[0]!.parentId).toBeNull();
+    expect(view.actors[0]!.childIds).toEqual(["pod-b"]);
+    expect(view.actors[1]!.parentId).toBe("pod-a");
+    expect(view.actors[1]!.childIds).toEqual([]);
+  });
+});
