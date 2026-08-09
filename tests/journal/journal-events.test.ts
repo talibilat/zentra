@@ -76,4 +76,27 @@ describe("listJournalEvents", () => {
     expect(combined).toEqual(["run.started", "run.completed", "pod.registered"]);
     journal.close();
   });
+
+  it("returns zero matches with hasMore true when the scan window is exhausted before finding a match", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-journal-events-scan-window-"));
+    directories.push(directory);
+    const journal = new SqliteEventJournal(path.join(directory, "journal.sqlite"));
+    const noise = Array.from({ length: 1_000 }, (_, index) => ({
+      streamId: "noise:stream", type: "noise.event", payload: { index }, causationId: null, correlationId: "noise:stream",
+    }));
+    journal.append("noise:stream", 0, noise);
+    journal.append("needle:stream", 0, [
+      { streamId: "needle:stream", type: "needle.found", payload: {}, causationId: null, correlationId: "needle:stream" },
+    ]);
+
+    const page = listJournalEvents(journal, { typePrefix: "needle." });
+    expect(page.events).toEqual([]);
+    expect(page.hasMore).toBe(true);
+    expect(page.nextPosition).toBe(1_000);
+
+    const nextPage = listJournalEvents(journal, { typePrefix: "needle.", afterPosition: page.nextPosition });
+    expect(nextPage.events).toHaveLength(1);
+    expect(nextPage.events[0]!.type).toBe("needle.found");
+    journal.close();
+  });
 });
