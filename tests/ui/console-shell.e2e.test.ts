@@ -611,4 +611,33 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       fixture.journal.close();
     }
   }, 60_000);
+
+  it("browses real journal events on the Events tab, filters, and shows detail on click", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "zentra-console-shell-journal-events-e2e-")));
+    temporaryDirectories.push(root);
+    const fixture = await consoleShellWorkflow(root);
+    fixture.journal.append("probe:e2e", 0, [
+      { streamId: "probe:e2e", type: "probe.one", payload: { marker: "first" }, causationId: null, correlationId: "probe:e2e" },
+      { streamId: "probe:e2e", type: "probe.two", payload: { marker: "second" }, causationId: null, correlationId: "probe:e2e" },
+    ]);
+    const gateway = new LoopbackGateway({ workflow: fixture.workflow });
+    const session = await gateway.start();
+    gateway.setReadiness("ready");
+    try {
+      const driver = await ChromiumWorkflowDriver.open(session.url, root);
+      await driver.click('[data-nav-id="journal"]');
+      await driver.waitFor(`document.querySelector('[data-section-id="journal"]')?.dataset.active === "true"`);
+      await driver.click('[data-journal-view="events"]');
+      await driver.waitFor(`document.getElementById("journal-events-list")?.textContent.includes("probe.one")`);
+      await driver.evaluate(`document.getElementById("journal-events-type-filter").value = "probe.two"`);
+      await driver.click('#journal-events-apply-filter');
+      await driver.waitFor(`document.getElementById("journal-events-list")?.textContent.includes("probe.two") && !document.getElementById("journal-events-list")?.textContent.includes("probe.one")`);
+      await driver.click('#journal-events-list button');
+      const detailText = await driver.evaluate<string>(`document.getElementById("journal-event-detail")?.textContent || ""`);
+      expect(detailText).toContain("probe:e2e");
+    } finally {
+      await gateway.close();
+      fixture.journal.close();
+    }
+  }, 60_000);
 });
