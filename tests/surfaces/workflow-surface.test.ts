@@ -541,6 +541,25 @@ describe("getJournalStatus", () => {
   });
 });
 
+describe("listJournalEvents", () => {
+  it("returns a paged view of every event in the journal", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-workflow-surface-journal-events-"));
+    try {
+      const journal = new SqliteEventJournal(path.join(directory, "events.sqlite"));
+      journal.append("stream-a", 0, [{
+        streamId: "stream-a", type: "test.event", payload: {}, causationId: null, correlationId: "test",
+      }]);
+      const surface = surfaceFor(journal);
+      const page = surface.listJournalEvents({});
+      expect(page.events).toHaveLength(1);
+      expect(page.hasMore).toBe(false);
+      journal.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 function basicFixture() {
   const directory = temporaryDirectory();
   return { directory, journal: new SqliteEventJournal(path.join(directory, "events.sqlite")) };

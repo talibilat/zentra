@@ -39,6 +39,7 @@ import {
   readStreamEvents,
   type EventJournal,
 } from "../journal/journal.js";
+import { listJournalEvents, type JournalEventPage, type JournalEventQuery } from "../journal/journal-events.js";
 import { getJournalStatus, type JournalStatus } from "../journal/journal-status.js";
 import { MilestoneRegistry, type MilestoneRecord, type MilestoneSummary } from "../milestones/milestone-registry.js";
 import type { PlanningAuthorityEnvelope } from "../planning/planning-contracts.js";
@@ -352,6 +353,10 @@ export class WorkflowSurface<TResult = unknown> {
 
   getJournalStatus(): JournalStatus {
     return this.guard(() => getJournalStatus(this.journal, this.databasePath));
+  }
+
+  listJournalEvents(query: JournalEventQuery): JournalEventPage {
+    return this.guard(() => listJournalEvents(this.journal, query));
   }
 
   listGitHubBrokerActivity(): readonly GitHubBrokerActivity[] {
