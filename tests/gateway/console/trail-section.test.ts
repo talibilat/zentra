@@ -11,16 +11,11 @@ describe("trail-section markup", () => {
     expect(TRAIL_MARKUP).not.toContain("<iframe");
   });
 
-  it("renders all four target tabs, with only Events enabled", () => {
+  it("renders all four target tabs", () => {
     expect(TRAIL_MARKUP).toContain('data-trail-view="events"');
-    for (const disabled of ["graph", "tree"]) {
-      const start = TRAIL_MARKUP.indexOf(`data-trail-view="${disabled}"`);
-      expect(start).toBeGreaterThan(-1);
-      const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
-      expect(tag).toContain("disabled");
-      expect(tag).toContain('aria-disabled="true"');
-      expect(tag).toContain('class="badge"');
-    }
+    expect(TRAIL_MARKUP).toContain('data-trail-view="graph"');
+    expect(TRAIL_MARKUP).toContain('data-trail-view="tree"');
+    expect(TRAIL_MARKUP).toContain('data-trail-view="swimlane"');
     const eventsStart = TRAIL_MARKUP.indexOf('data-trail-view="events"');
     const eventsTag = TRAIL_MARKUP.slice(eventsStart, TRAIL_MARKUP.indexOf("</button>", eventsStart));
     expect(eventsTag).not.toContain("disabled");
@@ -32,6 +27,16 @@ describe("trail-section markup", () => {
     const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
     expect(tag).not.toContain("disabled");
     expect(tag).not.toContain('class="badge"');
+  });
+
+  it("enables the Graph and Tree tabs", () => {
+    for (const view of ["graph", "tree"]) {
+      const start = TRAIL_MARKUP.indexOf(`data-trail-view="${view}"`);
+      expect(start).toBeGreaterThan(-1);
+      const tag = TRAIL_MARKUP.slice(start, TRAIL_MARKUP.indexOf("</button>", start));
+      expect(tag).not.toContain("disabled");
+      expect(tag).not.toContain('class="badge"');
+    }
   });
 
   it("has containers for the filter pills, event list, inspector, and scrubber", () => {
@@ -135,13 +140,13 @@ describe("trail-section script", () => {
     expect(body).toContain("trailSelectedEvent=");
   });
 
-  it("gives the unmatched-actor fallback a complete TrailActor shape so Swimlane can't crash on a missing actor", () => {
+  it("gives the unmatched-actor fallback a complete TrailActor shape so Swimlane/Graph/Tree can't crash on a missing actor", () => {
     expect(TRAIL_SCRIPT).toContain(
-      '{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}}}',
+      '{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}},parentId:null,childIds:[]}',
     );
   });
 
-  it("skips restyling disabled tab buttons in the tab-click loop, leaving Graph/Tree visually disabled", () => {
+  it("guards the tab-click restyle loop against disabled buttons, even though none are currently disabled", () => {
     const loopIndex = TRAIL_SCRIPT.indexOf('for(const other of document.querySelectorAll("[data-trail-view]")){');
     expect(loopIndex).toBeGreaterThan(-1);
     const closeIndex = TRAIL_SCRIPT.indexOf("\n    }", loopIndex);
@@ -151,5 +156,96 @@ describe("trail-section script", () => {
     const styleMutationIndex = body.indexOf("other.style.");
     expect(styleMutationIndex).toBeGreaterThan(-1);
     expect(disabledCheckIndex).toBeLessThan(styleMutationIndex);
+  });
+
+  it("renders graph/tree nodes and sets trailFilterActor on click, not a new selection variable", () => {
+    const graphTreeIndex = TRAIL_SCRIPT.indexOf("const renderTrailGraphTree=");
+    expect(graphTreeIndex).toBeGreaterThan(-1);
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", graphTreeIndex + 1);
+    const body = TRAIL_SCRIPT.slice(graphTreeIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain("trailFilterActor=");
+    expect(body).not.toContain("trailSelectedActor");
+  });
+
+  it("dispatches to the graph/tree renderer for both new tabs", () => {
+    const dispatchIndex = TRAIL_SCRIPT.indexOf("const renderTrailView=");
+    const nextConst = TRAIL_SCRIPT.indexOf("\nconst ", dispatchIndex + 1);
+    const body = TRAIL_SCRIPT.slice(dispatchIndex, nextConst > -1 ? nextConst : undefined);
+    expect(body).toContain('trailActiveView==="graph"');
+    expect(body).toContain('trailActiveView==="tree"');
+  });
+});
+
+function extractFunctions(...names: string[]): any {
+  const source = names
+    .map((name) => {
+      const start = TRAIL_SCRIPT.indexOf(`const ${name}=`);
+      if (start === -1) throw new Error(`function ${name} not found in TRAIL_SCRIPT`);
+      let depth = 0;
+      let end = start;
+      let sawBrace = false;
+      for (let index = start; index < TRAIL_SCRIPT.length; index += 1) {
+        const char = TRAIL_SCRIPT[index];
+        if (char === "{" || char === "(") depth += 1;
+        if (char === "{") sawBrace = true;
+        if (char === "}" || char === ")") depth -= 1;
+        // Arrow functions like `(actors)=>{...}` return depth to 0 right after the
+        // parameter list closes, before the body is ever reached. Only treat depth 0
+        // as "done" once we've actually entered a `{` body block.
+        if (sawBrace && depth === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+      return TRAIL_SCRIPT.slice(start, end + 1);
+    })
+    .join("\n");
+  const fn = new Function(`${source}\nreturn {${names.join(",")}};`);
+  return fn();
+}
+
+describe("trail-section layout functions", () => {
+  it("buildForest groups actors into a parent/child tree with computed depth", () => {
+    const { trailBuildForest } = extractFunctions("trailBuildForest");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a", "child-b"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+      { id: "child-b", parentId: "root", childIds: [] },
+    ];
+    const forest = trailBuildForest(actors);
+    expect(forest.roots).toEqual(["root"]);
+    expect(forest.childrenMap.get("root")).toEqual(["child-a", "child-b"]);
+    expect(forest.depth.get("root")).toBe(0);
+    expect(forest.depth.get("child-a")).toBe(1);
+  });
+
+  it("treats an actor whose parentId points at a missing actor as a root", () => {
+    const { trailBuildForest } = extractFunctions("trailBuildForest");
+    const actors = [{ id: "orphan", parentId: "missing-parent", childIds: [] }];
+    const forest = trailBuildForest(actors);
+    expect(forest.roots).toEqual(["orphan"]);
+  });
+
+  it("radialLayout positions every actor with finite x/y coordinates", () => {
+    const { trailBuildForest, trailRadialLayout } = extractFunctions("trailBuildForest", "trailLeafCount", "trailRadialLayout");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+    ];
+    const layout = trailRadialLayout(trailBuildForest(actors));
+    for (const id of ["root", "child-a"]) {
+      expect(Number.isFinite(layout.positions[id].x)).toBe(true);
+      expect(Number.isFinite(layout.positions[id].y)).toBe(true);
+    }
+  });
+
+  it("treeLayout positions deeper actors at a greater y than their parent", () => {
+    const { trailBuildForest, trailTreeLayout } = extractFunctions("trailBuildForest", "trailTreeLayout");
+    const actors = [
+      { id: "root", parentId: null, childIds: ["child-a"] },
+      { id: "child-a", parentId: "root", childIds: [] },
+    ];
+    const layout = trailTreeLayout(trailBuildForest(actors));
+    expect(layout.positions["child-a"].y).toBeGreaterThan(layout.positions["root"].y);
   });
 });

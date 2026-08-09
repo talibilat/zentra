@@ -4,8 +4,8 @@ export const TRAIL_MARKUP = `<div style="flex:1;min-height:0;display:flex;flex-d
   <div id="agenttrail-status" class="agenttrail-status" data-tone="ok" role="status" aria-live="polite">AgentTrail is live and read-only.</div>
   <div style='flex:none;display:flex;align-items:center;gap:14px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap'>
     <div style='display:flex;gap:4px'>
-      <button type="button" data-trail-view="graph" disabled aria-disabled="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--faint);opacity:.55;cursor:not-allowed;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Graph<span class="badge" style='font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px'>Phase 2</span></button>
-      <button type="button" data-trail-view="tree" disabled aria-disabled="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--faint);opacity:.55;cursor:not-allowed;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Tree<span class="badge" style='font:600 9px ${CONSOLE_FONT_STACK_MONO};background:var(--warn);color:#0a0e17;border-radius:8px;padding:1px 7px'>Phase 2</span></button>
+      <button type="button" data-trail-view="graph" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dim);cursor:pointer;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Graph</button>
+      <button type="button" data-trail-view="tree" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dim);cursor:pointer;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Tree</button>
       <button type="button" data-trail-view="swimlane" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dim);cursor:pointer;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Swimlane</button>
       <button type="button" data-trail-view="events" aria-current="true" style='display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;border:1px solid var(--accent);background:rgba(122,162,255,.12);color:var(--accent);cursor:default;font:600 12px ${CONSOLE_FONT_STACK_SANS}'>Events</button>
     </div>
@@ -39,7 +39,7 @@ let trailFilterKind=null;
 let trailFailedOnly=false;
 let trailScrubT=1;
 let trailActiveView="events";
-const trailActorById=(id)=>trailActors.find(actor=>actor.id===id)||{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}}};
+const trailActorById=(id)=>trailActors.find(actor=>actor.id===id)||{id,role:null,color:"var(--faint)",glyph:"?",model:null,status:"unknown",usage:{inputTokens:{available:false,value:null},outputTokens:{available:false,value:null},totalTokens:{available:false,value:null},costUsd:{available:false,value:null}},parentId:null,childIds:[]};
 const trailKindColor=(kind)=>{const palette=["var(--run)","var(--ok)","var(--warn)","var(--accent)","var(--orch)","var(--err)"];const prefix=kind.split(".")[0]||kind;let hash=0;for(let index=0;index<prefix.length;index+=1)hash=(hash*31+prefix.charCodeAt(index))|0;return palette[Math.abs(hash)%palette.length]};
 const trailFormatClock=(seconds)=>{const total=Math.max(0,Math.round(seconds));const minutes=Math.floor(total/60);const rest=String(total%60).padStart(2,"0");return minutes+":"+rest};
 const trailMaxOffset=()=>trailEvents.reduce((max,event)=>Math.max(max,event.offsetSeconds),0);
@@ -124,6 +124,163 @@ const renderTrailScrubber=()=>{
   const scrub=$("trail-scrub");if(scrub)scrub.value=String(Math.round(trailScrubT*1000));
 };
 const trailActorUsageLabel=(actor)=>actor.usage.totalTokens.available?actor.usage.totalTokens.value+" tokens":null;
+const trailBuildForest=(actors)=>{
+  const byId=new Map(actors.map(actor=>[actor.id,actor]));
+  const childrenMap=new Map();
+  actors.forEach(actor=>childrenMap.set(actor.id,(actor.childIds||[]).filter(id=>byId.has(id))));
+  const hasParent=new Set();
+  actors.forEach(actor=>{if(actor.parentId&&byId.has(actor.parentId))hasParent.add(actor.id)});
+  const roots=actors.filter(actor=>!hasParent.has(actor.id)).map(actor=>actor.id);
+  const depth=new Map();
+  const assignDepth=(id,d)=>{depth.set(id,d);(childrenMap.get(id)||[]).forEach(c=>assignDepth(c,d+1))};
+  roots.forEach(r=>assignDepth(r,0));
+  return {byId,childrenMap,roots,depth};
+};
+const trailLeafCount=(id,childrenMap,leaves)=>{
+  const kids=childrenMap.get(id)||[];
+  if(!kids.length){leaves[id]=1;return 1}
+  let sum=0;kids.forEach(c=>{sum+=trailLeafCount(c,childrenMap,leaves)});
+  leaves[id]=sum;return sum;
+};
+const trailRadialLayout=(forest)=>{
+  const {childrenMap,roots}=forest;
+  const leaves={};
+  roots.forEach(r=>trailLeafCount(r,childrenMap,leaves));
+  const totalLeaves=roots.reduce((sum,r)=>sum+(leaves[r]||1),0)||1;
+  const cx=560,cy=380,step=132;
+  const positions={};
+  const place=(id,a0,a1,depth)=>{
+    const mid=(a0+a1)/2;
+    const r=depth*step;
+    positions[id]={x:cx+r*Math.cos(mid),y:cy+r*Math.sin(mid)};
+    const kids=childrenMap.get(id)||[];
+    if(kids.length){
+      let a=a0;
+      kids.forEach(child=>{
+        const frac=(leaves[child]||1)/(leaves[id]||1);
+        const next=a+(a1-a0)*frac;
+        place(child,a,next,depth+1);
+        a=next;
+      });
+    }
+  };
+  let a0=-Math.PI/2;
+  const sweep=Math.PI*2;
+  roots.forEach(root=>{
+    const frac=(leaves[root]||1)/totalLeaves;
+    const a1=a0+sweep*frac;
+    place(root,a0,a1,roots.length>1?0.7:0);
+    a0=a1;
+  });
+  return {positions,world:{w:1120,h:760}};
+};
+const trailTreeLayout=(forest)=>{
+  const {childrenMap,roots}=forest;
+  const positions={};
+  let leafIdx=0;
+  const rowH=118,colW=120;
+  const walk=(id,depth)=>{
+    const kids=childrenMap.get(id)||[];
+    let x;
+    if(!kids.length){x=leafIdx++}
+    else{
+      const xs=kids.map(c=>walk(c,depth+1));
+      x=(xs[0]+xs[xs.length-1])/2;
+    }
+    positions[id]={gx:x,y:60+depth*rowH};
+    return x;
+  };
+  roots.forEach(r=>walk(r,0));
+  const total=Math.max(leafIdx,1);
+  const width=Math.max(total*colW,720);
+  Object.values(positions).forEach(p=>{p.x=60+(p.gx+0.5)*(width/total)});
+  const maxDepth=Math.max(0,...[...forest.depth.values()]);
+  return {positions,world:{w:width+120,h:60+(maxDepth+1)*rowH+80}};
+};
+const trailActorStatusColor=(status)=>{
+  const normalized=(status||"").toLowerCase();
+  if(normalized==="completed")return "var(--ok)";
+  if(normalized==="failed"||normalized==="denied"||normalized==="timed_out")return "var(--err)";
+  if(normalized==="waiting"||normalized==="cancelled"||normalized==="cancelling")return "var(--warn)";
+  if(normalized==="running")return "var(--run)";
+  return "var(--faint)";
+};
+const trailEventsAtHorizon=()=>{const horizon=trailScrubT*trailMaxOffset();return trailEvents.filter(event=>event.offsetSeconds<=horizon)};
+const renderTrailGraphTree=(layoutKind)=>{
+  const host=$("trail-events");if(!host)return;host.replaceChildren();
+  const visible=trailVisibleEvents();
+  setText($("trail-event-count"),visible.length+" of "+trailEvents.length+" events");
+  if(trailLoadFailed){const empty=document.createElement("p");empty.className="empty";setText(empty,"Trace evidence unavailable.");host.append(empty);return}
+  if(!trailRunId){const empty=document.createElement("p");empty.className="empty";setText(empty,"Select a run to see its trail.");host.append(empty);return}
+  const horizonActorIds=new Set(trailEventsAtHorizon().map(event=>event.actorId));
+  const actors=trailActors.filter(actor=>horizonActorIds.has(actor.id));
+  if(!actors.length){const empty=document.createElement("p");empty.className="empty";setText(empty,"No events match the current filters.");host.append(empty);return}
+  const matchingActorIds=new Set(visible.map(event=>event.actorId));
+  const forest=trailBuildForest(actors);
+  const layout=layoutKind==="graph"?trailRadialLayout(forest):trailTreeLayout(forest);
+  const positions=layout.positions;
+  const world=layout.world;
+  const positionedIds=new Set(actors.filter(actor=>positions[actor.id]).map(actor=>actor.id));
+
+  const canvas=document.createElement("div");
+  canvas.style.cssText="position:relative;width:"+world.w+"px;height:"+world.h+"px";
+
+  const svgNamespace="http://www.w3.org/2000/svg";
+  const svg=document.createElementNS(svgNamespace,"svg");
+  svg.setAttribute("width",String(world.w));
+  svg.setAttribute("height",String(world.h));
+  svg.style.cssText="position:absolute;top:0;left:0";
+  for(const actor of actors){
+    if(!actor.parentId||!positionedIds.has(actor.parentId)||!positionedIds.has(actor.id))continue;
+    const p=positions[actor.id],pp=positions[actor.parentId];
+    const dim=!matchingActorIds.has(actor.id)||!matchingActorIds.has(actor.parentId);
+    const path=document.createElementNS(svgNamespace,"path");
+    let d;
+    if(layoutKind==="tree"){
+      const my=(p.y+pp.y)/2;
+      d="M "+pp.x+" "+(pp.y+22)+" C "+pp.x+" "+my+", "+p.x+" "+my+", "+p.x+" "+(p.y-22);
+    }else{
+      d="M "+pp.x+" "+pp.y+" L "+p.x+" "+p.y;
+    }
+    path.setAttribute("d",d);
+    path.setAttribute("stroke","var(--line)");
+    path.setAttribute("stroke-width","1.4");
+    path.setAttribute("fill","none");
+    path.style.opacity=dim?"0.25":"1";
+    svg.append(path);
+  }
+  canvas.append(svg);
+
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  for(const actor of actors){
+    const p=positions[actor.id];if(!p)continue;
+    const isRoot=forest.depth.get(actor.id)===0;
+    const size=isRoot?58:44;
+    const color=trailActorStatusColor(actor.status);
+    const dim=!matchingActorIds.has(actor.id);
+    const node=document.createElement("button");node.type="button";
+    node.style.cssText="position:absolute;left:"+p.x+"px;top:"+p.y+"px;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;background:transparent;border:none;cursor:pointer;padding:0;opacity:"+(dim?"0.3":"1");
+    const dot=document.createElement("div");
+    dot.style.cssText="width:"+size+"px;height:"+size+"px;border-radius:"+(isRoot?"14px":"50%")+";display:flex;align-items:center;justify-content:center;font:700 13px "+trailFontMono+";color:#0a0e17;background:"+actor.color+";border:2px solid "+(actor.id===trailFilterActor?"var(--accent)":color);
+    setText(dot,actor.glyph);
+    const idLabel=document.createElement("span");idLabel.style.cssText="font:500 10px "+trailFontMono+";color:var(--faint);max-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";setText(idLabel,actor.id);
+    node.append(dot,idLabel);
+    const usageLabel=trailActorUsageLabel(actor);
+    node.title=(actor.role?actor.role+" · ":"")+label(actor.status)+(actor.model?" · "+actor.model:"")+(usageLabel?" · "+usageLabel:"");
+    node.addEventListener("click",()=>{trailFilterActor=trailFilterActor===actor.id?null:actor.id;renderTrailView()});
+    canvas.append(node);
+    minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y);
+  }
+
+  const scroller=document.createElement("div");scroller.style.cssText="overflow:auto;width:100%;height:100%";
+  scroller.append(canvas);
+  host.append(scroller);
+  if(Number.isFinite(minX)){
+    const centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
+    scroller.scrollLeft=Math.max(0,centerX-scroller.clientWidth/2);
+    scroller.scrollTop=Math.max(0,centerY-scroller.clientHeight/2);
+  }
+};
 const renderTrailSwimlane=()=>{
   const host=$("trail-events");if(!host)return;host.replaceChildren();
   const visible=trailVisibleEvents();
@@ -167,7 +324,10 @@ const renderTrailSwimlane=()=>{
 };
 const renderTrailView=()=>{
   renderTrailPills();
-  if(trailActiveView==="swimlane")renderTrailSwimlane();else renderTrailEvents();
+  if(trailActiveView==="swimlane")renderTrailSwimlane();
+  else if(trailActiveView==="graph")renderTrailGraphTree("graph");
+  else if(trailActiveView==="tree")renderTrailGraphTree("tree");
+  else renderTrailEvents();
   const selected=trailSelectedEvent?trailEvents.find(event=>event.id===trailSelectedEvent):null;
   if(selected)renderTrailInspectorEvent(selected);else renderTrailInspectorDefault();
   renderTrailScrubber();
