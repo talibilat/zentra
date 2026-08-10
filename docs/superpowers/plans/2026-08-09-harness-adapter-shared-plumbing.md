@@ -1270,6 +1270,8 @@ git commit -m "Add @modelcontextprotocol/sdk dependency for the writer proposal 
 Create `tests/harnesses/writer-proposal-mcp-server.test.ts`. This test drives the server with real HTTP requests shaped like MCP JSON-RPC calls, rather than pulling in a full MCP client, so it stays a fast, dependency-light unit test:
 
 ```ts
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { startWriterProposalMcpServer } from "../../src/harnesses/writer-proposal-mcp-server.js";
@@ -1330,7 +1332,6 @@ describe("writer proposal MCP server", () => {
     const server = await startWriterProposalMcpServer();
     const sessionId = await initializeSession(server.url, server.bearerTokenValue);
     const content = "hello world\n";
-    const contentSha256 = "b94d27b9934d3e08a52e52d7da7dacefac72acb9dfb27fcdb9ae0f3a0d24e2c8".slice(0, 64);
     const response = await callProposePatch(server.url, server.bearerTokenValue, sessionId, [
       { path: "src/example.ts", expectedSha256: null, content, contentSha256: shaHex(content) },
     ]);
@@ -1383,7 +1384,7 @@ describe("writer proposal MCP server", () => {
 });
 
 function shaHex(value: string): string {
-  return require("node:crypto").createHash("sha256").update(value, "utf8").digest("hex");
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 ```
 
