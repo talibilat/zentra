@@ -4,7 +4,7 @@ import { JOURNAL_MARKUP, JOURNAL_SCRIPT } from "../../../src/gateway/console/jou
 
 describe("journal section", () => {
   it("keeps the Status panel single-column, not a two-column list+detail layout", () => {
-    // Scoped to the status panel only: #126 adds a genuinely two-column
+    // Scoped to the status panel only: #127 adds a genuinely two-column
     // list+detail Events panel (data-columns="2"), so the original
     // whole-markup assertion no longer holds for JOURNAL_MARKUP as a whole.
     const statusPanel = JOURNAL_MARKUP.slice(
@@ -18,7 +18,7 @@ describe("journal section", () => {
   it("fetches status from the real API, not a static demo dataset", () => {
     expect(JOURNAL_SCRIPT).toContain('request("/api/v1/zentra/journal")');
     expect(JOURNAL_SCRIPT).not.toContain("DEMO_DATA");
-    // Scoped to the status-loading code only: #126 adds a second, independent
+    // Scoped to the status-loading code only: #127 adds a second, independent
     // request() call for loadJournalEvents, so the whole-script count is no
     // longer 1.
     const statusScript = JOURNAL_SCRIPT.slice(0, JOURNAL_SCRIPT.indexOf("let journalActiveView"));
@@ -98,5 +98,69 @@ describe("journal section", () => {
   it("appends load-more results instead of replacing the existing list", () => {
     const loadMoreIndex = JOURNAL_SCRIPT.indexOf("journal-events-load-more");
     expect(loadMoreIndex).toBeGreaterThan(-1);
+  });
+
+  it("syncs Load-more button visibility on every renderJournalEventsList path, including both empty-list early returns", () => {
+    const listBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventsList="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventDetail="),
+    );
+    const syncCallIndex = listBody.indexOf("syncJournalEventsControls()");
+    const failedEmptyReturnIndex = listBody.indexOf("journalEventsLoadFailed&&!journalEvents.length");
+    const zeroMatchReturnIndex = listBody.indexOf("No matching events in this range.");
+    expect(syncCallIndex).toBeGreaterThan(-1);
+    // The sync call must appear before both early-return branches so neither one
+    // skips it - a page with hasMore:true must still show Load more even when it
+    // renders an empty-list message.
+    expect(syncCallIndex).toBeLessThan(failedEmptyReturnIndex);
+    expect(syncCallIndex).toBeLessThan(zeroMatchReturnIndex);
+  });
+
+  it("guards loadJournalEvents against overlapping in-flight requests, clearing the flag in a finally block", () => {
+    const loadBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const loadJournalEvents="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventsList="),
+    );
+    expect(loadBody).toContain("if(journalEventsLoading)return");
+    expect(loadBody).toContain("journalEventsLoading=true");
+    expect(loadBody).toMatch(/finally\{\s*journalEventsLoading=false/);
+  });
+
+  it("disables the Load-more and Apply buttons while a fetch is in flight", () => {
+    const syncBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const syncJournalEventsControls="),
+      JOURNAL_SCRIPT.indexOf("const loadJournalEvents="),
+    );
+    expect(syncBody).toContain('$("journal-events-load-more")');
+    expect(syncBody).toContain("loadMore.disabled=journalEventsLoading");
+    expect(syncBody).toContain('$("journal-events-apply-filter")');
+    expect(syncBody).toContain("applyButton.disabled=journalEventsLoading");
+  });
+
+  it("renders event rows as a dense single-line row, not Pods'/Milestones' .run-card style", () => {
+    const listBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventsList="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventDetail="),
+    );
+    expect(listBody).not.toContain('row.className="run-card"');
+    expect(listBody).toContain('row.className="journal-event-row"');
+    expect(listBody).toContain("display:flex;align-items:center;gap:12px");
+  });
+
+  it("shows the full StoredEvent via appendJson in the detail panel, not just the payload", () => {
+    const detailBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventDetail="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalEvents="),
+    );
+    expect(detailBody).toContain('appendJson(host,"Event",event)');
+    expect(detailBody).not.toContain('appendJson(host,"Payload",event.payload)');
+  });
+
+  it("clears the sticky load-failed message when a row is selected, so re-rendering after a click doesn't show a stale failure", () => {
+    const listBody = JOURNAL_SCRIPT.slice(
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventsList="),
+      JOURNAL_SCRIPT.indexOf("const renderJournalEventDetail="),
+    );
+    expect(listBody).toContain("journalSelectedEventId=event.eventId;journalEventsLoadFailed=false;renderJournalEvents()");
   });
 });

@@ -1,4 +1,4 @@
-import { CONSOLE_FONT_STACK_SANS } from "./design-tokens.js";
+import { CONSOLE_FONT_STACK_MONO, CONSOLE_FONT_STACK_SANS } from "./design-tokens.js";
 
 export const JOURNAL_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 30px" data-screen-label="Journal">
   <div style='display:flex;gap:4px;margin-bottom:16px'>
@@ -12,11 +12,12 @@ export const JOURNAL_MARKUP = `<div style="flex:1;overflow-y:auto;padding:26px 3
       <input type="text" id="journal-events-type-filter" placeholder="Type prefix" style='flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--text)'>
       <button type="button" id="journal-events-apply-filter" style='padding:6px 14px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--dim);cursor:pointer'>Apply</button>
     </div>
-    <section class="workspace" data-columns="2" aria-label="Journal events"><section class="panel"><h2>Events</h2><div id="journal-events-list" class="stack"></div><button type="button" id="journal-events-load-more" style="margin-top:10px">Load more</button></section><section class="panel"><h2>Event detail</h2><div id="journal-event-detail"></div></section></section>
+    <section class="workspace" data-columns="2" aria-label="Journal events"><section class="panel"><h2>Events</h2><div id="journal-events-list" style="display:flex;flex-direction:column;gap:4px"></div><button type="button" id="journal-events-load-more" style="margin-top:10px">Load more</button></section><section class="panel"><h2>Event detail</h2><div id="journal-event-detail"></div></section></section>
   </div>
 </div>`;
 
-export const JOURNAL_SCRIPT = String.raw`let journalStatus=null;let journalLoadFailed=false;
+export const JOURNAL_SCRIPT = String.raw`const journalFontMono='${CONSOLE_FONT_STACK_MONO}';
+let journalStatus=null;let journalLoadFailed=false;
 const loadJournalStatus=async()=>{
   try{journalStatus=await request("/api/v1/zentra/journal");journalLoadFailed=false}
   catch{journalStatus=null;journalLoadFailed=true}
@@ -59,6 +60,7 @@ let journalEvents=[];
 let journalEventsNextPosition=0;
 let journalEventsHasMore=false;
 let journalEventsLoadFailed=false;
+let journalEventsLoading=false;
 let journalSelectedEventId=null;
 let journalStreamFilter="";
 let journalTypeFilter="";
@@ -69,7 +71,16 @@ const journalEventsQueryString=(afterPosition)=>{
   if(journalTypeFilter)params.set("typePrefix",journalTypeFilter);
   return params.toString();
 };
+const syncJournalEventsControls=()=>{
+  const loadMore=$("journal-events-load-more");
+  if(loadMore){loadMore.style.display=journalEventsHasMore?"block":"none";loadMore.disabled=journalEventsLoading}
+  const applyButton=$("journal-events-apply-filter");
+  if(applyButton)applyButton.disabled=journalEventsLoading;
+};
 const loadJournalEvents=async(append)=>{
+  if(journalEventsLoading)return;
+  journalEventsLoading=true;
+  syncJournalEventsControls();
   try{
     const afterPosition=append?journalEventsNextPosition:undefined;
     const page=await request("/api/v1/zentra/journal/events?"+journalEventsQueryString(afterPosition));
@@ -80,27 +91,30 @@ const loadJournalEvents=async(append)=>{
   }catch{
     if(!append){journalEvents=[];journalEventsNextPosition=0;journalEventsHasMore=false}
     journalEventsLoadFailed=true;
+  }finally{
+    journalEventsLoading=false;
   }
   renderJournalEvents();
 };
 const renderJournalEventsList=()=>{
   const host=$("journal-events-list");if(!host)return;host.replaceChildren();
+  syncJournalEventsControls();
   if(journalEventsLoadFailed&&!journalEvents.length){const empty=document.createElement("p");empty.className="empty";setText(empty,"Journal events unavailable.");host.append(empty);return}
   if(!journalEvents.length){const empty=document.createElement("p");empty.className="empty";setText(empty,journalEventsHasMore?"No matching events in this range.":"No events found.");host.append(empty);return}
   for(const event of journalEvents){
-    const row=document.createElement("button");row.type="button";row.className="run-card";
-    row.dataset.selected=String(event.eventId===journalSelectedEventId);
-    const position=document.createElement("span");setText(position,String(event.globalPosition));
-    const stream=document.createElement("strong");setText(stream,event.streamId);
-    const type=document.createElement("span");setText(type,event.type);
-    const recordedAt=document.createElement("span");setText(recordedAt,event.recordedAt);
+    const selected=event.eventId===journalSelectedEventId;
+    const row=document.createElement("button");row.type="button";row.className="journal-event-row";
+    row.dataset.selected=String(selected);
+    row.style.cssText="display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:7px 10px;border-radius:8px;border:1px solid "+(selected?"var(--accent)":"var(--line)")+";background:"+(selected?"rgba(122,162,255,.07)":"var(--panel)")+";color:var(--text);cursor:pointer";
+    const position=document.createElement("span");position.style.cssText="font:500 10.5px "+journalFontMono+";color:var(--faint);width:60px;flex:none";setText(position,String(event.globalPosition));
+    const stream=document.createElement("span");stream.style.cssText="font:600 12px "+journalFontMono+";flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";setText(stream,event.streamId);
+    const type=document.createElement("span");type.style.cssText="font:600 10px "+journalFontMono+";color:var(--accent);background:var(--panel2);padding:3px 7px;border-radius:4px;white-space:nowrap;flex:none";setText(type,event.type);
+    const recordedAt=document.createElement("span");recordedAt.style.cssText="font:400 10.5px "+journalFontMono+";color:var(--dim);flex:none;white-space:nowrap";setText(recordedAt,event.recordedAt);
     row.append(position,stream,type,recordedAt);
-    row.addEventListener("click",()=>{journalSelectedEventId=event.eventId;renderJournalEvents()});
+    row.addEventListener("click",()=>{journalSelectedEventId=event.eventId;journalEventsLoadFailed=false;renderJournalEvents()});
     host.append(row);
   }
   if(journalEventsLoadFailed){const failure=document.createElement("p");failure.className="empty";setText(failure,"Journal events unavailable.");host.append(failure)}
-  const loadMore=$("journal-events-load-more");
-  if(loadMore)loadMore.style.display=journalEventsHasMore?"block":"none";
 };
 const renderJournalEventDetail=()=>{
   const host=$("journal-event-detail");if(!host)return;host.replaceChildren();
@@ -114,7 +128,7 @@ const renderJournalEventDetail=()=>{
     field("Recorded at",event.recordedAt),
   );
   host.append(facts);
-  appendJson(host,"Payload",event.payload);
+  appendJson(host,"Event",event);
 };
 const renderJournalEvents=()=>{renderJournalEventsList();renderJournalEventDetail()};
 const renderJournalView=()=>{

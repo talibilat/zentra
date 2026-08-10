@@ -663,17 +663,17 @@ describe.skipIf(acceptanceBrowser === null)("console shell, real browser", () =>
       // Wait for the tab's automatic unfiltered first load to land before applying the type
       // filter below, so the filtered request is the only fetch in flight and its response
       // can't be raced (and overwritten) by the earlier unfiltered one.
-      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length > 0`);
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.journal-event-row").length > 0`);
       await driver.evaluate(`document.getElementById("journal-events-type-filter").value = "loadmore.event"`);
       await driver.click('#journal-events-apply-filter');
-      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length === 50`);
-      const firstPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.run-card").length`);
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.journal-event-row").length === 50`);
+      const firstPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.journal-event-row").length`);
       const loadMoreDisplayAfterFirstPage = await driver.evaluate<string>(`document.getElementById("journal-events-load-more")?.style.display || ""`);
       expect(firstPageRowCount).toBe(50);
       expect(loadMoreDisplayAfterFirstPage).toBe("block");
       await driver.click('#journal-events-load-more');
-      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.run-card").length === ${seededEventCount}`);
-      const secondPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.run-card").length`);
+      await driver.waitFor(`document.querySelectorAll("#journal-events-list button.journal-event-row").length === ${seededEventCount}`);
+      const secondPageRowCount = await driver.evaluate<number>(`document.querySelectorAll("#journal-events-list button.journal-event-row").length`);
       const loadMoreDisplayAfterSecondPage = await driver.evaluate<string>(`document.getElementById("journal-events-load-more")?.style.display || ""`);
       expect(secondPageRowCount).toBe(seededEventCount);
       expect(loadMoreDisplayAfterSecondPage).toBe("none");
