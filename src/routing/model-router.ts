@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { MilestoneRole } from "../contracts/milestone.js";
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
+import type { HarnessId } from "../harnesses/harness-id.js";
 import type { OutcomeHistoryRecord } from "./routing-events.js";
 
 export type { OutcomeHistoryRecord } from "./routing-events.js";
@@ -11,7 +12,7 @@ export interface RouteApprovedModelRequest {
   readonly taskId: string;
   readonly taskType: string;
   readonly role: MilestoneRole;
-  readonly harness: "opencode";
+  readonly harness: HarnessId;
   readonly requiredTools: readonly string[];
   readonly network: "denied" | "declared";
   readonly requiredContextTokens: number;
