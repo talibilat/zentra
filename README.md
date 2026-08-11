@@ -9,7 +9,7 @@ Zentra provides two main paths:
 - A fixed OpenCode milestone workflow for trusted projects.
 
 The current release is a Trusted-Project MVP.
-It is not a multi-tenant sandbox
+It is not a multi-tenant sandbox.
 
 ## Requirements
 
