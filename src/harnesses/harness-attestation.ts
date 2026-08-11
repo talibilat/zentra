@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { createReadStream, realpathSync, statSync } from "node:fs";
 
 import type { WorkerAdapter } from "../workers/worker-adapter.js";
+import type { HarnessId } from "./harness-id.js";
 
 const DigestPattern = /^[a-f0-9]{64}$/;
 const MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES = 512;
 
-export interface HostOpenCodeAttestationRequest {
+export interface HarnessAttestationRequest {
+  readonly harness: HarnessId;
   readonly executable: string;
   readonly home: string;
   readonly cwd: string;
@@ -16,17 +18,18 @@ export interface HostOpenCodeAttestationRequest {
   readonly timeoutMs: number;
 }
 
-export interface HostOpenCodeAttestation {
+export interface HarnessAttestation {
+  readonly harness: HarnessId;
   readonly executable: string;
   readonly executableSha256: string;
   readonly version: string;
 }
 
-export async function attestHostOpenCode(
+export async function attestHostHarnessExecutable(
   worker: WorkerAdapter,
-  request: HostOpenCodeAttestationRequest,
+  request: HarnessAttestationRequest,
   signal: AbortSignal,
-): Promise<HostOpenCodeAttestation> {
+): Promise<HarnessAttestation> {
   try {
     if (!DigestPattern.test(request.expectedSha256) || !validVersion(request.expectedVersion)) throw new Error("invalid attestation");
     const executable = canonicalExecutable(request.executable);
@@ -35,7 +38,7 @@ export async function attestHostOpenCode(
     const before = await sha256File(executable);
     if (before !== request.expectedSha256) throw new Error("digest mismatch");
     const result = await worker.execute({
-      taskId: "opencode-operator-attestation",
+      taskId: `${request.harness}-operator-attestation`,
       executable,
       args: ["--version"],
       cwd,
@@ -46,9 +49,9 @@ export async function attestHostOpenCode(
     const after = await sha256File(executable);
     if (result.outcome !== "completed" || result.exitCode !== 0 || result.stderr !== "" ||
       version !== request.expectedVersion || after !== before) throw new Error("attestation mismatch");
-    return Object.freeze({ executable, executableSha256: after, version });
+    return Object.freeze({ harness: request.harness, executable, executableSha256: after, version });
   } catch {
-    throw new Error("host OpenCode operator attestation failed");
+    throw new Error(`host ${request.harness} operator attestation failed`);
   }
 }
 

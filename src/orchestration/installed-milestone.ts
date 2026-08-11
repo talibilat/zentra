@@ -9,7 +9,7 @@ import type { ModelBroker } from "../capsule/model-broker.js";
 import { MilestonePlanSchema, type MilestonePlan, type PlannedTask } from "../contracts/milestone.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { OpenCodeProbe } from "../harnesses/opencode-probe.js";
-import { attestHostOpenCode } from "../harnesses/opencode-attestation.js";
+import { attestHostHarnessExecutable } from "../harnesses/harness-attestation.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import type { EventJournal } from "../journal/journal.js";
