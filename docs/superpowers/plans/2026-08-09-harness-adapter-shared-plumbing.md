@@ -390,14 +390,34 @@ git commit -m "Generalize the writer-worktree harness guard beyond opencode"
 
 **Files:**
 - Create: `src/harnesses/harness-writer.ts`
+- Modify: `src/agents/opencode-writer-events.ts`
 - Modify: `src/harnesses/opencode-writer.ts`
 - Modify: `src/workspaces/path-claims.ts`
 - Modify: `src/orchestration/writer-worktree-capsule.ts`
+- Modify: `src/tasks/task-projection.ts`
+- Modify: `tests/agents/opencode-writer-events.test.ts`
+- Modify: `tests/tasks/task-projection.test.ts`
 
 **Interfaces:**
 - Produces: `WriterTaskPacket`, `WriterRequest`, `WriterReport`, `WriterUsage`, `WriterDispatchBinding`, `PreparedWriterRequest`, `HarnessWriter` from `src/harnesses/harness-writer.js`. `ClaudeCodeWriter` and `CodexWriter` (built in later phases) implement `HarnessWriter` against these same types.
+- Produces: `WriterEventChain`, `WriterEventChainSchema`, `createWriterEventChain` from `src/agents/opencode-writer-events.js` (renamed from `OpenCodeWriterEventChain`, `OpenCodeWriterEventChainSchema`, `createOpenCodeWriterEventChain`).
 
 This task is a pure rename-and-move refactor. It changes no behavior. Because of that, it does not follow the write-test-first shape of the other tasks; instead, verification is running the full existing suite before and after.
+
+- [ ] **Step 0: Rename the event chain types to harness-neutral names**
+
+The writer's `eventChain` field carries a hash-chained forensic record of the process's newline-delimited stdout, whose `chainSha256` is the durable tool-evidence digest recorded in journal receipts and checkpoints. Its structure is already harness-agnostic (any JSONL-emitting harness chains the same way, including Claude Code's `stream-json` and Codex's `--json`); only its name says OpenCode. Rename it before extracting the shared types, so the shared `WriterReport` does not carry an OpenCode-specific type name.
+
+In `src/agents/opencode-writer-events.ts`, rename the three exported symbols:
+- `OpenCodeWriterEventChainSchema` becomes `WriterEventChainSchema`
+- `OpenCodeWriterEventChain` becomes `WriterEventChain`
+- `createOpenCodeWriterEventChain` becomes `createWriterEventChain`
+
+Leave the file path, the schema's internal structure, every field name, and every validation rule exactly as they are. This is a symbol rename only. In particular the persisted field is still named `eventChain` and the persisted shape is unchanged, so durable journal events written before this change still parse (verify this by confirming `src/tasks/task-projection.ts` still parses `payload["eventChain"]` with the renamed schema and its existing test still passes).
+
+Update every reference to the old names. Run `grep -rn "OpenCodeWriterEventChain\|createOpenCodeWriterEventChain" src tests` and fix every hit. At the time this plan was written the referencing files were: `src/tasks/task-projection.ts`, `src/harnesses/opencode-writer.ts`, `src/workspaces/path-claims.ts`, `tests/tasks/task-projection.test.ts`, and `tests/agents/opencode-writer-events.test.ts`. Re-run the grep after your edits to confirm zero remaining hits.
+
+Verify with `pnpm run check` (clean) and `pnpm vitest run tests/agents/opencode-writer-events.test.ts tests/tasks/task-projection.test.ts` (all pass) before moving to Step 1.
 
 - [ ] **Step 1: Create the shared types module**
 
@@ -407,6 +427,7 @@ Create `src/harnesses/harness-writer.ts` with the following content, moved verba
 import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { UntrustedEvidenceHandoff } from "../orchestration/untrusted-evidence-handoff.js";
 import type { WriterPatchProposal } from "../contracts/writer-patch.js";
+import type { WriterEventChain } from "../agents/opencode-writer-events.js";
 
 export interface WriterTaskPacket {
   readonly brief: string;
@@ -488,6 +509,7 @@ export interface WriterReport {
   };
   readonly stdoutSha256: string;
   readonly stderrSha256: string;
+  readonly eventChain: WriterEventChain;
   readonly rawOutputPolicy: "not_retained";
   readonly protocolFailure: string | null;
   /** Transient process output. Callers must not journal or otherwise retain it. */
@@ -529,6 +551,8 @@ export interface HarnessWriter {
 ```
 
 Note: `WriterReport.protocolFailure` and `usageEvidence` are widened from OpenCode's specific string literal unions (`"invalid_native_event_stream" | null` and `"native_tokens" | "legacy_usage" | "none"`) to plain `string | null` / `string` here, since this type is now shared across harnesses that will report different protocol failure kinds. `OpenCodeWriterReport`-specific call sites that need the narrower literal keep it locally in `opencode-writer.ts` (see Step 2).
+
+`eventChain` stays on the shared `WriterReport` (typed as the Step 0 renamed `WriterEventChain`) because downstream consumers depend on it directly and harness-agnostically: `src/workspaces/path-claims.ts` records it into the durable writer receipt, and `src/orchestration/writer-worktree-capsule.ts` reads `eventChain.chainSha256` as the checkpoint's `toolEvidenceSha256`. Every harness must therefore produce one.
 
 - [ ] **Step 2: Refactor `opencode-writer.ts` to use the shared types**
 
