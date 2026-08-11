@@ -8,7 +8,7 @@ import { DockerOpenCodeReadOnlyCapsule } from "../capsule/opencode-read-only-cap
 import type { ModelBroker } from "../capsule/model-broker.js";
 import { MilestonePlanSchema, type MilestonePlan, type PlannedTask } from "../contracts/milestone.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import { OpenCodeProbe } from "../harnesses/opencode-probe.js";
+import { HarnessProbe } from "../harnesses/harness-probe.js";
 import { attestHostHarnessExecutable } from "../harnesses/harness-attestation.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";

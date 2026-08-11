@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 
-import type { OpenCodeProbeReport } from "../../src/harnesses/opencode-probe.js";
+import type { HarnessProbeReport } from "../../src/harnesses/harness-probe.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import type { OpenCodeSingleFileTracerRequest } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
@@ -19,7 +19,7 @@ describe("RoutedOpenCodeExecution", () => {
     const tasks = new TaskService(journal);
     const history = new JournalOutcomeHistoryStore(journal);
     const probe: OpenCodeCapabilityProbe = {
-      probe: vi.fn(async (request): Promise<OpenCodeProbeReport> => ({
+      probe: vi.fn(async (request): Promise<HarnessProbeReport> => ({
         outcome: "completed",
         reason: null,
         modelId: request.modelId,

@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ValidationRunner } from "../../src/capabilities/validation-runner.js";
 import type { PlannedTask } from "../../src/contracts/milestone.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
-import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
+import { HarnessProbe } from "../../src/harnesses/harness-probe.js";
 import { IntegrationQueue } from "../../src/integration/integration-queue.js";
 import { ProjectingEventJournal } from "../../src/journal/projecting-journal.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -384,7 +384,8 @@ async function runTracer(
   const supervisor = new ProcessSupervisor();
   const model = writerModel();
   const securitySheet = security(fixture.repository);
-  const probe = await new OpenCodeProbe(supervisor).probe({
+  const probe = await new HarnessProbe(supervisor).probe({
+    harness: "opencode",
     executable,
     cwd: fixture.repository,
     timeoutMs: 5_000,

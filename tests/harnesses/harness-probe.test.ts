@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { parseModelSheetMarkdown } from "../../src/policy/model-sheet.js";
 import { parseSecuritySheetMarkdown } from "../../src/policy/security-sheet.js";
-import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
+import { HarnessProbe } from "../../src/harnesses/harness-probe.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 
 const temporaryDirectories: string[] = [];
@@ -71,16 +71,17 @@ local_preparation_only
 `);
 }
 
-describe("OpenCodeProbe", () => {
+describe("HarnessProbe", () => {
   it("probes an approved OpenCode model with a bounded subprocess and records metadata", async () => {
     const repository = fixtureDirectory("zentra-opencode-repo-");
     const executable = fakeOpenCodeExecutable([
       "if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(['--version'])) process.exit(7);",
       "process.stdout.write('OpenCode 1.2.3\\n');",
     ].join("\n"));
-    const probe = new OpenCodeProbe(new ProcessSupervisor());
+    const probe = new HarnessProbe(new ProcessSupervisor());
 
     const report = await probe.probe({
+      harness: "opencode",
       executable,
       cwd: repository,
       timeoutMs: 5_000,
@@ -107,9 +108,10 @@ describe("OpenCodeProbe", () => {
       "if (process.env.ZENTRA_SHOULD_NOT_LEAK) process.exit(9);",
       "process.stdout.write('OpenCode 1.2.3\\n');",
     ].join("\n"));
-    const probe = new OpenCodeProbe(new ProcessSupervisor());
+    const probe = new HarnessProbe(new ProcessSupervisor());
 
     const report = await probe.probe({
+      harness: "opencode",
       executable,
       cwd: repository,
       timeoutMs: 5_000,
@@ -121,12 +123,13 @@ describe("OpenCodeProbe", () => {
     expect(report.outcome).toBe("completed");
   });
 
-  it("fails closed without spawning when the model is not approved for OpenCode", async () => {
+  it("fails closed without spawning when the model is not approved for the requested harness", async () => {
     const repository = fixtureDirectory("zentra-opencode-repo-");
     const executable = fakeOpenCodeExecutable("process.exit(99);\n");
-    const probe = new OpenCodeProbe(new ProcessSupervisor());
+    const probe = new HarnessProbe(new ProcessSupervisor());
 
     await expect(probe.probe({
+      harness: "opencode",
       executable,
       cwd: repository,
       timeoutMs: 5_000,
@@ -139,6 +142,7 @@ describe("OpenCodeProbe", () => {
     });
 
     await expect(probe.probe({
+      harness: "opencode",
       executable,
       cwd: repository,
       timeoutMs: 5_000,
@@ -147,7 +151,7 @@ describe("OpenCodeProbe", () => {
       security: securitySheet(repository),
     }, AbortSignal.timeout(10_000))).resolves.toMatchObject({
       outcome: "failed",
-      reason: "harness_not_opencode",
+      reason: "harness_mismatch",
     });
   });
 
@@ -155,9 +159,10 @@ describe("OpenCodeProbe", () => {
     const repository = fixtureDirectory("zentra-opencode-repo-");
     const outside = fixtureDirectory("zentra-opencode-outside-");
     const executable = fakeOpenCodeExecutable("process.stdout.write('OpenCode 1.2.3\\n');\n");
-    const probe = new OpenCodeProbe(new ProcessSupervisor());
+    const probe = new HarnessProbe(new ProcessSupervisor());
 
     await expect(probe.probe({
+      harness: "opencode",
       executable,
       cwd: outside,
       timeoutMs: 5_000,
@@ -170,6 +175,7 @@ describe("OpenCodeProbe", () => {
     });
 
     await expect(probe.probe({
+      harness: "opencode",
       executable: path.join(repository, "missing-opencode"),
       cwd: repository,
       timeoutMs: 5_000,
@@ -178,7 +184,7 @@ describe("OpenCodeProbe", () => {
       security: securitySheet(repository),
     }, AbortSignal.timeout(10_000))).resolves.toMatchObject({
       outcome: "failed",
-      reason: "opencode_unavailable",
+      reason: "harness_unavailable",
     });
   });
 
@@ -188,9 +194,10 @@ describe("OpenCodeProbe", () => {
     writeFileSync(repositoryFile, "not a directory", { mode: 0o644 });
     const nonExecutable = path.join(repository, "not-executable");
     writeFileSync(nonExecutable, "not executable", { mode: 0o644 });
-    const probe = new OpenCodeProbe(new ProcessSupervisor());
+    const probe = new HarnessProbe(new ProcessSupervisor());
 
     await expect(probe.probe({
+      harness: "opencode",
       executable: process.execPath,
       cwd: repositoryFile,
       timeoutMs: 5_000,
@@ -203,6 +210,7 @@ describe("OpenCodeProbe", () => {
     });
 
     await expect(probe.probe({
+      harness: "opencode",
       executable: process.execPath,
       cwd: path.join(repository, "missing"),
       timeoutMs: 5_000,
@@ -215,6 +223,7 @@ describe("OpenCodeProbe", () => {
     });
 
     await expect(probe.probe({
+      harness: "opencode",
       executable: nonExecutable,
       cwd: repository,
       timeoutMs: 5_000,
@@ -223,10 +232,11 @@ describe("OpenCodeProbe", () => {
       security: securitySheet(repository),
     }, AbortSignal.timeout(10_000))).resolves.toMatchObject({
       outcome: "failed",
-      reason: "opencode_unavailable",
+      reason: "harness_unavailable",
     });
 
     await expect(probe.probe({
+      harness: "opencode",
       executable: repository,
       cwd: repository,
       timeoutMs: 5_000,
@@ -235,7 +245,7 @@ describe("OpenCodeProbe", () => {
       security: securitySheet(repository),
     }, AbortSignal.timeout(10_000))).resolves.toMatchObject({
       outcome: "failed",
-      reason: "opencode_unavailable",
+      reason: "harness_unavailable",
     });
   });
 });

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 
 import type {
-  OpenCodeProbeReport,
-  OpenCodeProbeRequest,
-} from "../harnesses/opencode-probe.js";
+  HarnessProbeReport,
+  HarnessProbeRequest,
+} from "../harnesses/harness-probe.js";
 import type { ModelSheet } from "../policy/model-sheet.js";
 import type { TaskService } from "../tasks/task-service.js";
 import type { TaskView } from "../tasks/task-projection.js";
@@ -16,7 +16,7 @@ interface OpenCodeTaskRunner {
 }
 
 export interface OpenCodeCapabilityProbe {
-  probe(request: OpenCodeProbeRequest, signal: AbortSignal): Promise<OpenCodeProbeReport>;
+  probe(request: HarnessProbeRequest, signal: AbortSignal): Promise<HarnessProbeReport>;
 }
 
 export class RoutedOpenCodeExecution {
@@ -66,6 +66,7 @@ export class RoutedOpenCodeExecution {
       correlationId: input.task.taskId,
     });
     const probe = await this.probe.probe({
+      harness: "opencode",
       executable: input.executable,
       cwd: input.project.repositoryPath,
       timeoutMs: Math.min(input.task.budget.maxSeconds * 1_000, 30_000),
