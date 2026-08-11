@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
+import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { projectMilestone } from "../../src/milestones/milestone-projection.js";
@@ -147,7 +148,7 @@ async function setup() {
   const registry = new MilestoneRegistry(journal);
   const modelSheet = { models: [{ id: "planner", harness: "opencode", model: "azure-deployment", roles: ["planner"], specialties: [],
     costTier: "low", contextTokens: 10_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied",
-    fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+    fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] } satisfies ModelSheet;
   registry.register({
     milestoneId: "milestone", projectId: "project", title: "Prepare", correlationId: "trace",
     plan: { milestoneId: "milestone", projectId: "project", goal: "Prepare", tasks: [{ taskId: "plan", title: "Plan", description: "Plan.",

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -508,7 +509,7 @@ function model(
   role: "planner" | "researcher" | "implementer" | "reviewer",
   tools: string[],
   network: "denied" | "declared" = "denied",
-) {
+): ModelCapability {
   return {
     id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
     contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network,

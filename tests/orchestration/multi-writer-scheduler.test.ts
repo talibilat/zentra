@@ -16,7 +16,7 @@ import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js"
 import { MultiWriterOwnershipScheduler } from "../../src/orchestration/multi-writer-scheduler.js";
 import { ValidatedHandoffReconciliationError } from "../../src/orchestration/opencode-single-file-tracer-bullet.js";
 import { WriterResourceGovernor } from "../../src/orchestration/writer-resource-governor.js";
-import type { ModelSheet } from "../../src/policy/model-sheet.js";
+import type { ModelCapability, ModelSheet } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import { RoleCapabilityEnvelopeService, buildRoleCapabilityBinding } from "../../src/workers/role-capability-envelope.js";
 import { capabilityTaskHead, createCapabilityBoundaryOccurrence } from "../../src/contracts/capability-boundary.js";
@@ -1286,7 +1286,7 @@ function planWithPaths(firstPath: string, secondPath: string): MilestonePlan {
   ] };
 }
 
-function model(id: string, maxConcurrency: number, role: "implementer" | "reviewer") {
+function model(id: string, maxConcurrency: number, role: "implementer" | "reviewer"): ModelCapability {
   return { id, harness: "opencode", model: `fixture/${id}`, roles: [role], specialties: [role === "implementer" ? "coding" : "review"], costTier: "low", contextTokens: 10_000,
     maxConcurrency, toolPermissions: role === "implementer" ? ["read_repository", "write_worktree"] : ["read_repository", "review_diff"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } };
 }

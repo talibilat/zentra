@@ -1,5 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
+import { EXECUTABLE_HARNESSES, isHarnessId, type HarnessId } from "../harnesses/harness-id.js";
+
 const MAX_MODEL_SHEET_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 4096;
 
@@ -18,7 +20,6 @@ const REQUIRED_COLUMNS = [
   "quality",
 ] as const;
 
-const HARNESSES = new Set(["opencode", "claude_code", "codex"]);
 const ROLES = new Set([
   "planner",
   "researcher",
@@ -74,7 +75,7 @@ export interface QualityHistory {
 
 export interface ModelCapability {
   readonly id: string;
-  readonly harness: string;
+  readonly harness: HarnessId;
   readonly model: string;
   readonly roles: readonly string[];
   readonly specialties: readonly string[];
@@ -215,7 +216,7 @@ function parseModelRow(cells: readonly string[]): ModelCapability {
   if (id === undefined || !SAFE_ID.test(id) || id === "none") {
     throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   }
-  if (harness === undefined || !HARNESSES.has(harness)) throw new ModelSheetError("MODEL_SHEET_INVALID_HARNESS");
+  if (harness === undefined || !isHarnessId(harness)) throw new ModelSheetError("MODEL_SHEET_INVALID_HARNESS");
   if (model === undefined || model === "") throw new ModelSheetError("MODEL_SHEET_INVALID_TABLE");
   if (costTier === undefined || !COST_TIERS.has(costTier)) throw new ModelSheetError("MODEL_SHEET_INVALID_COST_TIER");
   if (network === undefined || !NETWORK_PERMISSIONS.has(network)) {

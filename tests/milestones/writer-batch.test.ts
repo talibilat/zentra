@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
+import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { MilestonePlan } from "../../src/contracts/milestone.js";
 import type { NewEvent, StoredEvent } from "../../src/contracts/event.js";
 import type { PagedEventJournal as EventJournal } from "../../src/journal/journal.js";
@@ -641,7 +642,7 @@ function authorizedRegistered(journal: SqliteEventJournal): MilestoneRegistry {
   return registry;
 }
 
-function writerCapability(id: string, role: "implementer" | "reviewer") {
+function writerCapability(id: string, role: "implementer" | "reviewer"): ModelCapability {
   return {
     id,
     harness: "opencode",
