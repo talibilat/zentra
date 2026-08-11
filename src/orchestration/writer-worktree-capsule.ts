@@ -8,6 +8,7 @@ import type {
   OpenCodeWriterReport,
   WriterTaskPacket,
 } from "../harnesses/opencode-writer.js";
+import { isHarnessId } from "../harnesses/harness-id.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectConfig } from "../projects/project-config.js";
@@ -463,11 +464,11 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   assertRoleModelCapability("implementer", model);
   if (
     task.roleAssignment.role !== "implementer" ||
-    task.roleAssignment.harness !== "opencode" ||
+    !isHarnessId(task.roleAssignment.harness) ||
     task.roleAssignment.agentId !== model.id ||
     task.risk.authority !== "workspace_write"
   ) {
-    throw new Error("writer assignment is outside approved OpenCode authority");
+    throw new Error("writer assignment is outside approved harness authority");
   }
   for (const ownedPath of task.ownedPaths) {
     if (!security.allowedFileScopes.some((scope) => scopeContains(scope, ownedPath))) {
