@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
-import { EXECUTABLE_HARNESSES, isHarnessId, type HarnessId } from "../harnesses/harness-id.js";
+import { isHarnessId, type HarnessId } from "../harnesses/harness-id.js";
 
 const MAX_MODEL_SHEET_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 4096;
