@@ -17,7 +17,7 @@ import {
 } from "../contracts/uncertain-effect.js";
 import type { StopAndAskState } from "../contracts/milestone.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
-import { OpenCodeWriterEventChainSchema } from "../agents/opencode-writer-events.js";
+import { WriterEventChainSchema } from "../agents/opencode-writer-events.js";
 
 export interface TaskView {
   readonly taskId: string;
@@ -288,7 +288,7 @@ export function projectTask(events: readonly StoredEvent[]): TaskView | null {
     if (event.type === "task.writer_completed") {
       const payload = event.payload as Readonly<Record<string, unknown>>;
       if (payload["writerEvidenceVersion"] === 2) {
-        const chain = OpenCodeWriterEventChainSchema.parse(payload["eventChain"]);
+        const chain = WriterEventChainSchema.parse(payload["eventChain"]);
         if (payload["stdoutSha256"] !== chain.stdoutSha256 || payload["rawOutputPolicy"] !== "not_retained") {
           throw new Error("writer event chain does not match retained output policy");
         }

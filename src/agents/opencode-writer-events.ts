@@ -28,7 +28,7 @@ const ChainBodySchema = z.strictObject({
   stdoutSha256: DigestSchema,
   events: z.array(EventSchema).max(100_000),
 });
-export const OpenCodeWriterEventChainSchema = ChainBodySchema.extend({ chainSha256: DigestSchema }).superRefine((chain, context) => {
+export const WriterEventChainSchema = ChainBodySchema.extend({ chainSha256: DigestSchema }).superRefine((chain, context) => {
   const { chainSha256, ...body } = chain;
   if (chainSha256 !== digestCanonical(body)) context.addIssue({ code: "custom", message: "writer event chain digest mismatch" });
   let bytes = 0;
@@ -48,13 +48,13 @@ export const OpenCodeWriterEventChainSchema = ChainBodySchema.extend({ chainSha2
   }
 });
 
-export type OpenCodeWriterEventChain = z.infer<typeof OpenCodeWriterEventChainSchema>;
+export type WriterEventChain = z.infer<typeof WriterEventChainSchema>;
 
-export function createOpenCodeWriterEventChain(rawStdout: string, parsedEvents: readonly unknown[]): OpenCodeWriterEventChain {
+export function createWriterEventChain(rawStdout: string, parsedEvents: readonly unknown[]): WriterEventChain {
   if (parsedEvents.length === 0) {
     const body = ChainBodySchema.parse({ schemaVersion: 1, rawOutputPolicy: "not_retained",
       stdoutBytes: Buffer.byteLength(rawStdout, "utf8"), stdoutSha256: sha256(rawStdout), events: [] });
-    return OpenCodeWriterEventChainSchema.parse({ ...body, chainSha256: digestCanonical(body) });
+    return WriterEventChainSchema.parse({ ...body, chainSha256: digestCanonical(body) });
   }
   if (!rawStdout.endsWith("\n")) throw new Error("OpenCode writer JSON output must end on an event boundary");
   const rawLines = rawStdout.slice(0, -1).split("\n");
@@ -95,7 +95,7 @@ export function createOpenCodeWriterEventChain(rawStdout: string, parsedEvents: 
     stdoutSha256: sha256(rawStdout),
     events,
   });
-  return OpenCodeWriterEventChainSchema.parse({ ...body, chainSha256: digestCanonical(body) });
+  return WriterEventChainSchema.parse({ ...body, chainSha256: digestCanonical(body) });
 }
 
 function objectRecord(value: unknown): Readonly<Record<string, unknown>> {

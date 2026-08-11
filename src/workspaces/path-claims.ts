@@ -11,13 +11,13 @@ import type { WorkspaceOwnershipGate, WorkspaceOwnershipReport } from "./workspa
 import type { WorkspaceLease, WorktreeManager } from "./worktree-manager.js";
 import { canonicalDarwinPathIdentity } from "../milestones/path-ownership.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import { OpenCodeWriterEventChainSchema, type OpenCodeWriterEventChain } from "../agents/opencode-writer-events.js";
-import {
-  isSupervisedOpenCodeWriterReport,
-  type OpenCodeWriterDispatchBinding,
-  type OpenCodeWriterReport,
-  type OpenCodeWriterUsage,
-} from "../harnesses/opencode-writer.js";
+import { WriterEventChainSchema } from "../agents/opencode-writer-events.js";
+import { isSupervisedOpenCodeWriterReport } from "../harnesses/opencode-writer.js";
+import type {
+  WriterDispatchBinding,
+  WriterReport,
+  WriterUsage,
+} from "../harnesses/harness-writer.js";
 import { WriterPatchProposalSchema, type WriterPatchProposal } from "../contracts/writer-patch.js";
 
 const MAX_APPEND_ATTEMPTS = 32;
@@ -95,7 +95,7 @@ const WriterReceiptBodySchema = z.strictObject({
   ownerId: IdentitySchema, revision: RevisionSchema, leaseToken: LeaseTokenSchema,
   dispatchId: IdentitySchema, outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
   dispatchBindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  eventChain: OpenCodeWriterEventChainSchema, usage: WriterUsageSchema,
+  eventChain: WriterEventChainSchema, usage: WriterUsageSchema,
   stdoutSha256: z.string().regex(/^[a-f0-9]{64}$/), stderrSha256: z.string().regex(/^[a-f0-9]{64}$/),
   protocolFailure: z.literal("invalid_native_event_stream").nullable(),
   usageEvidence: z.enum(["native_tokens", "legacy_usage", "none"]),
@@ -180,7 +180,7 @@ export interface PathClaim {
   readonly requiresReconciliation: boolean;
   readonly dispatchAuthorized: boolean;
   readonly dispatchId: string | null;
-  readonly dispatchBinding: OpenCodeWriterDispatchBinding | null;
+  readonly dispatchBinding: WriterDispatchBinding | null;
   readonly workerReceipt: WriterReceipt | null;
   readonly patchApplicationPending: string | null;
   readonly patchIntentId: string | null;
@@ -319,7 +319,7 @@ export class PathClaimService {
   checkpoint(input: ClaimCommandIdentity & {
     readonly leaseToken: string; readonly checkpointId: string; readonly diffSha256: string;
     readonly toolEvidenceSha256: string;
-    readonly usage: OpenCodeWriterUsage;
+    readonly usage: WriterUsage;
   }): void {
     const claim = this.assertActiveIdentity(this.inspect(input.projectId), input);
     if (claim.workerReceipt === null ||
@@ -345,7 +345,7 @@ export class PathClaimService {
   beginDispatch(input: ClaimCommandIdentity & {
     readonly leaseToken: string;
     readonly dispatchId: string;
-    readonly binding: OpenCodeWriterDispatchBinding;
+    readonly binding: WriterDispatchBinding;
   }): void {
     const aggregate = this.inspect(input.projectId);
     const claim = this.assertActiveIdentity(aggregate, input);
@@ -370,8 +370,8 @@ export class PathClaimService {
 
   [APPEND_SUPERVISED_RECEIPT](
     input: SupervisedWriterReceiptContext,
-    report: OpenCodeWriterReport,
-    binding: OpenCodeWriterDispatchBinding,
+    report: WriterReport,
+    binding: WriterDispatchBinding,
   ): WriterReceipt {
     if (!isSupervisedOpenCodeWriterReport(report, binding)) {
       throw new Error("writer receipt report was not issued by the supervised writer execution path");
@@ -700,8 +700,8 @@ export class PathClaimService {
 export function appendSupervisedWriterReceipt(
   service: PathClaimService,
   context: SupervisedWriterReceiptContext,
-  report: OpenCodeWriterReport,
-  binding: OpenCodeWriterDispatchBinding,
+  report: WriterReport,
+  binding: WriterDispatchBinding,
 ): WriterReceipt {
   return service[APPEND_SUPERVISED_RECEIPT](context, report, binding);
 }

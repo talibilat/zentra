@@ -3,11 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type {
-  OpenCodeWriter,
-  OpenCodeWriterReport,
-  WriterTaskPacket,
-} from "../harnesses/opencode-writer.js";
+import type { HarnessWriter, WriterReport, WriterTaskPacket } from "../harnesses/harness-writer.js";
 import { isHarnessId } from "../harnesses/harness-id.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
@@ -43,7 +39,7 @@ export interface WriterCapsuleObserver {
     readonly lease: WorkspaceLease;
     readonly modelId: string;
   }): void | Promise<void>;
-  onWriterCompleted?(report: OpenCodeWriterReport): void | Promise<void>;
+  onWriterCompleted?(report: WriterReport): void | Promise<void>;
   onPathClaimAcquired?(claim: PathClaim): void | Promise<void>;
 }
 
@@ -83,7 +79,7 @@ export interface WriterCapsuleRequest {
 export interface WriterCapsuleResult {
   readonly outcome: "completed" | "cancelled" | "timed_out" | "failed" | "denied";
   readonly lease: WorkspaceLease | null;
-  readonly writer: OpenCodeWriterReport | null;
+  readonly writer: WriterReport | null;
   readonly ownership: WorkspaceOwnershipReport | null;
   readonly pathClaim: PathClaim | null;
 }
@@ -91,7 +87,7 @@ export interface WriterCapsuleResult {
 export class WriterWorktreeCapsule {
   constructor(
     private readonly worktrees: WorktreeManager,
-    private readonly writer: OpenCodeWriter,
+    private readonly writer: HarnessWriter,
     private readonly ownership: WorkspaceOwnershipGate,
     private readonly git = new GitClient(),
     private readonly patchApplierFactory: (claims: PathClaimService) => TrustedPatchApplier =
@@ -242,7 +238,7 @@ export class WriterWorktreeCapsule {
         writer.usage.outputTokens,
         writer.usage.reasoningTokens,
       );
-      const settledWriter: OpenCodeWriterReport = writer.outcome === "completed" &&
+      const settledWriter: WriterReport = writer.outcome === "completed" &&
         (budgetInputTokens > request.task.budget.maxInputTokens ||
           budgetOutputTokens > request.task.budget.maxOutputTokens)
         ? Object.freeze({ ...writer, outcome: "failed" as const })
