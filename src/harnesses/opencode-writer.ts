@@ -11,6 +11,7 @@ import {
   envelopeWritePaths,
 } from "../workers/worker-lifecycle.js";
 import { extractWriterPatchProposal, type WriterPatchProposal } from "../contracts/writer-patch.js";
+import { brandSupervisedReport } from "./writer-brand.js";
 import type {
   HarnessWriter,
   PreparedWriterRequest,
@@ -39,7 +40,6 @@ interface InternalPreparedOpenCodeWriterRequest extends PreparedOpenCodeWriterRe
 }
 
 const preparedRequests = new WeakSet<object>();
-const supervisedReports = new WeakMap<object, string>();
 
 export class OpenCodeWriter implements HarnessWriter {
   constructor(private readonly supervisor: WorkerAdapter) {}
@@ -124,16 +124,9 @@ export class OpenCodeWriter implements HarnessWriter {
     const completed = report(
       request, executable, cwd, argv, packet, result, eventChain, protocolFailure, startedAt, prepared.binding,
     );
-    supervisedReports.set(completed, prepared.binding.digest);
+    brandSupervisedReport(completed, prepared.binding);
     return completed;
   }
-}
-
-export function isSupervisedOpenCodeWriterReport(
-  report: WriterReport,
-  binding: WriterDispatchBinding,
-): boolean {
-  return supervisedReports.get(report) === binding.digest && report.dispatchBinding.digest === binding.digest;
 }
 
 function report(

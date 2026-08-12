@@ -12,7 +12,7 @@ import type { WorkspaceLease, WorktreeManager } from "./worktree-manager.js";
 import { canonicalDarwinPathIdentity } from "../milestones/path-ownership.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { WriterEventChainSchema } from "../agents/opencode-writer-events.js";
-import { isSupervisedOpenCodeWriterReport } from "../harnesses/opencode-writer.js";
+import { isSupervisedWriterReport } from "../harnesses/writer-brand.js";
 import type {
   WriterDispatchBinding,
   WriterReport,
@@ -373,7 +373,7 @@ export class PathClaimService {
     report: WriterReport,
     binding: WriterDispatchBinding,
   ): WriterReceipt {
-    if (!isSupervisedOpenCodeWriterReport(report, binding)) {
+    if (!isSupervisedWriterReport(report, binding)) {
       throw new Error("writer receipt report was not issued by the supervised writer execution path");
     }
     const aggregate = this.inspect(input.projectId);
