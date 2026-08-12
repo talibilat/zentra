@@ -457,7 +457,6 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   if (!security.allowedRepositories.includes(project.repositoryPath)) {
     throw new Error("writer repository is not allowed by the security sheet");
   }
-  assertRoleModelCapability("implementer", model);
   if (
     task.roleAssignment.role !== "implementer" ||
     !isHarnessId(task.roleAssignment.harness) ||
@@ -467,6 +466,7 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   ) {
     throw new Error("writer assignment is outside approved harness authority");
   }
+  assertRoleModelCapability("implementer", model, task.roleAssignment.harness);
   for (const ownedPath of task.ownedPaths) {
     if (!security.allowedFileScopes.some((scope) => scopeContains(scope, ownedPath))) {
       throw new Error(`writer owned path is outside allowed scope: ${ownedPath}`);

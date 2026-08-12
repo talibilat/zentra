@@ -158,11 +158,11 @@ export function roleModelSupports(role: GovernedRole, model: {
   readonly roles: readonly string[];
   readonly toolPermissions: readonly string[];
   readonly network: string;
-}): boolean {
+}, expectedHarness: string): boolean {
   const declaredResearch = (role === "planner" || role === "researcher") && model.network === "declared" &&
     sameSet(model.toolPermissions, roleToolPermissions(role, true));
   const networkDark = model.network === "denied" && sameSet(model.toolPermissions, roleToolPermissions(role));
-  return model.harness === "opencode" && model.roles.includes(role) && (declaredResearch || networkDark);
+  return model.harness === expectedHarness && model.roles.includes(role) && (declaredResearch || networkDark);
 }
 
 export function assertRoleModelCapability(role: GovernedRole, model: {
@@ -170,12 +170,14 @@ export function assertRoleModelCapability(role: GovernedRole, model: {
   readonly roles: readonly string[];
   readonly toolPermissions: readonly string[];
   readonly network: string;
-}): void {
-  if (!roleModelSupports(role, model)) throw new Error("model does not match the canonical role capability policy");
+}, expectedHarness: string): void {
+  if (!roleModelSupports(role, model, expectedHarness)) {
+    throw new Error("model does not match the canonical role capability policy");
+  }
 }
 
 export function buildRoleCapabilityBinding(input: RoleCapabilityBindingInput): RoleCapabilityBinding {
-  assertRoleModelCapability(input.role, input.model);
+  assertRoleModelCapability(input.role, input.model, input.model.harness);
   const access = AccessSchema.parse({
     readPaths: canonicalPaths(input.configuredReadPaths),
     writePaths: input.role === "implementer" ? canonicalPaths(input.ownedPaths) : [],

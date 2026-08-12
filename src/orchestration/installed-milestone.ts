@@ -402,7 +402,7 @@ export class InstalledMilestoneRunner {
 }
 
 function exactRole(models: ModelSheet, role: "planner" | "researcher" | "implementer" | "reviewer"): ModelCapability {
-  const matches = models.models.filter((model) => roleModelSupports(role, model));
+  const matches = models.models.filter((model) => roleModelSupports(role, model, "opencode"));
   if (matches.length !== 1) throw new Error(`installed milestone requires exactly one approved ${role} capability`);
   return matches[0]!;
 }
