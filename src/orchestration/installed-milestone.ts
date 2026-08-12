@@ -198,6 +198,7 @@ export class InstalledMilestoneRunner {
       expectedVersion: request.harnessExpectedVersion,
       timeoutMs: 30_000,
     }, request.signal);
+    const writer = this.writers.get(request.harness);
     const git = new GitClient();
     const worktrees = new WorktreeManager(git);
     const plan = createInstalledMilestonePlan({
@@ -335,7 +336,7 @@ export class InstalledMilestoneRunner {
         });
         tracer = new OpenCodeIntegratedSingleFileTracer(
           tasks,
-          new WriterWorktreeCapsule(worktrees, this.writers.get(request.harness), new WorkspaceOwnershipGate(), git),
+          new WriterWorktreeCapsule(worktrees, writer, new WorkspaceOwnershipGate(), git),
           validations,
           worktrees,
           { reviewer: reviewerAdapter, reviews: new ReviewGate(), integrations: new IntegrationQueue(git, validations), git },
