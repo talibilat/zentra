@@ -547,6 +547,29 @@ to:
 
 Pass the task's declared harness, not `model.harness`. Passing `model.harness` would compare the model against itself and assert nothing. Passing the task's harness makes this assert that the model matches what the plan authorized.
 
+**Then move the call so it runs after the authority `if` block, not before it.** `assertAuthority` currently reads:
+
+```ts
+  assertRoleModelCapability("implementer", model, task.roleAssignment.harness);
+  if (
+    task.roleAssignment.role !== "implementer" ||
+    !isHarnessId(task.roleAssignment.harness) ||
+    task.roleAssignment.harness !== model.harness ||
+    ...
+  ) {
+    throw new Error("writer assignment is outside approved harness authority");
+  }
+```
+
+Reorder to put the `if` block first and the `assertRoleModelCapability` call immediately after it. Both checks still run and behavior stays strict; only which one fires first changes.
+
+Why this matters: once parameterized, `assertRoleModelCapability` also detects a harness mismatch, and running first it would throw the generic `"model does not match the canonical role capability policy"` instead of the specific `"writer assignment is outside approved harness authority"`. Two existing tests in `tests/orchestration/writer-worktree-capsule.test.ts` assert the specific message on exactly that path:
+
+- `rejects a writer assignment whose declared harness does not match its model capability`
+- `rejects a writer assignment on the fixture-only deterministic harness`
+
+Reordering keeps the more diagnostic message on a security-relevant rejection path and leaves both tests passing unmodified, so they keep guarding what they were written to guard. Do not edit those two tests.
+
 `task` is already in scope in `assertAuthority` via the destructuring at the top of the function. Confirm with `grep -n "const { task" src/orchestration/writer-worktree-capsule.ts`.
 
 - [ ] **Step 7: Clean up plan-readiness**
@@ -558,7 +581,17 @@ Pass the task's declared harness, not `model.harness`. Passing `model.harness` w
     context.harness !== "opencode" ||
 ```
 
-Delete both lines. They are redundant: line 121 already enforces `context.harness !== packet.harness` and line 125 already enforces `packet.harness !== task.roleAssignment.harness`, so all three harness values are proven equal without pinning any of them to a literal.
+Replace both lines with a single role-dependent check:
+
+```ts
+    (packet.role !== "implementer" && packet.harness !== "opencode") ||
+```
+
+**Do not simply delete the two lines.** An earlier revision of this plan said to, on the premise that lines 121 and 125 already prove all three harness values equal and so make the literal pin redundant. That premise is true about equality but wrong about what the pin was protecting. The pin was the only thing enforcing "the read-only admission path never admits a non-opencode harness." Deleting it lets a `claude_code` researcher pass admission and then crash inside `OpenCodeReadOnlyAgent.run`'s `assertAssignment` with an uncaught error, instead of producing the clean paused result the caller expects. This was found empirically during implementation by toggling the deletion on and off against `tests/agents/opencode-read-only-program.test.ts`.
+
+The role-dependent check states the real invariant instead: only the implementer role dispatches by harness. Planner, researcher, and reviewer run on the Azure model broker inside a Docker capsule and have no harness CLI, so they must stay on `"opencode"`. The implementer may be any harness.
+
+One check suffices rather than two, because line 121 already enforces `context.harness === packet.harness`. Validator, integrator, and verifier roles are rejected further down at line 143, so the roles reaching this point are exactly planner, researcher, implementer, and reviewer.
 
 Then change line 147 from:
 
@@ -572,7 +605,9 @@ to:
   if (!roleModelSupports(packet.role, context, task.roleAssignment.harness)) {
 ```
 
-`task.roleAssignment.harness` is the right source because the plan is the authority on what harness a task was authorized for, and Task 4 makes plan stamping keep the read-only roles on `"opencode"`. The equality checks above mean passing `packet.harness` or `context.harness` would be equivalent, but sourcing from the plan states the intent.
+`task.roleAssignment.harness` is the right source because the plan is the authority on what harness a task was authorized for. The equality checks above mean passing `packet.harness` or `context.harness` would be equivalent, but sourcing from the plan states the intent.
+
+After this change, verify `pnpm vitest run tests/agents/opencode-read-only-program.test.ts` passes. That file is what caught the original defect, so it is the specific proof the read-only path was not loosened.
 
 - [ ] **Step 8: Verify**
 
