@@ -2147,8 +2147,8 @@ describe("built CLI help", () => {
     expect(milestoneRun.stderr).toBe("");
     expect(milestoneRun.stdout).toMatch(/Azure-brokered OpenCode planning, research, and review around an\s+authenticated host OpenCode writer/);
     expect(milestoneRun.stdout).toMatch(/provider\s+transport uses user OS network authority/);
-    expect(milestoneRun.stdout).toContain("--opencode-sha256");
-    expect(milestoneRun.stdout).toContain("--opencode-version");
+    expect(milestoneRun.stdout).toContain("--harness-sha256");
+    expect(milestoneRun.stdout).toContain("--harness-version");
   });
 
   it("supports the documented pnpm start help invocation", async () => {
