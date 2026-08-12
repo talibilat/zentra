@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { OpenCodeReadOnlyCapsule } from "../../src/agents/opencode-read-only-agent.js";
 import { azureOpenAIModelBrokerForTest } from "../../src/providers/azure-openai-model-broker.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -117,11 +118,11 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
 `, { mode: 0o755 });
     const executable = realpathSync.native(fakeOpenCode);
     const hostAttestation = {
-      openCodeExpectedSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
-      openCodeExpectedVersion: "fixture-opencode 1",
+      harnessExpectedSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
+      harnessExpectedVersion: "fixture-opencode 1",
     };
-    const openCodeHome = path.join(root, "opencode-home");
-    mkdirSync(openCodeHome);
+    const harnessHome = path.join(root, "opencode-home");
+    mkdirSync(harnessHome);
     const database = path.join(root, "journal.sqlite");
     let trace = path.join(root, "trace-head-only.jsonl");
     const sqlite = new SqliteEventJournal(database);
@@ -254,7 +255,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     let runner = new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule });
     await expect(runner.run({
       milestoneId: "installed-wrong-deployment", goal: "Reject model drift", file: "src/greeting.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "another-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      project, models, security, azureDeployment: "another-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("transport must equal the configured deployment");
     expect(sqlite.readStream("installed-wrong-deployment")).toEqual([]);
@@ -263,7 +264,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
       : candidate) };
     await expect(runner.run({
       milestoneId: "installed-extra-tool", goal: "Reject extra tools", file: "src/greeting.mjs", tracePath: trace,
-       project, models: extraToolModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+       project, models: extraToolModels, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("installed milestone requires exactly one approved planner capability");
     expect(sqlite.readStream("installed-extra-tool")).toEqual([]);
@@ -272,22 +273,22 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
       : candidate) };
     await expect(runner.run({
       milestoneId: "installed-combined-role", goal: "Reject combined role", file: "src/greeting.mjs", tracePath: trace,
-      project, models: combinedRoleModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
-      openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+      project, models: combinedRoleModels, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable,
+      harnessHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("installed milestone requires four distinct single-role capability identities");
     expect(sqlite.readStream("installed-combined-role")).toEqual([]);
     await expect(runner.run({
       milestoneId: "installed-bad-attestation", goal: "Reject host drift", file: "src/greeting.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome,
-      ...hostAttestation, openCodeExpectedSha256: "0".repeat(64), signal: AbortSignal.timeout(20_000),
-    })).rejects.toThrow(/^host OpenCode operator attestation failed$/);
+      project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome,
+      ...hostAttestation, harnessExpectedSha256: "0".repeat(64), signal: AbortSignal.timeout(20_000),
+    })).rejects.toThrow(/^host opencode operator attestation failed$/);
     expect(sqlite.readStream("installed-bad-attestation")).toEqual([]);
     expect(capsuleExecutions).toBe(0);
 
     researchMethod = "HEAD";
     await expect(runner.run({
       milestoneId: "installed-head-only", goal: "HEAD cannot satisfy required research", file: "src/greeting.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     })).rejects.toThrow("required research source evidence is missing or invalid");
     expect(sqlite.readStream("installed-head-only").map((event) => event.type)).not.toContain("milestone.writer_batch_started");
@@ -304,7 +305,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     try {
       result = await runner.run({
         milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
-        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+        project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
         signal: AbortSignal.timeout(20_000),
       });
     } finally {
@@ -331,7 +332,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     expect((await gitOutput(repository, ["show", "zentra/integration:src/greeting.mjs"]))).toContain("hello installed");
     expect(JSON.parse(readFileSync(writerObservation, "utf8"))).toEqual({
       brief: expect.stringContaining("Update the exact greeting"),
-      home: openCodeHome,
+      home: harnessHome,
       ambient: null,
       packet: expect.objectContaining({
         guidance: expect.objectContaining({
@@ -360,12 +361,12 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
         bash: "deny", webfetch: "deny",
       }),
     });
-    expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: openCodeHome, ambient: null });
+    expect(JSON.parse(readFileSync(probeObservation, "utf8"))).toEqual({ home: harnessHome, ambient: null });
     const sourceEventsBeforeReplay = sqlite.readStream("web-research:installed-research");
     expect(sourceEventsBeforeReplay).toHaveLength(1);
     const replayed = await runner.run({
       milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(replayed.terminalOutcome).toBe("completed");
@@ -373,7 +374,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     const executionsAfterFirst = capsuleExecutions;
     const second = await runner.run({
       milestoneId: "installed-second", goal: "Update the second module after prior integration", file: "src/second.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome,
+      project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome,
       ...hostAttestation, signal: AbortSignal.timeout(20_000),
     });
     expect(second.terminalOutcome).toBe("completed");
@@ -407,8 +408,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
         journal: recoveredJournal, sink: recoveredSink, broker, readOnlyCapsule: capsule,
       }).run({
         milestoneId: "installed", goal: "Update the exact greeting", file: "src/greeting.mjs", tracePath: trace,
-        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
-        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+        project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable,
+        harnessHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
       });
       expect(recoveredResult).toMatchObject({ terminalOutcome: "completed",
         writerOwnership: { "installed-implement": { status: "integrated" } } });
@@ -421,7 +422,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     advanceAfterResearch = true;
     const stale = await runner.run({
       milestoneId: "installed-stale-guidance", goal: "Do not run a stale writer", file: "src/greeting.mjs", tracePath: trace,
-      project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(stale).toMatchObject({ lifecycle: "paused", terminalOutcome: null,
@@ -436,8 +437,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
         journal: crashJournal, sink, broker, readOnlyCapsule: capsule,
       }).run({
         milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
-        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
-        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+        project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable,
+        harnessHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
       });
       expect(crashed.tasks[`${milestoneId}-implement`]?.status).toBe("running");
       const taskEvents = sqlite.readStream(`${milestoneId}-implement`);
@@ -455,8 +456,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
       const beforeResumeCapsules = capsuleExecutions;
       const resumed = await runner.run({
         milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
-        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
-        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+        project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable,
+        harnessHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
       });
       expect(resumed).toMatchObject({ lifecycle: "paused", replanningAttention: { reason: "evidence" } });
       const pause = sqlite.readStream(milestoneId).findLast((event) => event.type === "milestone.paused");
@@ -464,8 +465,8 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
       const pausedVersion = resumed.streamVersion;
       expect((await runner.run({
         milestoneId, goal: `Recover ${mismatch}`, file: "src/second.mjs", tracePath: trace,
-        project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable,
-        openCodeHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
+        project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable,
+        harnessHome, ...hostAttestation, signal: AbortSignal.timeout(20_000),
       })).streamVersion).toBe(pausedVersion);
       expect(capsuleExecutions).toBe(beforeResumeCapsules);
     }
@@ -477,7 +478,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
       readOnlyCapsule: capsule,
     }).run({
       milestoneId: "installed-provider-failure", goal: "Provider failure", file: "src/greeting.mjs",
-      tracePath: trace, project, models, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      tracePath: trace, project, models, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(failed).toMatchObject({ lifecycle: "terminal", terminalOutcome: "failed" });
@@ -491,7 +492,7 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
     };
     const paused = await new InstalledMilestoneRunner({ journal: sqlite, sink, broker, readOnlyCapsule: capsule }).run({
       milestoneId: "installed-authority-pause", goal: "Pause without invented failure", file: "src/greeting.mjs",
-      tracePath: trace, project, models: pausedModels, security, azureDeployment: "zentra-deployment", openCodeExecutable: executable, openCodeHome, ...hostAttestation,
+      tracePath: trace, project, models: pausedModels, security, azureDeployment: "zentra-deployment", harness: "opencode", harnessExecutable: executable, harnessHome, ...hostAttestation,
       signal: AbortSignal.timeout(20_000),
     });
     expect(paused).toMatchObject({ lifecycle: "ready", terminalOutcome: null, attention: null });
@@ -508,7 +509,7 @@ function model(
   role: "planner" | "researcher" | "implementer" | "reviewer",
   tools: string[],
   network: "denied" | "declared" = "denied",
-) {
+): ModelCapability {
   return {
     id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
     contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network,

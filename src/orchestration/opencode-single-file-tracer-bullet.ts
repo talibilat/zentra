@@ -24,9 +24,9 @@ import {
 import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
 import { usdNumberToNano } from "../contracts/cost.js";
 import {
-  isVerifiedOpenCodeProbeReport,
-  type OpenCodeProbeReport,
-} from "../harnesses/opencode-probe.js";
+  isVerifiedHarnessProbeReport,
+  type HarnessProbeReport,
+} from "../harnesses/harness-probe.js";
 import {
   IntegrationExecutionError,
   type IntegrationQueue,
@@ -79,7 +79,7 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly task: PlannedTask;
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
-  readonly probe: OpenCodeProbeReport | null;
+  readonly probe: HarnessProbeReport | null;
   readonly openCodeHome?: string;
   readonly reviewerId?: string;
   readonly correlationId?: string;
@@ -1126,8 +1126,8 @@ function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changed
     request.security.forbiddenPaths.some((scope) => scope === changedPath || (scope.endsWith("/**") && changedPath.startsWith(scope.slice(0, -3) + "/")))) {
     throw new Error("OpenCode writer request is outside its exact durable admission");
   }
-  if (request.probe === null || !isVerifiedOpenCodeProbeReport(request.probe, {
-    modelId: request.model.id, model: request.model.model,
+  if (request.probe === null || !isVerifiedHarnessProbeReport(request.probe, {
+    harness: "opencode", modelId: request.model.id, model: request.model.model,
     provider: request.model.model.replace(/\/.*/, ""), cwd: request.project.repositoryPath,
   })) throw new Error("OpenCode single-file tracer requires a verified capability probe");
 }

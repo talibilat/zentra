@@ -3,11 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type {
-  OpenCodeWriter,
-  OpenCodeWriterReport,
-  WriterTaskPacket,
-} from "../harnesses/opencode-writer.js";
+import type { HarnessWriter, WriterReport, WriterTaskPacket } from "../harnesses/harness-writer.js";
+import { isHarnessId } from "../harnesses/harness-id.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { ProjectConfig } from "../projects/project-config.js";
@@ -42,7 +39,7 @@ export interface WriterCapsuleObserver {
     readonly lease: WorkspaceLease;
     readonly modelId: string;
   }): void | Promise<void>;
-  onWriterCompleted?(report: OpenCodeWriterReport): void | Promise<void>;
+  onWriterCompleted?(report: WriterReport): void | Promise<void>;
   onPathClaimAcquired?(claim: PathClaim): void | Promise<void>;
 }
 
@@ -82,7 +79,7 @@ export interface WriterCapsuleRequest {
 export interface WriterCapsuleResult {
   readonly outcome: "completed" | "cancelled" | "timed_out" | "failed" | "denied";
   readonly lease: WorkspaceLease | null;
-  readonly writer: OpenCodeWriterReport | null;
+  readonly writer: WriterReport | null;
   readonly ownership: WorkspaceOwnershipReport | null;
   readonly pathClaim: PathClaim | null;
 }
@@ -90,7 +87,7 @@ export interface WriterCapsuleResult {
 export class WriterWorktreeCapsule {
   constructor(
     private readonly worktrees: WorktreeManager,
-    private readonly writer: OpenCodeWriter,
+    private readonly writer: HarnessWriter,
     private readonly ownership: WorkspaceOwnershipGate,
     private readonly git = new GitClient(),
     private readonly patchApplierFactory: (claims: PathClaimService) => TrustedPatchApplier =
@@ -241,7 +238,7 @@ export class WriterWorktreeCapsule {
         writer.usage.outputTokens,
         writer.usage.reasoningTokens,
       );
-      const settledWriter: OpenCodeWriterReport = writer.outcome === "completed" &&
+      const settledWriter: WriterReport = writer.outcome === "completed" &&
         (budgetInputTokens > request.task.budget.maxInputTokens ||
           budgetOutputTokens > request.task.budget.maxOutputTokens)
         ? Object.freeze({ ...writer, outcome: "failed" as const })
@@ -463,11 +460,12 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   assertRoleModelCapability("implementer", model);
   if (
     task.roleAssignment.role !== "implementer" ||
-    task.roleAssignment.harness !== "opencode" ||
+    !isHarnessId(task.roleAssignment.harness) ||
+    task.roleAssignment.harness !== model.harness ||
     task.roleAssignment.agentId !== model.id ||
     task.risk.authority !== "workspace_write"
   ) {
-    throw new Error("writer assignment is outside approved OpenCode authority");
+    throw new Error("writer assignment is outside approved harness authority");
   }
   for (const ownedPath of task.ownedPaths) {
     if (!security.allowedFileScopes.some((scope) => scopeContains(scope, ownedPath))) {

@@ -348,6 +348,38 @@ describe("WriterWorktreeCapsule", () => {
     });
     expect(existsSync(result.lease!.path)).toBe(true);
   });
+
+  it("rejects a writer assignment whose declared harness does not match its model capability", async () => {
+    const fixture = await projectFixture();
+    const executable = fakeOpenCode(fixture.root, `
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+    `);
+
+    await expect(capsule().run({
+      project: fixture.project,
+      task: { ...plannedTask(), roleAssignment: { ...plannedTask().roleAssignment, harness: "claude_code" } },
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable,
+      signal: AbortSignal.timeout(10_000),
+    })).rejects.toThrow("writer assignment is outside approved harness authority");
+  });
+
+  it("rejects a writer assignment on the fixture-only deterministic harness", async () => {
+    const fixture = await projectFixture();
+    const executable = fakeOpenCode(fixture.root, `
+      process.stdout.write(JSON.stringify({ type: "step_finish" }) + "\\n");
+    `);
+
+    await expect(capsule().run({
+      project: fixture.project,
+      task: { ...plannedTask(), roleAssignment: { ...plannedTask().roleAssignment, harness: "deterministic" } },
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable,
+      signal: AbortSignal.timeout(10_000),
+    })).rejects.toThrow("writer assignment is outside approved harness authority");
+  });
 });
 
 function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {

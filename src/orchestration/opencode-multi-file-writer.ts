@@ -11,15 +11,15 @@ import type { PathClaimService } from "../workspaces/path-claims.js";
 import { pathClaimContains } from "../workspaces/path-claims.js";
 import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
 import {
-  isVerifiedOpenCodeProbeReport,
-  type OpenCodeProbeReport,
-} from "../harnesses/opencode-probe.js";
+  isVerifiedHarnessProbeReport,
+  type HarnessProbeReport,
+} from "../harnesses/harness-probe.js";
 import { RoleCapabilityBindingSchema } from "../workers/role-capability-envelope.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
 
 export interface OpenCodeMultiFileWriterRequest
   extends Omit<WriterCapsuleRequest, "writeClaim" | "executable" | "executableSha256"> {
-  readonly probe: OpenCodeProbeReport;
+  readonly probe: HarnessProbeReport;
   readonly writer: MultiFileWriterRequest;
   readonly claims: PathClaimService;
   readonly claimId: string;
@@ -90,7 +90,8 @@ function validateRequest(raw: OpenCodeMultiFileWriterRequest): MultiFileWriterRe
     throw new Error("multi-file writer requires a durable capability binding");
   }
   const binding = RoleCapabilityBindingSchema.parse(raw.capabilityBinding);
-  if (!isVerifiedOpenCodeProbeReport(raw.probe, {
+  if (!isVerifiedHarnessProbeReport(raw.probe, {
+    harness: "opencode",
     modelId: raw.model.id,
     model: raw.model.model,
     provider: raw.model.model.replace(/\/.*/, ""),

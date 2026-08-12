@@ -2,13 +2,14 @@ import { z } from "zod";
 
 import { MilestoneRoleSchema } from "../contracts/milestone.js";
 import { TerminalOutcomeSchema } from "../contracts/task.js";
+import { HARNESS_IDS } from "../harnesses/harness-id.js";
 
 const IdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/);
 const TaskTypeSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9._-]*$/);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ModelIdentitySchema = z.strictObject({
   capabilityId: IdSchema,
-  harness: z.literal("opencode"),
+  harness: z.enum(HARNESS_IDS),
   transportModelSha256: DigestSchema,
 });
 

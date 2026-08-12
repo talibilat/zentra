@@ -4,18 +4,20 @@ import { createReadStream, realpathSync, statSync } from "node:fs";
 import type { ModelCapability, ModelSheet } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
+import type { HarnessId } from "./harness-id.js";
 
-export type OpenCodeProbeOutcome = "completed" | "failed" | "cancelled" | "timed_out";
+export type HarnessProbeOutcome = "completed" | "failed" | "cancelled" | "timed_out";
 
-export type OpenCodeProbeFailureReason =
+export type HarnessProbeFailureReason =
   | "model_not_approved"
-  | "harness_not_opencode"
+  | "harness_mismatch"
   | "repository_not_allowed"
   | "network_not_allowed"
-  | "opencode_unavailable"
+  | "harness_unavailable"
   | "probe_failed";
 
-export interface OpenCodeProbeRequest {
+export interface HarnessProbeRequest {
+  readonly harness: HarnessId;
   readonly executable: string;
   readonly cwd: string;
   readonly timeoutMs: number;
@@ -27,9 +29,9 @@ export interface OpenCodeProbeRequest {
   readonly expectedVersion?: string;
 }
 
-export interface OpenCodeProbeReport {
-  readonly outcome: OpenCodeProbeOutcome;
-  readonly reason: OpenCodeProbeFailureReason | null;
+export interface HarnessProbeReport {
+  readonly outcome: HarnessProbeOutcome;
+  readonly reason: HarnessProbeFailureReason | null;
   readonly modelId: string;
   readonly harness: string | null;
   readonly model: string | null;
@@ -43,11 +45,12 @@ export interface OpenCodeProbeReport {
   readonly finishedAt: string;
 }
 
-const verifiedProbeReports = new WeakSet<OpenCodeProbeReport>();
+const verifiedProbeReports = new WeakSet<HarnessProbeReport>();
 
-export function isVerifiedOpenCodeProbeReport(
-  report: OpenCodeProbeReport,
+export function isVerifiedHarnessProbeReport(
+  report: HarnessProbeReport,
   expected: {
+    readonly harness: HarnessId;
     readonly modelId: string;
     readonly model: string;
     readonly provider: string;
@@ -57,7 +60,7 @@ export function isVerifiedOpenCodeProbeReport(
   return verifiedProbeReports.has(report) &&
     report.outcome === "completed" &&
     report.reason === null &&
-    report.harness === "opencode" &&
+    report.harness === expected.harness &&
     report.modelId === expected.modelId &&
     report.model === expected.model &&
     report.provider === expected.provider &&
@@ -66,10 +69,10 @@ export function isVerifiedOpenCodeProbeReport(
     report.executableSha256 !== null;
 }
 
-export class OpenCodeProbe {
+export class HarnessProbe {
   constructor(private readonly supervisor: WorkerAdapter) {}
 
-  async probe(request: OpenCodeProbeRequest, signal: AbortSignal): Promise<OpenCodeProbeReport> {
+  async probe(request: HarnessProbeRequest, signal: AbortSignal): Promise<HarnessProbeReport> {
     const startedAt = new Date().toISOString();
     const model = request.models.models.find((candidate) => candidate.id === request.modelId) ?? null;
     let canonicalCwd: string;
@@ -82,8 +85,8 @@ export class OpenCodeProbe {
     if (model === null) {
       return failure(request, null, canonicalCwd, "model_not_approved", startedAt);
     }
-    if (model.harness !== "opencode") {
-      return failure(request, model, canonicalCwd, "harness_not_opencode", startedAt);
+    if (model.harness !== request.harness) {
+      return failure(request, model, canonicalCwd, "harness_mismatch", startedAt);
     }
     if (!request.security.allowedRepositories.includes(canonicalCwd)) {
       return failure(request, model, canonicalCwd, "repository_not_allowed", startedAt);
@@ -96,11 +99,11 @@ export class OpenCodeProbe {
     try {
       executable = canonicalExecutable(request.executable);
     } catch {
-      return failure(request, model, canonicalCwd, "opencode_unavailable", startedAt);
+      return failure(request, model, canonicalCwd, "harness_unavailable", startedAt);
     }
 
     const result = await this.supervisor.execute({
-      taskId: `opencode-probe-${model.id}`,
+      taskId: `${request.harness}-probe-${model.id}`,
       executable,
       args: ["--version"],
       cwd: canonicalCwd,
@@ -139,9 +142,9 @@ function reportFromWorkerResult(
   cwd: string,
   result: WorkerResult,
   startedAt: string,
-): OpenCodeProbeReport {
+): HarnessProbeReport {
   if (result.outcome === "completed") {
-    const report: OpenCodeProbeReport = Object.freeze({
+    const report: HarnessProbeReport = Object.freeze({
       outcome: "completed",
       reason: null,
       modelId: model.id,
@@ -177,12 +180,12 @@ function reportFromWorkerResult(
 }
 
 function failure(
-  request: OpenCodeProbeRequest,
+  request: HarnessProbeRequest,
   model: ModelCapability | null,
   cwd: string,
-  reason: OpenCodeProbeFailureReason,
+  reason: HarnessProbeFailureReason,
   startedAt: string,
-): OpenCodeProbeReport {
+): HarnessProbeReport {
   return Object.freeze({
     outcome: "failed",
     reason,
@@ -204,10 +207,10 @@ function canonicalDirectory(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
   if (candidate !== canonical) {
-    throw new Error("OpenCode probe cwd must be a canonical absolute path");
+    throw new Error("harness probe cwd must be a canonical absolute path");
   }
   if (!stat.isDirectory()) {
-    throw new Error("OpenCode probe cwd must be a directory");
+    throw new Error("harness probe cwd must be a directory");
   }
   return canonical;
 }
@@ -216,10 +219,10 @@ function canonicalExecutable(candidate: string): string {
   const canonical = realpathSync.native(candidate);
   const stat = statSync(canonical);
   if (candidate !== canonical) {
-    throw new Error("OpenCode probe executable must be a canonical absolute path");
+    throw new Error("harness probe executable must be a canonical absolute path");
   }
   if (!stat.isFile() || (stat.mode & 0o111) === 0) {
-    throw new Error("OpenCode probe executable must be an executable file");
+    throw new Error("harness probe executable must be an executable file");
   }
   return canonical;
 }

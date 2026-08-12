@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { attestHostOpenCode } from "../../src/harnesses/opencode-attestation.js";
+import { attestHostHarnessExecutable } from "../../src/harnesses/harness-attestation.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 
 const roots: string[] = [];
@@ -24,10 +24,12 @@ process.stdout.write("fixture-opencode 1.18.3\\n");
 `, { mode: 0o755 });
     const canonical = realpathSync.native(executable);
     const expectedSha256 = createHash("sha256").update(readFileSync(canonical)).digest("hex");
-    await expect(attestHostOpenCode(new ProcessSupervisor(), {
+    await expect(attestHostHarnessExecutable(new ProcessSupervisor(), {
+      harness: "opencode",
       executable: canonical, home: realpathSync.native(home), cwd: root, expectedSha256,
       expectedVersion: "fixture-opencode 1.18.3", timeoutMs: 5_000,
     }, AbortSignal.timeout(10_000))).resolves.toEqual({
+      harness: "opencode",
       executable: canonical, executableSha256: expectedSha256, version: "fixture-opencode 1.18.3",
     });
   });
@@ -44,11 +46,12 @@ process.stdout.write("fixture-opencode 1.18.3\\n");
     const executable = path.join(root, "opencode");
     writeFileSync(executable, "#!/usr/bin/env node\nprocess.stdout.write('v1\\n');\n", { mode: 0o755 });
     const request = {
+      harness: "opencode" as const,
       executable: realpathSync.native(executable), home: realpathSync.native(home), cwd: root,
       expectedSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
       expectedVersion: "v1", timeoutMs: 5_000, ...changed,
     };
-    await expect(attestHostOpenCode(new ProcessSupervisor(), request, AbortSignal.timeout(10_000)))
-      .rejects.toThrow(/^host OpenCode operator attestation failed$/);
+    await expect(attestHostHarnessExecutable(new ProcessSupervisor(), request, AbortSignal.timeout(10_000)))
+      .rejects.toThrow(/^host opencode operator attestation failed$/);
   });
 });

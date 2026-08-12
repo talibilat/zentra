@@ -6,7 +6,7 @@ import { ValidationRunner, type ValidationReport } from "../capabilities/validat
 import { digestCanonical } from "../contracts/authority-attention.js";
 import type { PlannedTask } from "../contracts/milestone.js";
 import { buildWriterPatchProposal } from "../contracts/writer-patch.js";
-import { OpenCodeProbe } from "../harnesses/opencode-probe.js";
+import { HarnessProbe } from "../harnesses/harness-probe.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
 import { ReadOnlyGitConflictAnalyzer } from "../integration/conflict-analyzer.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
@@ -120,7 +120,7 @@ export async function runInstalledThreePodConformance(rootInput: string): Promis
     for (const fixture of assignments.filter((item) => item.suffix !== "cancel")) {
       const executable = createProvider(root, overlap, fixture.suffix, `${fixture.pathName}.ts`, mainCommit,
         `base-${fixture.pathName}`, `updated-${fixture.pathName}`);
-      const probe = await new OpenCodeProbe(supervisor).probe({ executable, cwd: repositoryPath, timeoutMs: 5_000,
+      const probe = await new HarnessProbe(supervisor).probe({ harness: capability.harness, executable, cwd: repositoryPath, timeoutMs: 5_000,
         modelId: capability.id, models: { models: [capability] }, security }, AbortSignal.timeout(10_000));
       const task = plannedTask(fixture.taskId, `src/${fixture.pathName}.ts`);
       const binding = new RoleCapabilityEnvelopeService(journal).accept(buildRoleCapabilityBinding({
@@ -295,7 +295,7 @@ export async function runInstalledThreePodConformance(rootInput: string): Promis
       ownedPaths: [changedPath], budget: podBudget() };
     const executable = createProvider(root, overlap, input.taskId, input.pathName, input.baseRevision,
       input.beforeValue, input.afterValue);
-    const probe = await new OpenCodeProbe(supervisor).probe({ executable, cwd: repositoryPath, timeoutMs: 5_000,
+    const probe = await new HarnessProbe(supervisor).probe({ harness: capability.harness, executable, cwd: repositoryPath, timeoutMs: 5_000,
       modelId: capability.id, models: { models: [capability] }, security }, AbortSignal.timeout(10_000));
     const task = plannedTask(input.taskId, changedPath);
     const binding = new RoleCapabilityEnvelopeService(journal).accept(buildRoleCapabilityBinding({
