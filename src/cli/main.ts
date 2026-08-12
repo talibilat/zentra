@@ -30,7 +30,7 @@ import {
   resolveBundledFixture,
   type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
-import { isHarnessId } from "../harnesses/harness-id.js";
+import { isHarnessId, type HarnessId } from "../harnesses/harness-id.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { IntegrationLeaseStore } from "../integration/integration-lease.js";
 import {
@@ -704,10 +704,11 @@ function createProgram(
           models,
           security,
           azureDeployment: providerConfig.deployment,
-          openCodeExecutable: options.opencode,
-          openCodeHome: options.opencodeHome,
-          openCodeExpectedSha256: options.opencodeSha256,
-          openCodeExpectedVersion: options.opencodeVersion,
+          harness: options.harness as HarnessId,
+          harnessExecutable: options.harnessExecutable,
+          harnessHome: options.harnessHome,
+          harnessExpectedSha256: options.harnessSha256,
+          harnessExpectedVersion: options.harnessVersion,
           signal,
         });
       } catch {

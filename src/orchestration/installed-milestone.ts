@@ -10,6 +10,8 @@ import { MilestonePlanSchema, type MilestonePlan, type PlannedTask } from "../co
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { HarnessProbe } from "../harnesses/harness-probe.js";
 import { attestHostHarnessExecutable } from "../harnesses/harness-attestation.js";
+import type { HarnessId } from "../harnesses/harness-id.js";
+import { HarnessWriterRegistry } from "../harnesses/harness-writer-registry.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import type { EventJournal } from "../journal/journal.js";
@@ -120,10 +122,11 @@ export interface InstalledMilestoneRunRequest {
   readonly models: ModelSheet;
   readonly security: SecuritySheet;
   readonly azureDeployment: string;
-  readonly openCodeExecutable: string;
-  readonly openCodeHome: string;
-  readonly openCodeExpectedSha256: string;
-  readonly openCodeExpectedVersion: string;
+  readonly harness: HarnessId;
+  readonly harnessExecutable: string;
+  readonly harnessHome: string;
+  readonly harnessExpectedSha256: string;
+  readonly harnessExpectedVersion: string;
   readonly signal: AbortSignal;
 }
 
@@ -134,12 +137,14 @@ export interface InstalledMilestoneRunnerOptions {
   readonly worker?: ProcessSupervisor;
   readonly readOnlyCapsule?: OpenCodeReadOnlyCapsule;
   readonly integrationBranchPreparationHooks?: IntegrationBranchPreparationHooks;
+  readonly writers?: HarnessWriterRegistry;
 }
 
 export class InstalledMilestoneRunner {
   private readonly projected: ProjectingEventJournal;
   private readonly worker: ProcessSupervisor;
   private readonly capsule: OpenCodeReadOnlyCapsule;
+  private readonly writers: HarnessWriterRegistry;
 
   constructor(private readonly options: InstalledMilestoneRunnerOptions) {
     this.projected = options.journal instanceof ProjectingEventJournal
@@ -147,6 +152,7 @@ export class InstalledMilestoneRunner {
       : new ProjectingEventJournal(options.journal, options.sink);
     this.worker = options.worker ?? new ProcessSupervisor();
     this.capsule = options.readOnlyCapsule ?? new DockerOpenCodeReadOnlyCapsule();
+    this.writers = options.writers ?? new HarnessWriterRegistry({ opencode: new OpenCodeWriter(this.worker) });
   }
 
   async run(request: InstalledMilestoneRunRequest): Promise<MilestoneRecord> {
@@ -183,12 +189,13 @@ export class InstalledMilestoneRunner {
       file: request.file,
       authority: "context_only",
     });
-    const attestation = await attestHostOpenCode(this.worker, {
-      executable: request.openCodeExecutable,
-      home: request.openCodeHome,
+    const attestation = await attestHostHarnessExecutable(this.worker, {
+      harness: request.harness,
+      executable: request.harnessExecutable,
+      home: request.harnessHome,
       cwd: repository,
-      expectedSha256: request.openCodeExpectedSha256,
-      expectedVersion: request.openCodeExpectedVersion,
+      expectedSha256: request.harnessExpectedSha256,
+      expectedVersion: request.harnessExpectedVersion,
       timeoutMs: 30_000,
     }, request.signal);
     const git = new GitClient();
@@ -249,14 +256,15 @@ export class InstalledMilestoneRunner {
     let tracer: OpenCodeIntegratedSingleFileTracer | null = null;
     const execution = {
       run: async (executionRequest: Parameters<OpenCodeIntegratedSingleFileTracer["run"]>[0]) => {
-        const probe = await new OpenCodeProbe(this.worker).probe({
+        const probe = await new HarnessProbe(this.worker).probe({
+          harness: request.harness,
           executable: attestation.executable,
           cwd: repository,
           timeoutMs: Math.min(30_000, implementerTask.budget.maxSeconds * 1_000),
           modelId: implementer.id,
           models: request.models,
           security: request.security,
-          home: request.openCodeHome,
+          home: request.harnessHome,
           expectedExecutableSha256: attestation.executableSha256,
           expectedVersion: attestation.version,
         }, executionRequest.signal);
@@ -268,7 +276,7 @@ export class InstalledMilestoneRunner {
             correlationId: request.milestoneId,
           });
           return tasks.append(implementerTask.taskId, `task.${probe.outcome}`, {
-            stage: "opencode_probe", reason: probe.reason,
+            stage: "harness_probe", reason: probe.reason,
           }, null);
         }
         if (tracer === null) throw new Error("installed writer schedule was not prepared");
@@ -327,7 +335,7 @@ export class InstalledMilestoneRunner {
         });
         tracer = new OpenCodeIntegratedSingleFileTracer(
           tasks,
-          new WriterWorktreeCapsule(worktrees, new OpenCodeWriter(this.worker), new WorkspaceOwnershipGate(), git),
+          new WriterWorktreeCapsule(worktrees, this.writers.get(request.harness), new WorkspaceOwnershipGate(), git),
           validations,
           worktrees,
           { reviewer: reviewerAdapter, reviews: new ReviewGate(), integrations: new IntegrationQueue(git, validations), git },
@@ -350,7 +358,7 @@ export class InstalledMilestoneRunner {
               security: request.security,
               reviewerId: reviewer.id,
               signal: request.signal,
-              openCodeHome: request.openCodeHome,
+              openCodeHome: request.harnessHome,
               guidance,
               probe: null,
             },
