@@ -461,6 +461,7 @@ function assertAuthority(request: WriterCapsuleRequest): void {
   if (
     task.roleAssignment.role !== "implementer" ||
     !isHarnessId(task.roleAssignment.harness) ||
+    task.roleAssignment.harness !== model.harness ||
     task.roleAssignment.agentId !== model.id ||
     task.risk.authority !== "workspace_write"
   ) {
