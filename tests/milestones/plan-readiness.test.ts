@@ -138,6 +138,40 @@ describe("assessMilestonePlanReadiness", () => {
     })).toMatchObject({ status: "blocked", reason: "plan_not_ready" });
   });
 
+  it("admits a claude_code implementer even though the security sheet targets opencode", () => {
+    const claudeTask = {
+      ...baseTask,
+      roleAssignment: { ...baseTask.roleAssignment, harness: "claude_code" },
+    };
+    const claudePlan = { ...basePlan, tasks: [claudeTask] };
+    const claudeContext: OpenCodeTaskAdmissionContext = { ...context, harness: "claude_code" };
+
+    expect(assessMilestonePlanReadiness({
+      plan: claudePlan,
+      taskId: "task-a",
+      security,
+      packet: createOpenCodeAdmissionPacket({
+        plan: claudePlan as never,
+        milestoneId: "milestone-ready",
+        taskId: "task-a",
+        security,
+        canonicalRepository: security.allowedRepositories[0]!,
+        actorId: context.actorId,
+        harness: "claude_code",
+        role: context.role,
+        capabilityId: context.capabilityId,
+        transportModelId: context.transportModelId,
+        authority: context.authority,
+        roles: context.roles,
+        toolPermissions: context.toolPermissions,
+        network: context.network,
+        contextTokens: context.contextTokens,
+        requestedBudget: context.requestedBudget,
+      }),
+      context: claudeContext,
+    })).toEqual({ status: "executable", reason: "ready", attention: null });
+  });
+
   it("blocks malformed plans with missing acceptance criteria", () => {
     const { acceptanceCriteria: _acceptanceCriteria, ...task } = baseTask;
 
