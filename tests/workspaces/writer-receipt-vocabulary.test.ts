@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWriterEventChain } from "../../src/agents/opencode-writer-events.js";
+import { createWriterEventChain } from "../../src/agents/writer-events.js";
 import { WriterReceiptBodySchema } from "../../src/workspaces/path-claims.js";
 
 function receiptBody(overrides: Record<string, unknown>): Record<string, unknown> {
