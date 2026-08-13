@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createWriterEventChain,
   WriterEventChainSchema,
-} from "../../src/agents/opencode-writer-events.js";
+} from "../../src/agents/writer-events.js";
 
 describe("OpenCode writer event evidence", () => {
   it("retains ordered native event metadata anchored to the final stdout digest without raw output", () => {

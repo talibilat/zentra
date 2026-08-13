@@ -4,7 +4,7 @@ import { createReadStream, realpathSync, statSync } from "node:fs";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
-import { createWriterEventChain, type WriterEventChain } from "../agents/opencode-writer-events.js";
+import { createWriterEventChain, type WriterEventChain } from "../agents/writer-events.js";
 import {
   CapabilityEnvelopeSchema,
   envelopeReadPaths,

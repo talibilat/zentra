@@ -11,7 +11,7 @@ import { uncertainEffectPayload } from "../../src/contracts/uncertain-effect.js"
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { projectTask } from "../../src/tasks/task-projection.js";
 import { TaskService } from "../../src/tasks/task-service.js";
-import { createWriterEventChain } from "../../src/agents/opencode-writer-events.js";
+import { createWriterEventChain } from "../../src/agents/writer-events.js";
 
 const journals: SqliteEventJournal[] = [];
 const temporaryDirectories: string[] = [];

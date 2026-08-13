@@ -17,7 +17,7 @@ import {
 } from "../contracts/uncertain-effect.js";
 import type { StopAndAskState } from "../contracts/milestone.js";
 import { CapabilityBoundaryPausedPayloadSchema, CapabilityBoundaryResolvedPayloadSchema, type CapabilityBoundaryOccurrence, type CapabilityBoundaryResolution } from "../contracts/capability-boundary.js";
-import { WriterEventChainSchema } from "../agents/opencode-writer-events.js";
+import { WriterEventChainSchema } from "../agents/writer-events.js";
 
 export interface TaskView {
   readonly taskId: string;

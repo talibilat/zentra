@@ -11,7 +11,7 @@ import type { WorkspaceOwnershipGate, WorkspaceOwnershipReport } from "./workspa
 import type { WorkspaceLease, WorktreeManager } from "./worktree-manager.js";
 import { canonicalDarwinPathIdentity } from "../milestones/path-ownership.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import { WriterEventChainSchema } from "../agents/opencode-writer-events.js";
+import { WriterEventChainSchema } from "../agents/writer-events.js";
 import { isSupervisedWriterReport } from "../harnesses/writer-brand.js";
 import type {
   WriterDispatchBinding,

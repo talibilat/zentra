@@ -1,7 +1,7 @@
 import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { UntrustedEvidenceHandoff } from "../orchestration/untrusted-evidence-handoff.js";
 import type { WriterPatchProposal } from "../contracts/writer-patch.js";
-import type { WriterEventChain } from "../agents/opencode-writer-events.js";
+import type { WriterEventChain } from "../agents/writer-events.js";
 
 export interface WriterTaskPacket {
   readonly brief: string;
