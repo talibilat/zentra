@@ -76,6 +76,29 @@ describe("createInstalledMilestonePlan", () => {
     });
   });
 
+  it("threads the requested harness onto the implementer only, leaving planner, researcher, and reviewer on opencode", () => {
+    const plan = createInstalledMilestonePlan({
+      milestoneId: "milestone-35",
+      projectId: "project",
+      goal: "Fix greeting",
+      file: "src/greeting.ts",
+      forbiddenPaths: [".env"],
+      harness: "codex",
+      plannerId: "planner",
+      researcherId: "researcher",
+      implementerId: "implementer",
+      reviewerId: "reviewer",
+    });
+
+    const byRole = (role: "planner" | "researcher" | "implementer" | "reviewer") =>
+      plan.tasks.find((task) => task.roleAssignment.role === role)!;
+
+    expect(byRole("implementer").roleAssignment.harness).toBe("codex");
+    expect(byRole("planner").roleAssignment.harness).toBe("opencode");
+    expect(byRole("researcher").roleAssignment.harness).toBe("opencode");
+    expect(byRole("reviewer").roleAssignment.harness).toBe("opencode");
+  });
+
   it("composes the current brokered read-only, writer, validation, review, integration, result, and trace path", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "zentra-installed-milestone-")));
     roots.push(root);
