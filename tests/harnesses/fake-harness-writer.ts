@@ -40,7 +40,7 @@ export class FakeHarnessWriter implements HarnessWriter {
     return Object.freeze({ binding });
   }
 
-  async execute(prepared: PreparedWriterRequest): Promise<WriterReport> {
+  async execute(prepared: PreparedWriterRequest, _signal: AbortSignal): Promise<WriterReport> {
     if (this.request === null) throw new Error("fake harness writer was not prepared");
     const now = new Date().toISOString();
     const report: WriterReport = Object.freeze({
