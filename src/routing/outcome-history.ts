@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { StoredEvent } from "../contracts/event.js";
 import type { MilestoneRole } from "../contracts/milestone.js";
+import type { HarnessId } from "../harnesses/harness-id.js";
 import { assertBoundedProjectionEntries, findAllEvent, iterateAllEvents, readStreamEvents, type EventJournal } from "../journal/journal.js";
 import {
   OutcomeHistoryRecordSchema,
@@ -129,7 +130,7 @@ export class JournalOutcomeHistoryStore {
   list(query: {
     readonly taskType: string;
     readonly role: MilestoneRole;
-    readonly harness: "opencode";
+    readonly harness: HarnessId;
   }): readonly OutcomeHistoryRecord[] {
     const routingStreams = new Map<string, StoredEvent[]>();
     for (const event of iterateAllEvents(this.journal)) {

@@ -21,7 +21,7 @@ import {
   uncertainEffectPayload,
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
-import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
+import { PlannedTaskSchema, type Harness, type PlannedTask } from "../contracts/milestone.js";
 import { usdNumberToNano } from "../contracts/cost.js";
 import {
   isVerifiedHarnessProbeReport,
@@ -216,7 +216,7 @@ export class OpenCodeSingleFileTracerBullet {
       taskId: request.task.taskId,
       rootTaskId: request.task.taskId,
       parentWorkerId: null,
-      harness: "opencode",
+      harness: request.task.roleAssignment.harness,
       role: request.task.roleAssignment.role,
       model: { capabilityId: request.model.id, modelId: request.model.model },
       envelope: roleBinding.envelope,
@@ -319,7 +319,7 @@ export class OpenCodeSingleFileTracerBullet {
             ));
             workers.cleanup(request.task.taskId, workerId, "completed");
             workers.terminate(request.task.taskId, workerId, report.outcome);
-            this.tasks.append(request.task.taskId, "task.writer_completed", writerSummary(report), null);
+            this.tasks.append(request.task.taskId, "task.writer_completed", writerSummary(report, request.task.roleAssignment.harness), null);
           },
         },
       });
@@ -391,7 +391,7 @@ export class OpenCodeSingleFileTracerBullet {
       const decision = [...changedPathDecisions, ...deniedToolDecisions].find((candidate) => candidate.status !== "allowed")!;
       const evidence = {
         deniedToolRequests: capsule.writer?.deniedToolRequests ?? [],
-        writer: capsule.writer === null ? null : writerSummary(capsule.writer),
+        writer: capsule.writer === null ? null : writerSummary(capsule.writer, request.task.roleAssignment.harness),
         ownership: capsule.ownership,
         workspace: capsule.lease?.path ?? null,
       };
@@ -411,7 +411,7 @@ export class OpenCodeSingleFileTracerBullet {
     if (capsule.outcome !== "completed") {
       return this.tasks.append(request.task.taskId, `task.${capsule.outcome}`, {
         stage: capsule.outcome === "denied" ? "ownership" : "writer",
-        writer: capsule.writer === null ? null : writerSummary(capsule.writer),
+        writer: capsule.writer === null ? null : writerSummary(capsule.writer, request.task.roleAssignment.harness),
         ownership: capsule.ownership,
         workspace: capsule.lease?.path ?? null,
       }, null);
@@ -1115,9 +1115,9 @@ function singleOwnedFile(task: PlannedTask, schedulerAdmitted: boolean): string 
 
 function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changedPath: string): void {
   const task = PlannedTaskSchema.parse(request.task);
-  if (task.roleAssignment.role !== "implementer" || task.roleAssignment.harness !== "opencode" ||
+  if (task.roleAssignment.role !== "implementer" ||
     task.roleAssignment.agentId !== request.model.id || task.risk.authority !== "workspace_write" ||
-    request.model.harness !== "opencode" || !request.model.roles.includes("implementer") ||
+    request.model.harness !== task.roleAssignment.harness || !request.model.roles.includes("implementer") ||
     !request.model.toolPermissions.includes("read_repository") || !request.model.toolPermissions.includes("write_worktree") ||
     request.model.toolPermissions.some((tool) => tool !== "read_repository" && tool !== "write_worktree") ||
     request.model.network !== "denied" || request.model.contextTokens < task.budget.maxInputTokens + task.budget.maxOutputTokens ||
@@ -1127,7 +1127,7 @@ function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changed
     throw new Error("OpenCode writer request is outside its exact durable admission");
   }
   if (request.probe === null || !isVerifiedHarnessProbeReport(request.probe, {
-    harness: "opencode", modelId: request.model.id, model: request.model.model,
+    harness: task.roleAssignment.harness, modelId: request.model.id, model: request.model.model,
     provider: request.model.model.replace(/\/.*/, ""), cwd: request.project.repositoryPath,
   })) throw new Error("OpenCode single-file tracer requires a verified capability probe");
 }
@@ -1163,10 +1163,10 @@ function assertValidationEvidence(
   }
 }
 
-function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): object {
+function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>, harness: Harness): object {
   return {
     workerId: report.modelId,
-    harness: "opencode",
+    harness,
     writerEvidenceVersion: 2,
     outcome: report.outcome,
     exitCode: report.exitCode,

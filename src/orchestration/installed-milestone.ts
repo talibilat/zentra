@@ -51,6 +51,7 @@ export interface InstalledMilestonePlanInput {
   readonly goal: string;
   readonly file: string;
   readonly forbiddenPaths: readonly string[];
+  readonly harness: HarnessId;
   readonly plannerId: string;
   readonly researcherId: string;
   readonly implementerId: string;
@@ -95,7 +96,7 @@ export function createInstalledMilestonePlan(input: InstalledMilestonePlanInput)
       ownedPaths: [input.file],
       forbiddenPaths: [...input.forbiddenPaths],
       acceptanceCriteria: ["The focused validation passes for the reviewed single-file change."],
-      roleAssignment: { role: "implementer", agentId: input.implementerId, harness: "opencode" },
+      roleAssignment: { role: "implementer", agentId: input.implementerId, harness: input.harness },
       risk: { level: "low", authority: "workspace_write", requiresReview: true, requiresApproval: false },
       budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 2, maxInputTokens: 16_000, maxOutputTokens: 4_000 },
     }, {
@@ -207,6 +208,7 @@ export class InstalledMilestoneRunner {
       goal: request.goal,
       file: request.file,
       forbiddenPaths: request.security.forbiddenPaths,
+      harness: request.harness,
       plannerId: planner.id,
       researcherId: researcher.id,
       implementerId: implementer.id,
@@ -425,7 +427,7 @@ function admission(repositoryPath: string, model: ModelCapability, task: Planned
     kind: "opencode" as const,
     repositoryPath,
     actorId: model.id,
-    harness: "opencode" as const,
+    harness: model.harness,
     role: task.roleAssignment.role,
     capabilityId: model.id,
     transportModelId: model.model,

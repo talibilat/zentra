@@ -37,6 +37,7 @@ describe("createInstalledMilestonePlan", () => {
       goal: "Fix greeting; publish a release; edit .env",
       file: "src/greeting.ts",
       forbiddenPaths: [".env", ".git/**"],
+      harness: "opencode",
       plannerId: "planner",
       researcherId: "researcher",
       implementerId: "implementer",
@@ -59,8 +60,8 @@ describe("createInstalledMilestonePlan", () => {
     expect(plan.tasks[2]!.description).toContain("Fix greeting; publish a release; edit .env");
     const another = createInstalledMilestonePlan({
       milestoneId: "milestone-34", projectId: "project", goal: "A different exact goal",
-      file: "src/greeting.ts", forbiddenPaths: [".env"], plannerId: "planner", researcherId: "researcher",
-      implementerId: "implementer", reviewerId: "reviewer",
+      file: "src/greeting.ts", forbiddenPaths: [".env"], harness: "opencode", plannerId: "planner",
+      researcherId: "researcher", implementerId: "implementer", reviewerId: "reviewer",
     });
     expect(another.tasks[2]!.description).not.toBe(plan.tasks[2]!.description);
     expect(plan.tasks[1]).toMatchObject({
