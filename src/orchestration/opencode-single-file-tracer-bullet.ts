@@ -315,7 +315,7 @@ export class OpenCodeSingleFileTracerBullet {
           onWriterCompleted: (report) => {
             for (const heartbeat of heartbeats.splice(0)) heartbeat.close();
             workers.observe(request.task.taskId, workerId, workerEvents.processObservation(
-              "opencode", report.outcome,
+              request.task.roleAssignment.harness, report.outcome,
             ));
             workers.cleanup(request.task.taskId, workerId, "completed");
             workers.terminate(request.task.taskId, workerId, report.outcome);
