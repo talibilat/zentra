@@ -65,42 +65,58 @@ describe("a second harness writer", () => {
   });
 
   it("drives its report through the durable receipt path with real dispatch authority", async () => {
-    const fixture = journalFixture();
-    const service = new PathClaimService(fixture.journal);
-    const claim = service.acquire({
-      projectId: "project-1", claimId: "claim-1", ownerId: "writer-1",
-      revision: "a".repeat(40), paths: ["src/a.ts"], leaseMs: 60_000,
-      correlationId: "run-1",
-    });
-
-    const dispatchId = "dispatch-1";
-    const writer = new FakeHarnessWriter();
-    const prepared = await writer.prepare(writerRequest({
-      dispatchId,
-      projectId: claim.projectId,
-      claimId: claim.claimId,
-      ownerId: claim.ownerId,
-      revision: claim.revision,
-      leaseToken: claim.leaseToken,
-    }));
-
-    service.beginDispatch({
-      projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
-      revision: claim.revision, leaseToken: claim.leaseToken,
-      dispatchId, binding: prepared.binding, correlationId: "run-1",
-    });
-
-    const report = await writer.execute(prepared, new AbortController().signal);
-
-    const receipt = appendSupervisedWriterReceipt(service, {
-      projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
-      revision: claim.revision, correlationId: "run-1",
-      leaseToken: claim.leaseToken, dispatchId,
-    }, report, prepared.binding);
+    const { receipt, journal } = await driveReceipt(new FakeHarnessWriter());
 
     expect(receipt.usageEvidence).toBe("native");
     expect(receipt.protocolFailure).toBeNull();
 
-    fixture.journal.close();
+    journal.close();
+  });
+
+  it("remaps an OpenCode-flavored writer report onto the durable receipt vocabulary", async () => {
+    const { receipt, journal } = await driveReceipt(
+      new FakeHarnessWriter("native_tokens", "invalid_native_event_stream"),
+    );
+
+    expect(receipt.usageEvidence).toBe("native");
+    expect(receipt.protocolFailure).toBe("invalid_output_stream");
+
+    journal.close();
   });
 });
+
+async function driveReceipt(writer: FakeHarnessWriter) {
+  const fixture = journalFixture();
+  const service = new PathClaimService(fixture.journal);
+  const claim = service.acquire({
+    projectId: "project-1", claimId: "claim-1", ownerId: "writer-1",
+    revision: "a".repeat(40), paths: ["src/a.ts"], leaseMs: 60_000,
+    correlationId: "run-1",
+  });
+
+  const dispatchId = "dispatch-1";
+  const prepared = await writer.prepare(writerRequest({
+    dispatchId,
+    projectId: claim.projectId,
+    claimId: claim.claimId,
+    ownerId: claim.ownerId,
+    revision: claim.revision,
+    leaseToken: claim.leaseToken,
+  }));
+
+  service.beginDispatch({
+    projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
+    revision: claim.revision, leaseToken: claim.leaseToken,
+    dispatchId, binding: prepared.binding, correlationId: "run-1",
+  });
+
+  const report = await writer.execute(prepared, new AbortController().signal);
+
+  const receipt = appendSupervisedWriterReceipt(service, {
+    projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
+    revision: claim.revision, correlationId: "run-1",
+    leaseToken: claim.leaseToken, dispatchId,
+  }, report, prepared.binding);
+
+  return { receipt, journal: fixture.journal };
+}

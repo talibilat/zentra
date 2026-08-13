@@ -17,6 +17,11 @@ function sha256(value: string): string {
 export class FakeHarnessWriter implements HarnessWriter {
   private request: WriterRequest | null = null;
 
+  constructor(
+    private readonly usageEvidence: string = "native",
+    private readonly protocolFailure: string | null = null,
+  ) {}
+
   async prepare(request: WriterRequest): Promise<PreparedWriterRequest> {
     this.request = request;
     const body = {
@@ -60,7 +65,7 @@ export class FakeHarnessWriter implements HarnessWriter {
       stderrSha256: sha256(""),
       eventChain: createWriterEventChain("", []),
       rawOutputPolicy: "not_retained",
-      protocolFailure: null,
+      protocolFailure: this.protocolFailure,
       stdout: "",
       stderr: "",
       startedAt: now,
@@ -70,7 +75,7 @@ export class FakeHarnessWriter implements HarnessWriter {
         inputTokens: 0, outputTokens: 0, reasoningTokens: 0,
         cacheReadTokens: 0, cacheWriteTokens: 0, toolCalls: 0,
       }),
-      usageEvidence: "native",
+      usageEvidence: this.usageEvidence,
       patchProposal: null,
       dispatchBinding: prepared.binding,
     });
