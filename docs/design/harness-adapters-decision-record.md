@@ -237,9 +237,70 @@ The blast radius was small: only `docs/commands.md` documented the old names out
 
 ---
 
+## D18. Plan-readiness expresses the read-only pin role-dependently, not as a blanket literal
+
+**Date:** 2026-08-13 (Phase 1.5 implementation)
+
+**Problem.** The Phase 1.5 plan told the implementer to delete two literal `"opencode"` pins in `src/milestones/plan-readiness.ts`, on the premise that neighbouring equality checks already proved all three harness values equal and so made the pins redundant.
+
+**Finding.** That premise was true about equality and wrong about what the pins protected. They were the only thing enforcing "the read-only admission path never admits a non-opencode harness." An implementer proved it empirically by toggling the deletion against `tests/agents/opencode-read-only-program.test.ts`: with the pins gone, a `claude_code` researcher passed admission and then crashed inside `OpenCodeReadOnlyAgent.run` with an uncaught error instead of producing the clean paused result. They refused to commit and escalated.
+
+**Decision.** Replace the pins with a role-dependent check rather than deleting them:
+
+```ts
+((packet.role !== "implementer" || !isHarnessId(packet.harness)) && packet.harness !== "opencode") ||
+```
+
+**Why.** This states the real invariant: only the implementer role dispatches by harness, and it may be any *executable* harness. Planner, researcher, and reviewer have no harness CLI and stay on OpenCode.
+
+**Note.** The `!isHarnessId(...)` clause was added later, during the final whole-branch review. The first version of this fix admitted a `deterministic` implementer, because `HarnessSchema` accepts that fixture-only value while `isHarnessId` deliberately does not.
+
+---
+
+## D19. `assertRoleModelCapability` runs after the authority block, not before it
+
+**Date:** 2026-08-13 (Phase 1.5 implementation)
+
+**Decision.** In `assertAuthority` (`src/orchestration/writer-worktree-capsule.ts`), the authority `if` block runs first and `assertRoleModelCapability` immediately after.
+
+**Why.** Once parameterized, `assertRoleModelCapability` also detects a harness mismatch. Running first, it threw the generic `"model does not match the canonical role capability policy"` where the specific `"writer assignment is outside approved harness authority"` had been. Two existing tests assert the specific message on that security-relevant rejection path. Reordering keeps the diagnostic message and leaves both tests passing unmodified, so they keep guarding what they were written to guard.
+
+**Alternative rejected.** Update the two tests to expect the generic message. That trades a specific diagnostic for a generic one on a rejection path, and edits tests that were not in the task's scope.
+
+---
+
+## D20. `exactRole` widened for the implementer rather than staying pinned
+
+**Date:** 2026-08-14 (Phase 1.5 final review)
+
+**Problem.** Two tasks in the same phase left `src/orchestration/installed-milestone.ts` internally contradictory, which no single-task review could see. One pinned `exactRole` to `"opencode"` justified by "preserves today's behavior exactly, widening belongs to Phase 2." The other then made `createInstalledMilestonePlan` stamp the implementer with the selected harness. Since `exactRole` runs before the writer is resolved, `--harness codex` began failing with a generic `plan_not_ready` or a cardinality throw, where before this branch it failed cleanly at `writers.get` with `UnregisteredHarnessWriterError`. A diagnostic regression on an operator-facing path.
+
+**Decision.** Make the expected harness role-dependent: `role === "implementer" ? harness : "opencode"`.
+
+**Alternatives rejected.** Keep the pin and add an early guard rejecting non-OpenCode harnesses (honors the plan's stated scope, but leaves a blocker Phase 2 must remove and adds a guard Phase 2 then deletes), or leave it and document the degraded error (ships a confusing operator-facing failure, and discovering plumbing gaps late is what this phase existed to prevent).
+
+**Why.** The pin's stated justification no longer held. Widening removes the last writer-path pin, is what Phase 2 needs anyway, and is safe today because an unregistered harness still fails one step later at `writers.get` with the correct error. The harness-selection test now reaches that error *after* capability selection succeeds, which is a stronger assertion than before.
+
+---
+
+## D21. `normalizeUsageEvidence` fails closed on an unrecognized value
+
+**Date:** 2026-08-14 (Phase 1.5 final review)
+
+**Decision.** Throw on an unrecognized `usageEvidence` rather than mapping it to `"none"`.
+
+**Why.** `"none"` is a meaningful value distinct from "unrecognized", and `WriterReport.usageEvidence` is an open `string`. A Phase 2 writer with a typo would have silently degraded the durable evidence of record with nothing failing anywhere. Failing closed matches this codebase's style.
+
+**Not changed.** `normalizeProtocolFailure` still collapses any non-null value to a single neutral one. That collapse is semantically total - any non-null value means the output stream was unusable - and the harness-specific reason remains in the writer's own report.
+
+---
+
 ## Standing practices adopted
 
 - **Escalate plan gaps, do not improvise.** Twice an implementer stopped on a gap the plan did not anticipate (D10, and the swallowed `UnregisteredHarnessWriterError`). Both were correct calls and produced better outcomes than guessing.
 - **Prove a regression test discriminates.** Every fix for a review finding was verified by reverting the fix and observing the test fail, then restoring. A test that passes for the wrong reason is worse than no test.
 - **Verify failures rather than assume flakiness.** Rising failure counts were traced to specific causes (load contention, `dist/` pollution) with isolation runs before being dismissed.
 - **Treat an unexpected blocker as a stop condition.** Recorded in the Phase 1.5 risk section: if the acceptance test cannot pass without further plumbing changes, stop and re-scope rather than widening the phase silently.
+- **A clean type check does not prove a complete commit.** One Phase 1.5 task edited a file, saw `pnpm run check` pass, and committed without staging it, so that commit did not compile from a clean checkout. Check `git status` before committing, not just the build.
+- **A test that asserts a value the same commit hardcodes proves nothing.** Phase 1.5's acceptance test initially read back a literal its own fake writer had set. Drive the value through the production seam that transforms it, and prove the test discriminates by reverting the transformation.
+- **Single-task reviews cannot see cross-task contradictions.** Phase 1.5's most serious finding was two tasks disagreeing inside one file, each individually correct and approved. The whole-branch review is where that surfaces, so it needs the branch diff rather than a summary.
