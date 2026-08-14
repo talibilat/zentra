@@ -1163,6 +1163,21 @@ function assertValidationEvidence(
   }
 }
 
+// The journal deliberately keeps the harness-native protocol failure reason while the durable
+// writer receipt records the neutral one. The writer report itself is not retained, so this
+// event is the only durable record of what actually went wrong. The value is bounded here
+// because WriterReport.protocolFailure is an open string that any future harness can set.
+const PROTOCOL_FAILURE_PATTERN = /^[a-z0-9][a-z0-9_]{0,63}$/;
+
+/** Internal journaling seam, exported so the retained vocabulary bound is directly testable. */
+export function boundedProtocolFailure(value: string | null): string | null {
+  if (value === null) return null;
+  if (!PROTOCOL_FAILURE_PATTERN.test(value)) {
+    throw new Error("writer protocol failure reason is outside the retained vocabulary");
+  }
+  return value;
+}
+
 function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>, harness: Harness): object {
   return {
     workerId: report.modelId,
@@ -1180,7 +1195,7 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>, harne
     stderrSha256: report.stderrSha256,
     eventChain: report.eventChain,
     rawOutputPolicy: report.rawOutputPolicy,
-    protocolFailure: report.protocolFailure,
+    protocolFailure: boundedProtocolFailure(report.protocolFailure),
     startedAt: report.startedAt,
     finishedAt: report.finishedAt,
     deniedToolRequests: report.deniedToolRequests.map((denied) => ({

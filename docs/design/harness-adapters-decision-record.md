@@ -295,6 +295,36 @@ The blast radius was small: only `docs/commands.md` documented the old names out
 
 ---
 
+## D22. The prepare-to-execute guard is shared as a factory, not a single registry
+
+**Date:** 2026-08-14 (issue #133)
+
+**Problem.** `OpenCodeWriter` guards prepare-to-execute with a module-private `WeakSet`: `prepare` adds the object, `execute` refuses anything absent and deletes it so it is single-use. That mechanism is not expressed in the `HarnessWriter` interface, so nothing forced a second writer to implement it, and the fake writer used as Phase 2's reference example omitted it.
+
+**Decision.** Add `createPreparedWriterRegistry()`, which returns its own `{ mark, consume }` pair. Each writer holds an instance.
+
+**Alternative rejected.** A single shared `WeakSet`, mirroring how the report brand was shared in D15. That would let one writer's `execute` accept another writer's prepared object, which then gets cast to the wrong internal shape. The report brand can be globally shared because it is checked by shared code; this guard cannot, because each writer's prepared shape is its own.
+
+**Also rejected.** Expressing it in the `HarnessWriter` interface. Stronger, but it constrains every writer's prepared-request shape and moves a security-critical check into a contract each implementation must satisfy correctly.
+
+---
+
+## D23. The journal keeps the harness-native protocol failure; the receipt keeps the neutral one
+
+**Date:** 2026-08-14 (issue #134)
+
+**Problem.** D16 normalized the durable receipt's vocabulary, but `task.writer_completed` journals `protocolFailure` raw. For OpenCode a single run emits `invalid_native_event_stream` in one durable event and `invalid_output_stream` in the other.
+
+**Decision.** Keep the split deliberately, and bound the journaled field to a lowercase token of at most 64 characters, throwing on anything else.
+
+**Why not normalize both.** `WriterReport.rawOutputPolicy` is `not_retained`, so the writer's own report never persists. The journal event is the only durable record of what actually went wrong. Normalizing it would permanently discard the harness-specific reason, leaving a future `ClaudeCodeWriter` failure indistinguishable from a `CodexWriter` failure in the forensic record.
+
+**Why bound it.** `WriterReport.protocolFailure` is an open `string`, so without a bound a future harness could land an arbitrary unbounded value in the journal. Throwing matches D21 and the codebase's fail-closed style: an out-of-vocabulary reason is a writer bug that should surface rather than be quietly recorded.
+
+**Consequence.** The two durable sinks intentionally disagree. That is now documented at the call site so it reads as a decision rather than an oversight.
+
+---
+
 ## Standing practices adopted
 
 - **Escalate plan gaps, do not improvise.** Twice an implementer stopped on a gap the plan did not anticipate (D10, and the swallowed `UnregisteredHarnessWriterError`). Both were correct calls and produced better outcomes than guessing.
