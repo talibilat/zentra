@@ -83,6 +83,11 @@ describe("a second harness writer", () => {
 
     journal.close();
   });
+
+  it("fails closed instead of silently degrading an unrecognized usage evidence value to none", async () => {
+    await expect(driveReceipt(new FakeHarnessWriter("mistyped_evidence")))
+      .rejects.toThrow(/usage evidence is not a recognized value: mistyped_evidence/);
+  });
 });
 
 async function driveReceipt(writer: FakeHarnessWriter) {

@@ -165,10 +165,10 @@ export class InstalledMilestoneRunner {
       request.security.forbiddenPaths.some((scope) => scopesOverlap(scope, request.file))) {
       throw new Error("installed milestone file is outside explicit security authority");
     }
-    const planner = exactRole(request.models, "planner");
-    const researcher = exactRole(request.models, "researcher");
-    const implementer = exactRole(request.models, "implementer");
-    const reviewer = exactRole(request.models, "reviewer");
+    const planner = exactRole(request.models, "planner", request.harness);
+    const researcher = exactRole(request.models, "researcher", request.harness);
+    const implementer = exactRole(request.models, "implementer", request.harness);
+    const reviewer = exactRole(request.models, "reviewer", request.harness);
     const roleCapabilities = [planner, researcher, implementer, reviewer];
     if (new Set(roleCapabilities.map((capability) => capability.id)).size !== roleCapabilities.length ||
       roleCapabilities.some((capability, index) => capability.roles.length !== 1 ||
@@ -403,8 +403,13 @@ export class InstalledMilestoneRunner {
   }
 }
 
-function exactRole(models: ModelSheet, role: "planner" | "researcher" | "implementer" | "reviewer"): ModelCapability {
-  const matches = models.models.filter((model) => roleModelSupports(role, model, "opencode"));
+function exactRole(
+  models: ModelSheet,
+  role: "planner" | "researcher" | "implementer" | "reviewer",
+  harness: HarnessId,
+): ModelCapability {
+  const matches = models.models.filter((model) =>
+    roleModelSupports(role, model, role === "implementer" ? harness : "opencode"));
   if (matches.length !== 1) throw new Error(`installed milestone requires exactly one approved ${role} capability`);
   return matches[0]!;
 }

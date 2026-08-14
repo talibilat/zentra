@@ -1023,5 +1023,6 @@ function normalizeProtocolFailure(value: string | null): "invalid_output_stream"
 function normalizeUsageEvidence(value: string): "native" | "fallback" | "none" {
   if (value === "native" || value === "native_tokens") return "native";
   if (value === "fallback" || value === "legacy_usage") return "fallback";
-  return "none";
+  if (value === "none") return "none";
+  throw new Error(`writer report usage evidence is not a recognized value: ${value}`);
 }

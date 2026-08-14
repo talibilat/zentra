@@ -13,6 +13,7 @@ import {
 } from "../contracts/authority-attention.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import { roleModelSupports } from "../workers/role-capability-envelope.js";
+import { isHarnessId } from "../harnesses/harness-id.js";
 
 export type PlanReadinessStatus = "executable" | "blocked" | "requires_approval";
 
@@ -115,7 +116,7 @@ function assessAuthority(
   const task = plan.tasks.find((candidate) => candidate.taskId === taskId)!;
   if (
     packet.actorId !== task.roleAssignment.agentId ||
-    (packet.role !== "implementer" && packet.harness !== "opencode") ||
+    ((packet.role !== "implementer" || !isHarnessId(packet.harness)) && packet.harness !== "opencode") ||
     context.actorId !== packet.actorId ||
     context.harness !== packet.harness ||
     context.role !== packet.role ||

@@ -120,7 +120,8 @@ function model(
   network: "denied" | "declared" = "denied",
 ): ModelCapability {
   return {
-    id, harness: "opencode", model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
+    id, harness: role === "implementer" ? "codex" : "opencode",
+    model: role === "implementer" ? `fixture/${id}` : "zentra-deployment", roles: [role], specialties: [], costTier: "low",
     contextTokens: 128_000, maxConcurrency: 1, toolPermissions: tools, network,
     fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 },
   };
