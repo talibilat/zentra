@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { createWriterEventChain } from "../../src/agents/writer-events.js";
 import { brandSupervisedReport } from "../../src/harnesses/writer-brand.js";
+import { createPreparedWriterRegistry } from "../../src/harnesses/writer-prepared.js";
 import type {
   HarnessWriter,
   PreparedWriterRequest,
@@ -16,6 +17,8 @@ function sha256(value: string): string {
 
 export class FakeHarnessWriter implements HarnessWriter {
   private request: WriterRequest | null = null;
+
+  private readonly preparedRequests = createPreparedWriterRegistry();
 
   constructor(
     private readonly usageEvidence: string = "native",
@@ -42,10 +45,15 @@ export class FakeHarnessWriter implements HarnessWriter {
       ...body,
       digest: sha256(JSON.stringify(body)),
     });
-    return Object.freeze({ binding });
+    const prepared = Object.freeze({ binding });
+    this.preparedRequests.mark(prepared);
+    return prepared;
   }
 
   async execute(prepared: PreparedWriterRequest, _signal: AbortSignal): Promise<WriterReport> {
+    if (!this.preparedRequests.consume(prepared)) {
+      throw new Error("fake harness writer request was not prepared by this trusted adapter");
+    }
     if (this.request === null) throw new Error("fake harness writer was not prepared");
     const now = new Date().toISOString();
     const report: WriterReport = Object.freeze({

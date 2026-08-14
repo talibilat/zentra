@@ -12,6 +12,7 @@ import {
 } from "../workers/worker-lifecycle.js";
 import { extractWriterPatchProposal, type WriterPatchProposal } from "../contracts/writer-patch.js";
 import { brandSupervisedReport } from "./writer-brand.js";
+import { createPreparedWriterRegistry } from "./writer-prepared.js";
 import type {
   HarnessWriter,
   PreparedWriterRequest,
@@ -39,7 +40,7 @@ interface InternalPreparedOpenCodeWriterRequest extends PreparedOpenCodeWriterRe
   readonly argv: readonly string[];
 }
 
-const preparedRequests = new WeakSet<object>();
+const preparedRequests = createPreparedWriterRegistry();
 
 export class OpenCodeWriter implements HarnessWriter {
   constructor(private readonly supervisor: WorkerAdapter) {}
@@ -85,7 +86,7 @@ export class OpenCodeWriter implements HarnessWriter {
       request, executable, cwd, packet, argv,
       binding: Object.freeze({ ...bindingBody, digest: sha256(JSON.stringify(bindingBody)) }),
     });
-    preparedRequests.add(prepared);
+    preparedRequests.mark(prepared);
     return prepared;
   }
 
@@ -93,8 +94,7 @@ export class OpenCodeWriter implements HarnessWriter {
     rawPrepared: PreparedOpenCodeWriterRequest,
     signal: AbortSignal,
   ): Promise<OpenCodeWriterReport> {
-    if (!preparedRequests.has(rawPrepared)) throw new Error("OpenCode writer request was not prepared by this trusted adapter");
-    preparedRequests.delete(rawPrepared);
+    if (!preparedRequests.consume(rawPrepared)) throw new Error("OpenCode writer request was not prepared by this trusted adapter");
     const prepared = rawPrepared as InternalPreparedOpenCodeWriterRequest;
     const { request, executable, cwd, packet, argv } = prepared;
     const startedAt = new Date().toISOString();
