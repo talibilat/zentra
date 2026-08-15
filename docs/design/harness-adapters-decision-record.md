@@ -325,6 +325,104 @@ The blast radius was small: only `docs/commands.md` documented the old names out
 
 ---
 
+## D24. The writer subprocess must scrub the parent Claude Code session's environment
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** Found empirically, by accident, against Claude Code 2.1.207.
+A live `claude -p` run launched with `--allowedTools "Read"` was asked to write a file.
+It called `Write`, the tool returned `File created successfully`, the file appeared on disk, `is_error` was `false`, and `permission_denials` was `[]`.
+The allow-list appeared to provide no enforcement whatsoever.
+
+It does enforce.
+The confound was inherited environment.
+Zentra was itself running inside a Claude Code session, and the child inherited `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`, which let it delegate the permission decision back to the parent session, where it was auto-approved.
+Unsetting `CLAUDECODE`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, and `CLAUDE_CODE_ENTRYPOINT` and re-running the identical command blocked the write, created no file, and populated `permission_denials` correctly.
+
+**Decision.** `ClaudeCodeWriter` builds the child environment from an explicit allow-list of variables rather than inheriting and subtracting.
+Any `CLAUDE_CODE_*` or `CLAUDECODE` variable not explicitly required is absent.
+
+**Why this is severe.** The escalation is silent, it produces no error, and it only manifests when Zentra runs under a Claude Code session, which is exactly the condition during development and CI.
+The security model would have looked correct in every isolated test and been bypassed in practice.
+Subtracting a known-bad list is not sufficient: the variable set is undocumented and version-dependent, so a future release adding a new delegation channel would reopen the hole.
+
+---
+
+## D25. Deny-list for removal, allow-list for evidence, and both are required
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** The two flags were assumed to be alternatives. Measured against 2.1.207 in a clean environment, they do different things and each is individually insufficient.
+
+`--disallowedTools` removes the tool structurally.
+It disappears from the `system:init` event's `tools` array, and an attempted call fails with `No such tool available: Write. Write exists but is not enabled in this context.`
+But `permission_denials` stays **empty**, so the attempt leaves no trace in the result summary.
+
+`--allowedTools` does not remove anything.
+Every built-in stays advertised in `system:init`.
+A call to a non-allowed tool is denied at the permission layer and **is** recorded in `permission_denials`, with `tool_name`, `tool_use_id`, and the complete `tool_input`.
+
+**Decision.** Apply both. The deny-list provides structural removal; the allow-list provides the audit trail.
+`deniedToolRequests` is assembled from two sources: `permission_denials` in the result event, and `tool_use_error` results in the stream whose text matches the not-enabled-in-this-context form.
+
+**Consequence.** Structural removal alone would have made breach attempts invisible in the durable receipt, which defeats the purpose of recording them.
+
+---
+
+## D26. The tool surface is enumerated and verified, not assumed
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** The design's deny-list was `Edit`, `Write`, `Bash`, `WebFetch`, `Task`.
+Enumerating `system:init` on 2.1.207 with that exact deny-list still advertised `NotebookEdit`, which writes files, alongside `Skill`, `Workflow`, `EnterWorktree`, `ExitWorktree`, `SendMessage`, `RemoteTrigger`, and `CronCreate`.
+`NotebookEdit` alone defeats the model: it modifies files on disk without passing through `propose_patch`.
+
+The advertised set also varied run to run under identical flags, because tools move between loaded and deferred.
+
+**Decision.** `ClaudeCodeWriter` reads the `tools` array from the `system:init` event and compares it against an expected allow-set.
+Anything unexpected aborts the run before the first turn.
+
+**Why not just extend the deny-list.** A hardcoded list is a snapshot of one version.
+Both CLIs ship near-daily, and a release adding a file-mutating tool would silently break the model with no failing test.
+Verifying the actual surface converts an assumption into an assertion that fails loudly.
+
+---
+
+## D27. Claude Code does not fail closed on an unreachable MCP server
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** The spec left open whether `-p` fails closed when `--mcp-config` points at a server that cannot be reached, since Codex has an explicit `required = true` and Claude Code's equivalent was unconfirmed.
+
+Measured against a dead endpoint at `http://127.0.0.1:59999/mcp` with `--strict-mcp-config`: the run completed with `is_error: false`, `subtype: "success"`, `terminal_reason: "completed"`, and exit code 0.
+With `--output-format json` there is no signal at all that the server failed.
+
+There is a signal, but only in the stream. `--output-format stream-json --verbose` emits a `system:init` event carrying `mcp_servers: [{"name": "zentra", "status": "failed"}]`.
+
+**Decision.** `ClaudeCodeWriter` uses `stream-json`, not `json`, and gates on the init event: every configured MCP server must report connected, and `mcp__zentra__propose_patch` must be present in the advertised tool list, or the run aborts before the first turn.
+
+**Why this matters beyond a health check.** Without it, an unreachable server yields a successful run with no patch proposed, which is byte-identical to a run where the model legitimately decided no change was needed.
+A broken capsule would be indistinguishable from a clean no-op, and the failure mode is silent in exactly the direction that loses work.
+
+---
+
+## D28. `--strict-mcp-config` suppresses user MCP servers but nothing else
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** Whether `--strict-mcp-config` is sufficient isolation for the capsule.
+
+Measured: without it, the child inherited the host user's MCP servers, and `mcp__headroom__*` tools appeared in the advertised list.
+With it, those disappeared.
+But the non-MCP extras above were unaffected, and running with a scrubbed `HOME` pointing at an empty directory did not remove them either, so they are neither user configuration nor environment-derived.
+
+**Decision.** Set `--strict-mcp-config` and treat it as covering MCP servers only.
+Isolation of the rest is D24's environment allow-list plus D26's surface verification.
+
+**Consequence.** No single flag isolates the capsule. The three mechanisms are independent and all are load-bearing.
+
+---
+
 ## Standing practices adopted
 
 - **Escalate plan gaps, do not improvise.** Twice an implementer stopped on a gap the plan did not anticipate (D10, and the swallowed `UnregisteredHarnessWriterError`). Both were correct calls and produced better outcomes than guessing.
