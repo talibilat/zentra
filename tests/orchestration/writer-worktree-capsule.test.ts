@@ -15,7 +15,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { PlannedTask } from "../../src/contracts/milestone.js";
-import type { HarnessWriter, WriterDispatchBinding } from "../../src/harnesses/harness-writer.js";
+import { createWriterEventChain } from "../../src/agents/writer-events.js";
+import type { HarnessWriter, WriterDispatchBinding, WriterReport } from "../../src/harnesses/harness-writer.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { WriterWorktreeCapsule, type WriterCapsuleRequest } from "../../src/orchestration/writer-worktree-capsule.js";
@@ -421,6 +422,92 @@ describe("WriterWorktreeCapsule", () => {
     expect(disposed).toBe(1);
     journal.close();
   });
+
+  it("disposes the prepared request when beginDispatch fails and recordUncertain also throws", async () => {
+    const fixture = await projectFixture();
+    const { journal } = journalFixture();
+    const claims = new FailingBeginDispatchAndRecordUncertainClaims(journal);
+    let disposed = 0;
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { disposed += 1; } };
+      },
+      async execute() {
+        throw new Error("execute must not run when beginDispatch throws");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+      writeClaim: {
+        service: claims,
+        claimId: "claim-dispose-aggregate",
+        ownerId: "writer-model",
+        paths: ["src/greeting.ts"],
+        leaseMs: 60_000,
+        correlationId: "run-dispose-aggregate",
+        maxToolCalls: 1,
+      },
+      dispatchAuthority: { mode: "unscheduled" },
+    })).rejects.toThrow(AggregateError);
+
+    expect(disposed).toBe(1);
+    journal.close();
+  });
+
+  it("disposes the prepared request via the execute-path finally when the writer succeeds", async () => {
+    const fixture = await projectFixture();
+    let disposed = 0;
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { disposed += 1; } };
+      },
+      async execute(prepared) {
+        return completedWriterReport(prepared.binding);
+      },
+    };
+
+    const result = await capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(disposed).toBe(1);
+  });
+
+  it("disposes the prepared request via the execute-path finally when the writer throws", async () => {
+    const fixture = await projectFixture();
+    let disposed = 0;
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { disposed += 1; } };
+      },
+      async execute() {
+        throw new Error("execute exploded");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+    })).rejects.toThrow("execute exploded");
+
+    expect(disposed).toBe(1);
+  });
 });
 
 function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {
@@ -451,6 +538,51 @@ class FailingBeginDispatchClaims extends PathClaimService {
   override beginDispatch(_input: Parameters<PathClaimService["beginDispatch"]>[0]): void {
     throw new Error("claim conflict");
   }
+}
+
+class FailingBeginDispatchAndRecordUncertainClaims extends PathClaimService {
+  override beginDispatch(_input: Parameters<PathClaimService["beginDispatch"]>[0]): void {
+    throw new Error("claim conflict");
+  }
+
+  override recordUncertain(_input: Parameters<PathClaimService["recordUncertain"]>[0]): void {
+    throw new Error("uncertain recording failed");
+  }
+}
+
+function completedWriterReport(binding: WriterDispatchBinding): WriterReport {
+  const now = new Date().toISOString();
+  return Object.freeze({
+    outcome: "completed",
+    exitCode: 0,
+    executable: "/fake/harness",
+    modelId: "writer-model",
+    requestedModelSha256: sha256("provider/model"),
+    argv: Object.freeze(["<fake-argv>"]),
+    cwd: "/fake/workspace",
+    packetSha256: sha256("packet"),
+    networkBoundary: Object.freeze({
+      modelTools: "denied" as const,
+      harnessProviderTransport: "user_os_network_authority" as const,
+    }),
+    stdoutSha256: sha256(""),
+    stderrSha256: sha256(""),
+    eventChain: createWriterEventChain("", []),
+    rawOutputPolicy: "not_retained",
+    protocolFailure: null,
+    stdout: "",
+    stderr: "",
+    startedAt: now,
+    finishedAt: now,
+    deniedToolRequests: Object.freeze([]),
+    usage: Object.freeze({
+      inputTokens: 0, outputTokens: 0, reasoningTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, toolCalls: 0,
+    }),
+    usageEvidence: "test",
+    patchProposal: null,
+    dispatchBinding: binding,
+  });
 }
 
 function journalFixture(): { journal: SqliteEventJournal } {
