@@ -21,6 +21,7 @@
 - All new `protocolFailure` values are lowercase tokens matching `/^[a-z0-9][a-z0-9_]{0,63}$/`, so `boundedProtocolFailure` accepts them.
 - Do not extend `WriterReceiptBodySchema`'s `protocolFailure` enum. `normalizeProtocolFailure` collapses every non-null value to `invalid_output_stream` by design (D23).
 - Measured facts in this plan are pinned to Claude Code **2.1.207**. If the installed version differs, stop and report rather than adapting silently.
+- **The deny-list and the surface check are two halves of one control.** The deny-list is what makes the common case run; the init-event check is what makes an unknown tool fail loudly instead of silently. Verified on 2.1.207: with the full deny-list the advertised surface is exactly `Read, Glob, Grep`. With only the six mutating tools denied it was 24 tools including `CronCreate` and `EnterWorktree`, so the surface check would have aborted every run. Do not shorten the deny-list to "just the dangerous ones".
 - Test baseline: roughly 6 to 8 files fail for environmental reasons (no OpenCode credentials, Docker, browser and clock drift). Verify any new failure in isolation before calling it a regression.
 
 ## Stop Conditions
@@ -714,11 +715,26 @@ describe("buildClaudeCodeArgv", () => {
     expect(argv[argv.indexOf("--output-format") + 1]).toBe("stream-json");
   });
 
-  it("denies every known mutating tool including NotebookEdit", () => {
+  it("denies every tool observed on a 2.1.207 surface", () => {
     const argv = buildClaudeCodeArgv({ ...base, auth: { mode: "oauth" } });
     const denied = argv[argv.indexOf("--disallowedTools") + 1]!.split(",");
-    for (const tool of ["Edit", "Write", "Bash", "WebFetch", "Task", "NotebookEdit"]) {
+    // The first six are the mutating set. The rest were measured as still
+    // advertised at init when only those six were denied, and several of them
+    // execute or persist state: CronCreate schedules recurring work,
+    // EnterWorktree mutates git, SendMessage reaches other agents.
+    for (const tool of [
+      "Edit", "Write", "Bash", "WebFetch", "Task", "NotebookEdit",
+      "CronCreate", "EnterWorktree", "SendMessage", "Skill", "Workflow", "ToolSearch",
+    ]) {
       expect(denied).toContain(tool);
+    }
+  });
+
+  it("never denies a tool the writer legitimately needs", () => {
+    const argv = buildClaudeCodeArgv({ ...base, auth: { mode: "oauth" } });
+    const denied = argv[argv.indexOf("--disallowedTools") + 1]!.split(",");
+    for (const tool of ["Read", "Glob", "Grep"]) {
+      expect(denied).not.toContain(tool);
     }
   });
 
@@ -794,7 +810,18 @@ Create `src/harnesses/claude-code-invocation.ts`:
  * floor, not the security boundary: inspectInitEvent is what actually holds,
  * because a future release could add a mutating tool this list does not name.
  */
-const DENIED_TOOLS = ["Edit", "Write", "Bash", "WebFetch", "Task", "NotebookEdit"] as const;
+const DENIED_TOOLS = [
+  // Mutating or executing.
+  "Edit", "Write", "Bash", "WebFetch", "Task", "NotebookEdit",
+  // Present on a 2.1.207 desktop build and reachable without any of the above.
+  // CronCreate schedules recurring execution, EnterWorktree mutates git state,
+  // and SendMessage reaches other agents. Measured, not guessed: with only the
+  // first line denied, all of these were still advertised at init.
+  "CronCreate", "CronDelete", "CronList", "DesignSync", "EnterWorktree", "ExitWorktree",
+  "Monitor", "PushNotification", "RemoteTrigger", "ReportFindings", "ScheduleWakeup",
+  "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+  "TaskUpdate", "ToolSearch", "WebSearch", "Workflow", "Artifact",
+] as const;
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep"] as const;
 
 const PROTOCOL_INSTRUCTIONS = [
