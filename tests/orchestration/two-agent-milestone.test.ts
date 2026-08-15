@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { OpenCodeTaskAdmissionContext } from "../../src/contracts/authority-attention.js";
 import type { MilestonePlan } from "../../src/contracts/milestone.js";
+import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { TwoAgentMilestoneCoordinator } from "../../src/orchestration/two-agent-milestone.js";
@@ -125,7 +126,7 @@ function twoAgentPlan(): MilestonePlan {
   };
 }
 
-function model(id: string, role: "implementer" | "reviewer", toolPermissions: readonly string[]) {
+function model(id: string, role: "implementer" | "reviewer", toolPermissions: readonly string[]): ModelCapability {
   return {
     id,
     harness: "opencode",

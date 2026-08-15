@@ -1,135 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, realpathSync, statSync } from "node:fs";
 
-import type { MilestoneBudget } from "../contracts/milestone.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
-import type { WorkspaceLease } from "../workspaces/worktree-manager.js";
-import type { UntrustedEvidenceHandoff } from "../orchestration/untrusted-evidence-handoff.js";
 import { OpenCodeWorkerEventAdapter } from "../agents/opencode-worker-event-adapter.js";
-import { createOpenCodeWriterEventChain, type OpenCodeWriterEventChain } from "../agents/opencode-writer-events.js";
+import { createWriterEventChain, type WriterEventChain } from "../agents/writer-events.js";
 import {
   CapabilityEnvelopeSchema,
   envelopeReadPaths,
   envelopeWritePaths,
-  type CapabilityEnvelope,
 } from "../workers/worker-lifecycle.js";
 import { extractWriterPatchProposal, type WriterPatchProposal } from "../contracts/writer-patch.js";
+import { brandSupervisedReport } from "./writer-brand.js";
+import { createPreparedWriterRegistry } from "./writer-prepared.js";
+import type {
+  HarnessWriter,
+  PreparedWriterRequest,
+  WriterDispatchBinding,
+  WriterReport,
+  WriterRequest,
+  WriterTaskPacket,
+  WriterUsage,
+} from "./harness-writer.js";
 
-export interface WriterTaskPacket {
-  readonly brief: string;
-  readonly guidance?: UntrustedEvidenceHandoff;
-  readonly baseRevisionSha256?: string;
-  readonly ownedPaths: readonly string[];
-  readonly potentialWritePaths?: readonly string[];
-  readonly pathClaim?: {
-    readonly claimId: string;
-    readonly revision: string;
-    readonly expiresAt: string;
-  };
-  readonly readPaths?: readonly string[];
-  readonly writePaths?: readonly string[];
-  readonly toolPermissions?: readonly string[];
-  readonly capabilityEnvelopeDigest?: string;
-  readonly forbiddenPaths: readonly string[];
-  readonly acceptanceCriteria: readonly string[];
-  readonly patchProtocol: {
-    readonly mode: "proposal_only";
-    readonly maxOperations: 256;
-    readonly maxBytes: 1048576;
-    readonly mutationTools: "denied";
-  };
-  readonly budget: MilestoneBudget;
-  readonly securityBoundary: {
-    readonly repositoryWrites: "assigned_worktree_only";
-    readonly validationAuthority: "zentra_named_validations_only";
-    readonly integrationAuthority: "none";
-    readonly shellAuthority: "none";
-    readonly modelToolNetwork: "denied";
-    readonly harnessProviderTransport: "user_os_network_authority";
-    readonly parentSecretInheritance: "denied";
-    readonly runtimeIsolation: "trusted_project_policy_not_os_sandbox";
-  };
-}
-
-export interface OpenCodeWriterRequest {
-  readonly taskId: string;
-  readonly executable: string;
-  readonly model: ModelCapability;
-  readonly workspace: WorkspaceLease;
-  readonly packet: WriterTaskPacket;
-  readonly timeoutMs: number;
-  readonly expectedExecutableSha256?: string;
-  readonly home?: string;
-  readonly capabilityEnvelope?: CapabilityEnvelope;
-  readonly dispatchAuthority?: {
-    readonly dispatchId: string;
-    readonly projectId: string;
-    readonly claimId: string;
-    readonly ownerId: string;
-    readonly revision: string;
-    readonly leaseToken: string;
-  };
-}
-
-export interface OpenCodeWriterReport {
-  readonly outcome: "completed" | "cancelled" | "timed_out" | "failed";
-  readonly exitCode: number | null;
-  readonly executable: string;
-  readonly modelId: string;
-  readonly requestedModelSha256: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-  readonly packetSha256: string;
-  readonly networkBoundary: {
-    readonly modelTools: "denied";
-    readonly harnessProviderTransport: "user_os_network_authority";
-  };
-  readonly stdoutSha256: string;
-  readonly stderrSha256: string;
-  readonly eventChain: OpenCodeWriterEventChain;
-  readonly rawOutputPolicy: "not_retained";
+export type OpenCodeWriterRequest = WriterRequest;
+export type OpenCodeWriterReport = WriterReport & {
   readonly protocolFailure: "invalid_native_event_stream" | null;
-  /** Transient process output. Callers must not journal or otherwise retain it. */
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly startedAt: string;
-  readonly finishedAt: string;
-  readonly deniedToolRequests: readonly { readonly tool: string; readonly path: string | null }[];
-  readonly usage: OpenCodeWriterUsage;
   readonly usageEvidence: "native_tokens" | "legacy_usage" | "none";
-  readonly patchProposal: WriterPatchProposal | null;
-  readonly dispatchBinding: OpenCodeWriterDispatchBinding;
-}
-
-export interface OpenCodeWriterUsage {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly reasoningTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheWriteTokens: number;
-  readonly toolCalls: number;
-}
-
-export interface OpenCodeWriterDispatchBinding {
-  readonly schemaVersion: 1;
-  readonly processIncarnation: string;
-  readonly executableSha256: string;
-  readonly argvSha256: string;
-  readonly packetSha256: string;
-  readonly cwdSha256: string;
-  readonly dispatchId: string | null;
-  readonly projectId: string | null;
-  readonly claimId: string | null;
-  readonly ownerId: string | null;
-  readonly revision: string | null;
-  readonly leaseToken: string | null;
-  readonly digest: string;
-}
-
-export interface PreparedOpenCodeWriterRequest {
-  readonly binding: OpenCodeWriterDispatchBinding;
-}
+};
+export type OpenCodeWriterUsage = WriterUsage;
+export type OpenCodeWriterDispatchBinding = WriterDispatchBinding;
+export type PreparedOpenCodeWriterRequest = PreparedWriterRequest;
 
 interface InternalPreparedOpenCodeWriterRequest extends PreparedOpenCodeWriterRequest {
   readonly request: OpenCodeWriterRequest;
@@ -139,10 +40,9 @@ interface InternalPreparedOpenCodeWriterRequest extends PreparedOpenCodeWriterRe
   readonly argv: readonly string[];
 }
 
-const preparedRequests = new WeakSet<object>();
-const supervisedReports = new WeakMap<object, string>();
+const preparedRequests = createPreparedWriterRegistry();
 
-export class OpenCodeWriter {
+export class OpenCodeWriter implements HarnessWriter {
   constructor(private readonly supervisor: WorkerAdapter) {}
 
   async prepare(request: OpenCodeWriterRequest): Promise<PreparedOpenCodeWriterRequest> {
@@ -186,7 +86,7 @@ export class OpenCodeWriter {
       request, executable, cwd, packet, argv,
       binding: Object.freeze({ ...bindingBody, digest: sha256(JSON.stringify(bindingBody)) }),
     });
-    preparedRequests.add(prepared);
+    preparedRequests.mark(prepared);
     return prepared;
   }
 
@@ -194,8 +94,7 @@ export class OpenCodeWriter {
     rawPrepared: PreparedOpenCodeWriterRequest,
     signal: AbortSignal,
   ): Promise<OpenCodeWriterReport> {
-    if (!preparedRequests.has(rawPrepared)) throw new Error("OpenCode writer request was not prepared by this trusted adapter");
-    preparedRequests.delete(rawPrepared);
+    if (!preparedRequests.consume(rawPrepared)) throw new Error("OpenCode writer request was not prepared by this trusted adapter");
     const prepared = rawPrepared as InternalPreparedOpenCodeWriterRequest;
     const { request, executable, cwd, packet, argv } = prepared;
     const startedAt = new Date().toISOString();
@@ -213,28 +112,21 @@ export class OpenCodeWriter {
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
       },
     }, signal, "opencode_writer");
-    let eventChain: OpenCodeWriterEventChain;
+    let eventChain: WriterEventChain;
     let protocolFailure = false;
     try {
-      eventChain = createOpenCodeWriterEventChain(result.rawStdout, result.events);
+      eventChain = createWriterEventChain(result.rawStdout, result.events);
       if (result.outcome === "completed") new OpenCodeWorkerEventAdapter().assertSupportedTopLevelEvents(result.events);
     } catch {
-      eventChain = createOpenCodeWriterEventChain(result.rawStdout, []);
+      eventChain = createWriterEventChain(result.rawStdout, []);
       protocolFailure = true;
     }
     const completed = report(
       request, executable, cwd, argv, packet, result, eventChain, protocolFailure, startedAt, prepared.binding,
     );
-    supervisedReports.set(completed, prepared.binding.digest);
+    brandSupervisedReport(completed, prepared.binding);
     return completed;
   }
-}
-
-export function isSupervisedOpenCodeWriterReport(
-  report: OpenCodeWriterReport,
-  binding: OpenCodeWriterDispatchBinding,
-): boolean {
-  return supervisedReports.get(report) === binding.digest && report.dispatchBinding.digest === binding.digest;
 }
 
 function report(
@@ -244,7 +136,7 @@ function report(
   argv: readonly string[],
   packet: string,
   result: WorkerResult,
-  eventChain: OpenCodeWriterEventChain,
+  eventChain: WriterEventChain,
   protocolFailure: boolean,
   startedAt: string,
   dispatchBinding: OpenCodeWriterDispatchBinding,

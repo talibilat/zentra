@@ -11,6 +11,7 @@ import { MilestoneRegistry } from "../../src/milestones/milestone-registry.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { MultiAgentMilestoneCoordinator } from "../../src/orchestration/multi-agent-milestone.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
+import type { ModelSheet } from "../../src/policy/model-sheet.js";
 import { buildRoleCapabilityBinding, RoleCapabilityEnvelopeService, roleToolPermissions } from "../../src/workers/role-capability-envelope.js";
 import { WorkerLifecycleService, projectWorkerLifecycle } from "../../src/workers/worker-lifecycle.js";
 import { digestCanonical } from "../../src/contracts/authority-attention.js";
@@ -387,7 +388,7 @@ describe("OpenCodeReadOnlyProgram", () => {
       execute,
       reconcile: async () => ({ outcome: "completed" as const, containerId: "b".repeat(64), imageId: `sha256:${"c".repeat(64)}`, containerAbsent: true, imageAbsent: true, repositoryViewAbsent: true }),
     };
-    const models = { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+    const models = { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000, maxConcurrency: 1, toolPermissions: ["read_repository"], network: "denied", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] } satisfies ModelSheet;
     const request = { milestoneId: "milestone-uncertain", taskId: "task-uncertain", repositoryPath: root, role: "researcher" as const, rolePrompt: "Research.", budget: { maxSeconds: 5, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 }, timeoutMs: 1_000, signal: new AbortController().signal };
     const first = new OpenCodeReadOnlyProgram(journal, sink, { execute: vi.fn() }, models, { ...security, allowedRepositories: [root] }, capsule);
     await expect(first.run(request)).resolves.toMatchObject({ status: "executed", outcome: "failed" });
@@ -418,7 +419,7 @@ describe("OpenCodeReadOnlyProgram", () => {
         budget: { maxSeconds: 10, maxRetries: 0, maxCostUsd: 1, maxInputTokens: 100, maxOutputTokens: 100 } }] } });
     const webSecurity: SecuritySheet = { ...security, allowedRepositories: [root], network: { default: "denied", allowedDestinations: ["https://docs.example.com"] } };
     const models = { models: [{ id: "approved-researcher", harness: "opencode", model: "fixture/model", roles: ["researcher"], specialties: [], costTier: "low", contextTokens: 1_000,
-      maxConcurrency: 1, toolPermissions: ["read_repository", "web_research"], network: "declared", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] };
+      maxConcurrency: 1, toolPermissions: ["read_repository", "web_research"], network: "declared", fallbackOrder: [], qualityHistory: { successes: 1, attempts: 1 } }] } satisfies ModelSheet;
     const admitted = registry.admitTask("milestone-attention-restart", "task-attention-restart", webSecurity, {
       kind: "opencode", repositoryPath: root, actorId: "approved-researcher", harness: "opencode", role: "researcher", capabilityId: "approved-researcher", transportModelId: "fixture/model",
       authority: "read_only", roles: ["researcher"], toolPermissions: ["read_repository", "web_research"], network: "declared", contextTokens: 1_000,

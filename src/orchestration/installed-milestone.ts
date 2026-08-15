@@ -8,8 +8,10 @@ import { DockerOpenCodeReadOnlyCapsule } from "../capsule/opencode-read-only-cap
 import type { ModelBroker } from "../capsule/model-broker.js";
 import { MilestonePlanSchema, type MilestonePlan, type PlannedTask } from "../contracts/milestone.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import { OpenCodeProbe } from "../harnesses/opencode-probe.js";
-import { attestHostOpenCode } from "../harnesses/opencode-attestation.js";
+import { HarnessProbe } from "../harnesses/harness-probe.js";
+import { attestHostHarnessExecutable } from "../harnesses/harness-attestation.js";
+import type { HarnessId } from "../harnesses/harness-id.js";
+import { HarnessWriterRegistry } from "../harnesses/harness-writer-registry.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import type { EventJournal } from "../journal/journal.js";
@@ -49,6 +51,7 @@ export interface InstalledMilestonePlanInput {
   readonly goal: string;
   readonly file: string;
   readonly forbiddenPaths: readonly string[];
+  readonly harness: HarnessId;
   readonly plannerId: string;
   readonly researcherId: string;
   readonly implementerId: string;
@@ -93,7 +96,7 @@ export function createInstalledMilestonePlan(input: InstalledMilestonePlanInput)
       ownedPaths: [input.file],
       forbiddenPaths: [...input.forbiddenPaths],
       acceptanceCriteria: ["The focused validation passes for the reviewed single-file change."],
-      roleAssignment: { role: "implementer", agentId: input.implementerId, harness: "opencode" },
+      roleAssignment: { role: "implementer", agentId: input.implementerId, harness: input.harness },
       risk: { level: "low", authority: "workspace_write", requiresReview: true, requiresApproval: false },
       budget: { maxSeconds: 300, maxRetries: 0, maxCostUsd: 2, maxInputTokens: 16_000, maxOutputTokens: 4_000 },
     }, {
@@ -120,10 +123,11 @@ export interface InstalledMilestoneRunRequest {
   readonly models: ModelSheet;
   readonly security: SecuritySheet;
   readonly azureDeployment: string;
-  readonly openCodeExecutable: string;
-  readonly openCodeHome: string;
-  readonly openCodeExpectedSha256: string;
-  readonly openCodeExpectedVersion: string;
+  readonly harness: HarnessId;
+  readonly harnessExecutable: string;
+  readonly harnessHome: string;
+  readonly harnessExpectedSha256: string;
+  readonly harnessExpectedVersion: string;
   readonly signal: AbortSignal;
 }
 
@@ -134,12 +138,14 @@ export interface InstalledMilestoneRunnerOptions {
   readonly worker?: ProcessSupervisor;
   readonly readOnlyCapsule?: OpenCodeReadOnlyCapsule;
   readonly integrationBranchPreparationHooks?: IntegrationBranchPreparationHooks;
+  readonly writers?: HarnessWriterRegistry;
 }
 
 export class InstalledMilestoneRunner {
   private readonly projected: ProjectingEventJournal;
   private readonly worker: ProcessSupervisor;
   private readonly capsule: OpenCodeReadOnlyCapsule;
+  private readonly writers: HarnessWriterRegistry;
 
   constructor(private readonly options: InstalledMilestoneRunnerOptions) {
     this.projected = options.journal instanceof ProjectingEventJournal
@@ -147,6 +153,7 @@ export class InstalledMilestoneRunner {
       : new ProjectingEventJournal(options.journal, options.sink);
     this.worker = options.worker ?? new ProcessSupervisor();
     this.capsule = options.readOnlyCapsule ?? new DockerOpenCodeReadOnlyCapsule();
+    this.writers = options.writers ?? new HarnessWriterRegistry({ opencode: new OpenCodeWriter(this.worker) });
   }
 
   async run(request: InstalledMilestoneRunRequest): Promise<MilestoneRecord> {
@@ -158,10 +165,10 @@ export class InstalledMilestoneRunner {
       request.security.forbiddenPaths.some((scope) => scopesOverlap(scope, request.file))) {
       throw new Error("installed milestone file is outside explicit security authority");
     }
-    const planner = exactRole(request.models, "planner");
-    const researcher = exactRole(request.models, "researcher");
-    const implementer = exactRole(request.models, "implementer");
-    const reviewer = exactRole(request.models, "reviewer");
+    const planner = exactRole(request.models, "planner", request.harness);
+    const researcher = exactRole(request.models, "researcher", request.harness);
+    const implementer = exactRole(request.models, "implementer", request.harness);
+    const reviewer = exactRole(request.models, "reviewer", request.harness);
     const roleCapabilities = [planner, researcher, implementer, reviewer];
     if (new Set(roleCapabilities.map((capability) => capability.id)).size !== roleCapabilities.length ||
       roleCapabilities.some((capability, index) => capability.roles.length !== 1 ||
@@ -183,14 +190,16 @@ export class InstalledMilestoneRunner {
       file: request.file,
       authority: "context_only",
     });
-    const attestation = await attestHostOpenCode(this.worker, {
-      executable: request.openCodeExecutable,
-      home: request.openCodeHome,
+    const attestation = await attestHostHarnessExecutable(this.worker, {
+      harness: request.harness,
+      executable: request.harnessExecutable,
+      home: request.harnessHome,
       cwd: repository,
-      expectedSha256: request.openCodeExpectedSha256,
-      expectedVersion: request.openCodeExpectedVersion,
+      expectedSha256: request.harnessExpectedSha256,
+      expectedVersion: request.harnessExpectedVersion,
       timeoutMs: 30_000,
     }, request.signal);
+    const writer = this.writers.get(request.harness);
     const git = new GitClient();
     const worktrees = new WorktreeManager(git);
     const plan = createInstalledMilestonePlan({
@@ -199,6 +208,7 @@ export class InstalledMilestoneRunner {
       goal: request.goal,
       file: request.file,
       forbiddenPaths: request.security.forbiddenPaths,
+      harness: request.harness,
       plannerId: planner.id,
       researcherId: researcher.id,
       implementerId: implementer.id,
@@ -249,14 +259,15 @@ export class InstalledMilestoneRunner {
     let tracer: OpenCodeIntegratedSingleFileTracer | null = null;
     const execution = {
       run: async (executionRequest: Parameters<OpenCodeIntegratedSingleFileTracer["run"]>[0]) => {
-        const probe = await new OpenCodeProbe(this.worker).probe({
+        const probe = await new HarnessProbe(this.worker).probe({
+          harness: request.harness,
           executable: attestation.executable,
           cwd: repository,
           timeoutMs: Math.min(30_000, implementerTask.budget.maxSeconds * 1_000),
           modelId: implementer.id,
           models: request.models,
           security: request.security,
-          home: request.openCodeHome,
+          home: request.harnessHome,
           expectedExecutableSha256: attestation.executableSha256,
           expectedVersion: attestation.version,
         }, executionRequest.signal);
@@ -268,7 +279,7 @@ export class InstalledMilestoneRunner {
             correlationId: request.milestoneId,
           });
           return tasks.append(implementerTask.taskId, `task.${probe.outcome}`, {
-            stage: "opencode_probe", reason: probe.reason,
+            stage: "harness_probe", reason: probe.reason,
           }, null);
         }
         if (tracer === null) throw new Error("installed writer schedule was not prepared");
@@ -327,7 +338,7 @@ export class InstalledMilestoneRunner {
         });
         tracer = new OpenCodeIntegratedSingleFileTracer(
           tasks,
-          new WriterWorktreeCapsule(worktrees, new OpenCodeWriter(this.worker), new WorkspaceOwnershipGate(), git),
+          new WriterWorktreeCapsule(worktrees, writer, new WorkspaceOwnershipGate(), git),
           validations,
           worktrees,
           { reviewer: reviewerAdapter, reviews: new ReviewGate(), integrations: new IntegrationQueue(git, validations), git },
@@ -350,7 +361,7 @@ export class InstalledMilestoneRunner {
               security: request.security,
               reviewerId: reviewer.id,
               signal: request.signal,
-              openCodeHome: request.openCodeHome,
+              openCodeHome: request.harnessHome,
               guidance,
               probe: null,
             },
@@ -392,8 +403,13 @@ export class InstalledMilestoneRunner {
   }
 }
 
-function exactRole(models: ModelSheet, role: "planner" | "researcher" | "implementer" | "reviewer"): ModelCapability {
-  const matches = models.models.filter((model) => roleModelSupports(role, model));
+function exactRole(
+  models: ModelSheet,
+  role: "planner" | "researcher" | "implementer" | "reviewer",
+  harness: HarnessId,
+): ModelCapability {
+  const matches = models.models.filter((model) =>
+    roleModelSupports(role, model, role === "implementer" ? harness : "opencode"));
   if (matches.length !== 1) throw new Error(`installed milestone requires exactly one approved ${role} capability`);
   return matches[0]!;
 }
@@ -416,7 +432,7 @@ function admission(repositoryPath: string, model: ModelCapability, task: Planned
     kind: "opencode" as const,
     repositoryPath,
     actorId: model.id,
-    harness: "opencode" as const,
+    harness: model.harness,
     role: task.roleAssignment.role,
     capabilityId: model.id,
     transportModelId: model.model,

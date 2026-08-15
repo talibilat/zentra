@@ -332,7 +332,7 @@ Logging:
 
 ### `zentra milestone run`
 
-Purpose: Run the fixed installed OpenCode milestone.
+Purpose: Run the fixed installed milestone against one selected writer harness.
 
 Usage:
 
@@ -344,10 +344,11 @@ zentra milestone run \
   --model-sheet <path> \
   --security-sheet <path> \
   --provider <path> \
-  --opencode <path> \
-  --opencode-home <path> \
-  --opencode-sha256 <digest> \
-  --opencode-version <version> \
+  --harness <opencode|claude_code|codex> \
+  --harness-executable <path> \
+  --harness-home <path> \
+  --harness-sha256 <digest> \
+  --harness-version <version> \
   --agent-tail-jsonl <path> \
   --file <path>
 ```
@@ -356,12 +357,12 @@ Capabilities:
 
 - Plans through the configured Azure broker.
 - Performs governed IANA research.
-- Runs a host OpenCode writer.
+- Runs a host writer for the selected harness.
 - Limits writing to the explicit file.
 - Runs named validation.
 - Runs independent review.
 - Uses disposable candidate integration.
-- Attests the OpenCode digest and version.
+- Attests the selected harness's executable digest and version.
 - Stops on uncertain effects.
 
 Logging:

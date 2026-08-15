@@ -30,6 +30,7 @@ import {
   resolveBundledFixture,
   type BundledFixture,
 } from "../fixtures/bundled-fixtures.js";
+import { isHarnessId, type HarnessId } from "../harnesses/harness-id.js";
 import { IntegrationQueue } from "../integration/integration-queue.js";
 import { IntegrationLeaseStore } from "../integration/integration-lease.js";
 import {
@@ -296,10 +297,11 @@ interface MilestoneRunOptions extends ProjectOptions, Pick<DatabaseTaskOptions, 
   readonly modelSheet: string;
   readonly securitySheet: string;
   readonly provider: string;
-  readonly opencode: string;
-  readonly opencodeHome: string;
-  readonly opencodeSha256: string;
-  readonly opencodeVersion: string;
+  readonly harness: string;
+  readonly harnessExecutable: string;
+  readonly harnessHome: string;
+  readonly harnessSha256: string;
+  readonly harnessVersion: string;
   readonly agentTailJsonl: string;
   readonly file: string;
 }
@@ -643,10 +645,11 @@ function createProgram(
     .requiredOption("--model-sheet <path>", "canonical Markdown model sheet")
     .requiredOption("--security-sheet <path>", "canonical Markdown security sheet")
     .requiredOption("--provider <path>", "canonical Azure provider configuration")
-    .requiredOption("--opencode <path>", "canonical host OpenCode executable; provider transport uses user OS network authority")
-    .requiredOption("--opencode-home <path>", "canonical explicit OpenCode home for writer and probe")
-    .requiredOption("--opencode-sha256 <digest>", "operator-attested lowercase SHA-256 of the exact host OpenCode executable")
-    .requiredOption("--opencode-version <version>", "operator-attested exact bounded OpenCode --version output")
+    .requiredOption("--harness <harness>", "the writer harness to run: opencode, claude_code, or codex")
+    .requiredOption("--harness-executable <path>", "canonical host harness executable; provider transport uses user OS network authority")
+    .requiredOption("--harness-home <path>", "canonical explicit harness home for writer and probe")
+    .requiredOption("--harness-sha256 <digest>", "operator-attested lowercase SHA-256 of the exact host harness executable")
+    .requiredOption("--harness-version <version>", "operator-attested exact bounded harness --version output")
     .requiredOption("--agent-tail-jsonl <path>", "canonical new Agent Tail JSONL trace path")
     .requiredOption("--file <path>", "one explicit security-authorized relative file")
     .action(async (options: MilestoneRunOptions) => {
@@ -656,9 +659,10 @@ function createProgram(
       assertCanonicalInputFile(options.modelSheet);
       assertCanonicalInputFile(options.securitySheet);
       assertCanonicalInputFile(options.provider);
-      assertCanonicalExecutable(options.opencode);
-      assertCanonicalDirectory(options.opencodeHome);
-      if (!/^[a-f0-9]{64}$/.test(options.opencodeSha256) || !isBoundedVersion(options.opencodeVersion)) {
+      if (!isHarnessId(options.harness)) throw new CliFailure("INVALID_COMMAND");
+      assertCanonicalExecutable(options.harnessExecutable);
+      assertCanonicalDirectory(options.harnessHome);
+      if (!/^[a-f0-9]{64}$/.test(options.harnessSha256) || !isBoundedVersion(options.harnessVersion)) {
         throw new CliFailure("INVALID_COMMAND");
       }
       assertCanonicalOutputPath(options.database);
@@ -700,10 +704,11 @@ function createProgram(
           models,
           security,
           azureDeployment: providerConfig.deployment,
-          openCodeExecutable: options.opencode,
-          openCodeHome: options.opencodeHome,
-          openCodeExpectedSha256: options.opencodeSha256,
-          openCodeExpectedVersion: options.opencodeVersion,
+          harness: options.harness as HarnessId,
+          harnessExecutable: options.harnessExecutable,
+          harnessHome: options.harnessHome,
+          harnessExpectedSha256: options.harnessSha256,
+          harnessExpectedVersion: options.harnessVersion,
           signal,
         });
       } catch {

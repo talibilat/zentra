@@ -13,6 +13,7 @@ import {
 } from "../contracts/authority-attention.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
 import { roleModelSupports } from "../workers/role-capability-envelope.js";
+import { isHarnessId } from "../harnesses/harness-id.js";
 
 export type PlanReadinessStatus = "executable" | "blocked" | "requires_approval";
 
@@ -115,8 +116,7 @@ function assessAuthority(
   const task = plan.tasks.find((candidate) => candidate.taskId === taskId)!;
   if (
     packet.actorId !== task.roleAssignment.agentId ||
-    packet.harness !== "opencode" ||
-    context.harness !== "opencode" ||
+    ((packet.role !== "implementer" || !isHarnessId(packet.harness)) && packet.harness !== "opencode") ||
     context.actorId !== packet.actorId ||
     context.harness !== packet.harness ||
     context.role !== packet.role ||
@@ -144,7 +144,7 @@ function assessAuthority(
   if (packet.role === "validator" || packet.role === "integrator" || packet.role === "verifier") {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }
-  if (!roleModelSupports(packet.role, context)) {
+  if (!roleModelSupports(packet.role, context, task.roleAssignment.harness)) {
     return stopped(packet, "plan_not_ready", "hard_stop", security);
   }
   if (context.requestedBudget.maxInputTokens + context.requestedBudget.maxOutputTokens > context.contextTokens) {

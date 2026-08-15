@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { PlannedTask } from "../../src/contracts/milestone.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
-import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
+import { HarnessProbe } from "../../src/harnesses/harness-probe.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { OpenCodeMultiFileWriter } from "../../src/orchestration/opencode-multi-file-writer.js";
 import { WriterWorktreeCapsule } from "../../src/orchestration/writer-worktree-capsule.js";
@@ -758,7 +758,8 @@ function fakeOpenCode(root: string, source: string): string {
 
 async function verifiedProbe(executable: string, repository: string) {
   const capability = model();
-  const report = await new OpenCodeProbe(new ProcessSupervisor()).probe({
+  const report = await new HarnessProbe(new ProcessSupervisor()).probe({
+    harness: "opencode",
     executable, cwd: repository, timeoutMs: 5_000, modelId: capability.id,
     models: { models: [capability] }, security: security(repository),
   }, AbortSignal.timeout(10_000));

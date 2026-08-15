@@ -11,13 +11,13 @@ import type { WorkspaceOwnershipGate, WorkspaceOwnershipReport } from "./workspa
 import type { WorkspaceLease, WorktreeManager } from "./worktree-manager.js";
 import { canonicalDarwinPathIdentity } from "../milestones/path-ownership.js";
 import { digestCanonical } from "../contracts/authority-attention.js";
-import { OpenCodeWriterEventChainSchema, type OpenCodeWriterEventChain } from "../agents/opencode-writer-events.js";
-import {
-  isSupervisedOpenCodeWriterReport,
-  type OpenCodeWriterDispatchBinding,
-  type OpenCodeWriterReport,
-  type OpenCodeWriterUsage,
-} from "../harnesses/opencode-writer.js";
+import { WriterEventChainSchema } from "../agents/writer-events.js";
+import { isSupervisedWriterReport } from "../harnesses/writer-brand.js";
+import type {
+  WriterDispatchBinding,
+  WriterReport,
+  WriterUsage,
+} from "../harnesses/harness-writer.js";
 import { WriterPatchProposalSchema, type WriterPatchProposal } from "../contracts/writer-patch.js";
 
 const MAX_APPEND_ATTEMPTS = 32;
@@ -90,15 +90,19 @@ const WriterUsageSchema = z.strictObject({
   cacheWriteTokens: z.number().int().nonnegative().max(2_000_000),
   toolCalls: z.number().int().nonnegative().max(100_000),
 });
-const WriterReceiptBodySchema = z.strictObject({
+export const WriterReceiptBodySchema = z.strictObject({
   schemaVersion: z.literal(1), receiptId: IdentitySchema, claimId: IdentitySchema,
   ownerId: IdentitySchema, revision: RevisionSchema, leaseToken: LeaseTokenSchema,
   dispatchId: IdentitySchema, outcome: z.enum(["completed", "cancelled", "timed_out", "failed"]),
   dispatchBindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  eventChain: OpenCodeWriterEventChainSchema, usage: WriterUsageSchema,
+  eventChain: WriterEventChainSchema, usage: WriterUsageSchema,
   stdoutSha256: z.string().regex(/^[a-f0-9]{64}$/), stderrSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  protocolFailure: z.literal("invalid_native_event_stream").nullable(),
-  usageEvidence: z.enum(["native_tokens", "legacy_usage", "none"]),
+  // "invalid_native_event_stream" is retained only so pre-Phase-1.5 receipts still parse.
+  // Never write it for new receipts; normalizeProtocolFailure maps it to the neutral value.
+  protocolFailure: z.enum(["invalid_output_stream", "invalid_native_event_stream"]).nullable(),
+  // "native_tokens" and "legacy_usage" are retained only so pre-Phase-1.5 receipts still parse.
+  // Never write them for new receipts; normalizeUsageEvidence maps them to the neutral values.
+  usageEvidence: z.enum(["native", "fallback", "none", "native_tokens", "legacy_usage"]),
   patchProposalDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   startedAt: z.string().datetime(), finishedAt: z.string().datetime(),
 });
@@ -180,7 +184,7 @@ export interface PathClaim {
   readonly requiresReconciliation: boolean;
   readonly dispatchAuthorized: boolean;
   readonly dispatchId: string | null;
-  readonly dispatchBinding: OpenCodeWriterDispatchBinding | null;
+  readonly dispatchBinding: WriterDispatchBinding | null;
   readonly workerReceipt: WriterReceipt | null;
   readonly patchApplicationPending: string | null;
   readonly patchIntentId: string | null;
@@ -319,7 +323,7 @@ export class PathClaimService {
   checkpoint(input: ClaimCommandIdentity & {
     readonly leaseToken: string; readonly checkpointId: string; readonly diffSha256: string;
     readonly toolEvidenceSha256: string;
-    readonly usage: OpenCodeWriterUsage;
+    readonly usage: WriterUsage;
   }): void {
     const claim = this.assertActiveIdentity(this.inspect(input.projectId), input);
     if (claim.workerReceipt === null ||
@@ -345,7 +349,7 @@ export class PathClaimService {
   beginDispatch(input: ClaimCommandIdentity & {
     readonly leaseToken: string;
     readonly dispatchId: string;
-    readonly binding: OpenCodeWriterDispatchBinding;
+    readonly binding: WriterDispatchBinding;
   }): void {
     const aggregate = this.inspect(input.projectId);
     const claim = this.assertActiveIdentity(aggregate, input);
@@ -370,10 +374,10 @@ export class PathClaimService {
 
   [APPEND_SUPERVISED_RECEIPT](
     input: SupervisedWriterReceiptContext,
-    report: OpenCodeWriterReport,
-    binding: OpenCodeWriterDispatchBinding,
+    report: WriterReport,
+    binding: WriterDispatchBinding,
   ): WriterReceipt {
-    if (!isSupervisedOpenCodeWriterReport(report, binding)) {
+    if (!isSupervisedWriterReport(report, binding)) {
       throw new Error("writer receipt report was not issued by the supervised writer execution path");
     }
     const aggregate = this.inspect(input.projectId);
@@ -393,7 +397,8 @@ export class PathClaimService {
       dispatchId: input.dispatchId, dispatchBindingDigest: binding.digest,
       outcome: report.outcome, eventChain: report.eventChain,
       usage: report.usage, stdoutSha256: report.stdoutSha256, stderrSha256: report.stderrSha256,
-      protocolFailure: report.protocolFailure, usageEvidence: report.usageEvidence,
+      protocolFailure: normalizeProtocolFailure(report.protocolFailure),
+      usageEvidence: normalizeUsageEvidence(report.usageEvidence),
       patchProposalDigest: report.patchProposal?.digest ?? null,
       startedAt: report.startedAt, finishedAt: report.finishedAt,
     });
@@ -700,8 +705,8 @@ export class PathClaimService {
 export function appendSupervisedWriterReceipt(
   service: PathClaimService,
   context: SupervisedWriterReceiptContext,
-  report: OpenCodeWriterReport,
-  binding: OpenCodeWriterDispatchBinding,
+  report: WriterReport,
+  binding: WriterDispatchBinding,
 ): WriterReceipt {
   return service[APPEND_SUPERVISED_RECEIPT](context, report, binding);
 }
@@ -1009,4 +1014,15 @@ function event(streamId: string, type: string, payload: unknown, correlationId: 
 
 function isVersionConflict(error: unknown): boolean {
   return error instanceof Error && /^expected version \d+, actual \d+$/.test(error.message);
+}
+
+function normalizeProtocolFailure(value: string | null): "invalid_output_stream" | null {
+  return value === null ? null : "invalid_output_stream";
+}
+
+function normalizeUsageEvidence(value: string): "native" | "fallback" | "none" {
+  if (value === "native" || value === "native_tokens") return "native";
+  if (value === "fallback" || value === "legacy_usage") return "fallback";
+  if (value === "none") return "none";
+  throw new Error(`writer report usage evidence is not a recognized value: ${value}`);
 }

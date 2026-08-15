@@ -21,12 +21,12 @@ import {
   uncertainEffectPayload,
   type UncertainEffectBoundary,
 } from "../contracts/uncertain-effect.js";
-import { PlannedTaskSchema, type PlannedTask } from "../contracts/milestone.js";
+import { PlannedTaskSchema, type Harness, type PlannedTask } from "../contracts/milestone.js";
 import { usdNumberToNano } from "../contracts/cost.js";
 import {
-  isVerifiedOpenCodeProbeReport,
-  type OpenCodeProbeReport,
-} from "../harnesses/opencode-probe.js";
+  isVerifiedHarnessProbeReport,
+  type HarnessProbeReport,
+} from "../harnesses/harness-probe.js";
 import {
   IntegrationExecutionError,
   type IntegrationQueue,
@@ -79,7 +79,7 @@ export interface OpenCodeSingleFileTracerRequest {
   readonly task: PlannedTask;
   readonly model: ModelCapability;
   readonly security: SecuritySheet;
-  readonly probe: OpenCodeProbeReport | null;
+  readonly probe: HarnessProbeReport | null;
   readonly openCodeHome?: string;
   readonly reviewerId?: string;
   readonly correlationId?: string;
@@ -216,7 +216,7 @@ export class OpenCodeSingleFileTracerBullet {
       taskId: request.task.taskId,
       rootTaskId: request.task.taskId,
       parentWorkerId: null,
-      harness: "opencode",
+      harness: request.task.roleAssignment.harness,
       role: request.task.roleAssignment.role,
       model: { capabilityId: request.model.id, modelId: request.model.model },
       envelope: roleBinding.envelope,
@@ -315,11 +315,11 @@ export class OpenCodeSingleFileTracerBullet {
           onWriterCompleted: (report) => {
             for (const heartbeat of heartbeats.splice(0)) heartbeat.close();
             workers.observe(request.task.taskId, workerId, workerEvents.processObservation(
-              "opencode", report.outcome,
+              request.task.roleAssignment.harness, report.outcome,
             ));
             workers.cleanup(request.task.taskId, workerId, "completed");
             workers.terminate(request.task.taskId, workerId, report.outcome);
-            this.tasks.append(request.task.taskId, "task.writer_completed", writerSummary(report), null);
+            this.tasks.append(request.task.taskId, "task.writer_completed", writerSummary(report, request.task.roleAssignment.harness), null);
           },
         },
       });
@@ -391,7 +391,7 @@ export class OpenCodeSingleFileTracerBullet {
       const decision = [...changedPathDecisions, ...deniedToolDecisions].find((candidate) => candidate.status !== "allowed")!;
       const evidence = {
         deniedToolRequests: capsule.writer?.deniedToolRequests ?? [],
-        writer: capsule.writer === null ? null : writerSummary(capsule.writer),
+        writer: capsule.writer === null ? null : writerSummary(capsule.writer, request.task.roleAssignment.harness),
         ownership: capsule.ownership,
         workspace: capsule.lease?.path ?? null,
       };
@@ -411,7 +411,7 @@ export class OpenCodeSingleFileTracerBullet {
     if (capsule.outcome !== "completed") {
       return this.tasks.append(request.task.taskId, `task.${capsule.outcome}`, {
         stage: capsule.outcome === "denied" ? "ownership" : "writer",
-        writer: capsule.writer === null ? null : writerSummary(capsule.writer),
+        writer: capsule.writer === null ? null : writerSummary(capsule.writer, request.task.roleAssignment.harness),
         ownership: capsule.ownership,
         workspace: capsule.lease?.path ?? null,
       }, null);
@@ -1115,9 +1115,9 @@ function singleOwnedFile(task: PlannedTask, schedulerAdmitted: boolean): string 
 
 function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changedPath: string): void {
   const task = PlannedTaskSchema.parse(request.task);
-  if (task.roleAssignment.role !== "implementer" || task.roleAssignment.harness !== "opencode" ||
+  if (task.roleAssignment.role !== "implementer" ||
     task.roleAssignment.agentId !== request.model.id || task.risk.authority !== "workspace_write" ||
-    request.model.harness !== "opencode" || !request.model.roles.includes("implementer") ||
+    request.model.harness !== task.roleAssignment.harness || !request.model.roles.includes("implementer") ||
     !request.model.toolPermissions.includes("read_repository") || !request.model.toolPermissions.includes("write_worktree") ||
     request.model.toolPermissions.some((tool) => tool !== "read_repository" && tool !== "write_worktree") ||
     request.model.network !== "denied" || request.model.contextTokens < task.budget.maxInputTokens + task.budget.maxOutputTokens ||
@@ -1126,8 +1126,8 @@ function assertWriterAdmission(request: OpenCodeSingleFileTracerRequest, changed
     request.security.forbiddenPaths.some((scope) => scope === changedPath || (scope.endsWith("/**") && changedPath.startsWith(scope.slice(0, -3) + "/")))) {
     throw new Error("OpenCode writer request is outside its exact durable admission");
   }
-  if (request.probe === null || !isVerifiedOpenCodeProbeReport(request.probe, {
-    modelId: request.model.id, model: request.model.model,
+  if (request.probe === null || !isVerifiedHarnessProbeReport(request.probe, {
+    harness: task.roleAssignment.harness, modelId: request.model.id, model: request.model.model,
     provider: request.model.model.replace(/\/.*/, ""), cwd: request.project.repositoryPath,
   })) throw new Error("OpenCode single-file tracer requires a verified capability probe");
 }
@@ -1163,10 +1163,25 @@ function assertValidationEvidence(
   }
 }
 
-function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): object {
+// The journal deliberately keeps the harness-native protocol failure reason while the durable
+// writer receipt records the neutral one. The writer report itself is not retained, so this
+// event is the only durable record of what actually went wrong. The value is bounded here
+// because WriterReport.protocolFailure is an open string that any future harness can set.
+const PROTOCOL_FAILURE_PATTERN = /^[a-z0-9][a-z0-9_]{0,63}$/;
+
+/** Internal journaling seam, exported so the retained vocabulary bound is directly testable. */
+export function boundedProtocolFailure(value: string | null): string | null {
+  if (value === null) return null;
+  if (!PROTOCOL_FAILURE_PATTERN.test(value)) {
+    throw new Error("writer protocol failure reason is outside the retained vocabulary");
+  }
+  return value;
+}
+
+function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>, harness: Harness): object {
   return {
     workerId: report.modelId,
-    harness: "opencode",
+    harness,
     writerEvidenceVersion: 2,
     outcome: report.outcome,
     exitCode: report.exitCode,
@@ -1180,7 +1195,7 @@ function writerSummary(report: NonNullable<WriterCapsuleResult["writer"]>): obje
     stderrSha256: report.stderrSha256,
     eventChain: report.eventChain,
     rawOutputPolicy: report.rawOutputPolicy,
-    protocolFailure: report.protocolFailure,
+    protocolFailure: boundedProtocolFailure(report.protocolFailure),
     startedAt: report.startedAt,
     finishedAt: report.finishedAt,
     deniedToolRequests: report.deniedToolRequests.map((denied) => ({

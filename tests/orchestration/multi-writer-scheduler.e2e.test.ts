@@ -14,7 +14,7 @@ import {
   type ValidationRunContext,
 } from "../../src/capabilities/validation-runner.js";
 import type { MilestonePlan, PlannedTask } from "../../src/contracts/milestone.js";
-import { OpenCodeProbe } from "../../src/harnesses/opencode-probe.js";
+import { HarnessProbe } from "../../src/harnesses/harness-probe.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
 import { IntegrationQueue } from "../../src/integration/integration-queue.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
@@ -71,7 +71,8 @@ describe("MultipleMilestoneScheduler real-Git production path", () => {
       const modelSheet: ModelSheet = { models: [planner, researcher, writerModel, reviewerA, reviewerB] };
       const security = securitySheet(fixture.repository);
       const executable = fakeConcurrentOpenCode(fixture.root);
-      const probe = await new OpenCodeProbe(supervisor).probe({
+      const probe = await new HarnessProbe(supervisor).probe({
+        harness: "opencode",
         executable,
         cwd: fixture.repository,
         timeoutMs: 5_000,

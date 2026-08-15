@@ -713,7 +713,7 @@ function approvedModel(
 ): ModelCapability {
   const model = sheet.models.find((candidate) => candidate.id === assignedId);
   if (
-    model === undefined || !roleModelSupports(role, model) ||
+    model === undefined || !roleModelSupports(role, model, "opencode") ||
     model.contextTokens < budget.maxInputTokens + budget.maxOutputTokens
   ) throw new Error("OpenCode model assignment is not approved for the read-only role");
   return model;

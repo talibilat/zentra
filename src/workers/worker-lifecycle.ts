@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import type { NewEvent, StoredEvent } from "../contracts/event.js";
 import { AuthorityLevelSchema, MilestoneRoleSchema } from "../contracts/milestone.js";
+import { HARNESS_IDS } from "../harnesses/harness-id.js";
 import { TerminalOutcomeSchema, type TerminalOutcome } from "../contracts/task.js";
 import { readStreamEvents, type EventJournal } from "../journal/journal.js";
 import { CostUsdNanoSchema, costFieldsAgree, nanoToUsdDisplay, usdNumberToNano } from "../contracts/cost.js";
@@ -22,7 +23,7 @@ export const WorkerCapabilitySchema = z.enum([
   "read_repository", "write_worktree", "run_validation", "review_diff", "integrate", "web_research",
 ]);
 export const WorkerNetworkSchema = z.enum(["denied", "model_provider_only", "declared_web_research"]);
-export const WorkerHarnessSchema = z.enum(["opencode", "deterministic"]);
+export const WorkerHarnessSchema = z.enum([...HARNESS_IDS, "deterministic"]);
 const CapabilitySetSchema = z.array(WorkerCapabilitySchema).max(16).superRefine(assertSortedUnique);
 const TaskContextSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("standalone") }),
