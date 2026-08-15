@@ -111,7 +111,7 @@ export class OpenCodeWriter implements HarnessWriter {
         OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
       },
-    }, signal, "opencode_writer");
+    }, signal, "harness_writer");
     let eventChain: WriterEventChain;
     let protocolFailure = false;
     try {

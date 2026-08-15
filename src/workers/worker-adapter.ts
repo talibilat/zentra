@@ -17,7 +17,7 @@ export interface WorkerResult {
   readonly stderr: string;
 }
 
-export type InvocationKind = "worker" | "validation" | "reviewer" | "opencode_writer";
+export type InvocationKind = "worker" | "validation" | "reviewer" | "harness_writer";
 
 export interface WorkerAdapter {
   execute(

@@ -397,7 +397,7 @@ function validateProtocolOutput(
 ): string | undefined {
   switch (kind) {
     case "validation":
-    case "opencode_writer":
+    case "harness_writer":
       return undefined;
     case "reviewer":
       return events.length === 1 && ReviewDecisionSchema.safeParse(events[0]).success
