@@ -45,7 +45,13 @@ export class FakeHarnessWriter implements HarnessWriter {
       ...body,
       digest: sha256(JSON.stringify(body)),
     });
-    const prepared = Object.freeze({ binding });
+    const prepared = Object.freeze({
+      binding,
+      // A real writer releases resources (e.g. a listening MCP server) here.
+      // This fake holds none, but the obligation is required on every writer
+      // so the reference example does not silently omit it (D22, D31).
+      dispose: async () => {},
+    });
     this.preparedRequests.mark(prepared);
     return prepared;
   }

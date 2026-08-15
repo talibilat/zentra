@@ -28,7 +28,7 @@ afterEach(() => {
 
 function fakeWriter(): HarnessWriter {
   return {
-    prepare: async () => ({ binding: {} as never }),
+    prepare: async () => ({ binding: {} as never, dispose: async () => {} }),
     execute: async () => ({} as never),
   };
 }

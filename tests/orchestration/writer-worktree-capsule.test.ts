@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -14,13 +15,16 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { PlannedTask } from "../../src/contracts/milestone.js";
+import type { HarnessWriter, WriterDispatchBinding } from "../../src/harnesses/harness-writer.js";
 import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
+import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { WriterWorktreeCapsule, type WriterCapsuleRequest } from "../../src/orchestration/writer-worktree-capsule.js";
 import type { ModelCapability } from "../../src/policy/model-sheet.js";
 import type { SecuritySheet } from "../../src/policy/security-sheet.js";
 import type { ProjectConfig } from "../../src/projects/project-config.js";
 import { ProcessSupervisor } from "../../src/workers/process-supervisor.js";
 import { GitClient } from "../../src/workspaces/git-client.js";
+import { PathClaimService } from "../../src/workspaces/path-claims.js";
 import { WorkspaceOwnershipGate } from "../../src/workspaces/workspace-ownership.js";
 import { WorktreeManager } from "../../src/workspaces/worktree-manager.js";
 import { buildRoleCapabilityBinding } from "../../src/workers/role-capability-envelope.js";
@@ -380,6 +384,43 @@ describe("WriterWorktreeCapsule", () => {
       signal: AbortSignal.timeout(10_000),
     })).rejects.toThrow("writer assignment is outside approved harness authority");
   });
+
+  it("disposes the prepared request when beginDispatch throws", async () => {
+    const fixture = await projectFixture();
+    const { journal } = journalFixture();
+    const claims = new FailingBeginDispatchClaims(journal);
+    let disposed = 0;
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { disposed += 1; } };
+      },
+      async execute() {
+        throw new Error("execute must not run when beginDispatch throws");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+      writeClaim: {
+        service: claims,
+        claimId: "claim-dispose",
+        ownerId: "writer-model",
+        paths: ["src/greeting.ts"],
+        leaseMs: 60_000,
+        correlationId: "run-dispose",
+        maxToolCalls: 1,
+      },
+      dispatchAuthority: { mode: "unscheduled" },
+    })).rejects.toThrow("claim conflict");
+
+    expect(disposed).toBe(1);
+    journal.close();
+  });
 });
 
 function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {
@@ -391,6 +432,53 @@ function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding
   return {
     run: (request) => inner.run({ ...request, capabilityBinding: directBinding(request) }),
   };
+}
+
+function capsuleWith(
+  writer: HarnessWriter,
+): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {
+  const inner = new WriterWorktreeCapsule(
+    new WorktreeManager(),
+    writer,
+    new WorkspaceOwnershipGate(),
+  );
+  return {
+    run: (request) => inner.run({ ...request, capabilityBinding: directBinding(request) }),
+  };
+}
+
+class FailingBeginDispatchClaims extends PathClaimService {
+  override beginDispatch(_input: Parameters<PathClaimService["beginDispatch"]>[0]): void {
+    throw new Error("claim conflict");
+  }
+}
+
+function journalFixture(): { journal: SqliteEventJournal } {
+  const directory = mkdtempSync(path.join(tmpdir(), "zentra-writer-capsule-claims-"));
+  temporaryDirectories.push(directory);
+  return { journal: new SqliteEventJournal(path.join(directory, "journal.sqlite")) };
+}
+
+function testBinding(): WriterDispatchBinding {
+  const body = {
+    schemaVersion: 1 as const,
+    processIncarnation: randomUUID(),
+    executableSha256: sha256("test-executable"),
+    argvSha256: sha256("test-argv"),
+    packetSha256: sha256("test-packet"),
+    cwdSha256: sha256("test-cwd"),
+    dispatchId: null,
+    projectId: null,
+    claimId: null,
+    ownerId: null,
+    revision: null,
+    leaseToken: null,
+  };
+  return Object.freeze({ ...body, digest: sha256(JSON.stringify(body)) });
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function directBinding(request: Omit<WriterCapsuleRequest, "capabilityBinding">) {

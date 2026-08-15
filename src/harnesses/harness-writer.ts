@@ -66,6 +66,16 @@ export interface WriterDispatchBinding {
 
 export interface PreparedWriterRequest {
   readonly binding: WriterDispatchBinding;
+  /**
+   * Releases resources the writer acquired during prepare(). The capsule calls
+   * this on every path that does not reach execute(); execute() calls it in a
+   * finally. Required rather than optional because a writer holding a live MCP
+   * server must not be able to forget it (D31).
+   *
+   * Must be idempotent: both the capsule's failure paths and execute()'s finally
+   * can call dispose() on the same prepared request.
+   */
+  dispose(): Promise<void>;
 }
 
 export interface WriterReport {

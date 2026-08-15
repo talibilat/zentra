@@ -213,8 +213,10 @@ export class WriterWorktreeCapsule {
             correlationId: request.writeClaim!.correlationId,
           });
         } catch (uncertaintyError) {
+          await preparedWriter.dispose();
           throw new AggregateError([error, uncertaintyError], "writer dispatch claim failed and uncertainty could not be recorded");
         }
+        await preparedWriter.dispose();
         throw error;
       }
     }
@@ -376,6 +378,8 @@ export class WriterWorktreeCapsule {
         }
       }
       throw error;
+    } finally {
+      await preparedWriter.dispose();
     }
   }
 

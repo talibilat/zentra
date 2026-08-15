@@ -85,6 +85,7 @@ export class OpenCodeWriter implements HarnessWriter {
     const prepared: InternalPreparedOpenCodeWriterRequest = Object.freeze({
       request, executable, cwd, packet, argv,
       binding: Object.freeze({ ...bindingBody, digest: sha256(JSON.stringify(bindingBody)) }),
+      dispose: async () => {},
     });
     preparedRequests.mark(prepared);
     return prepared;
