@@ -339,12 +339,18 @@ The confound was inherited environment.
 Zentra was itself running inside a Claude Code session, and the child inherited `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`, which let it delegate the permission decision back to the parent session, where it was auto-approved.
 Unsetting `CLAUDECODE`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, and `CLAUDE_CODE_ENTRYPOINT` and re-running the identical command blocked the write, created no file, and populated `permission_denials` correctly.
 
-**Decision.** `ClaudeCodeWriter` builds the child environment from an explicit allow-list of variables rather than inheriting and subtracting.
-Any `CLAUDE_CODE_*` or `CLAUDECODE` variable not explicitly required is absent.
+**Scope correction.** The reproduction above was a bare shell invocation, not a run through Zentra.
+`ProcessSupervisor` already builds the child environment from a five-entry allow-list (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`) plus the caller's explicit map, so no `CLAUDE_CODE_*` variable reaches a supervised writer today.
+**This is not a live hole in Zentra.** Recording it anyway, because it converts that allow-list from hygiene into a load-bearing security control and because of what it implies below.
 
-**Why this is severe.** The escalation is silent, it produces no error, and it only manifests when Zentra runs under a Claude Code session, which is exactly the condition during development and CI.
-The security model would have looked correct in every isolated test and been bypassed in practice.
-Subtracting a known-bad list is not sufficient: the variable set is undocumented and version-dependent, so a future release adding a new delegation channel would reopen the hole.
+**Decision.** The `ProcessSupervisor` environment allow-list must not grow to carry harness credentials, and `ClaudeCodeWriter` passes `HOME` explicitly as `OpenCodeWriter` already does.
+
+**Why this needs saying.** `ClaudeCodeWriter` has to authenticate, and the obvious ways to do that both reopen this exact hole.
+Adding `ANTHROPIC_*` or `CLAUDE_*` to the shared allow-list would pass through whatever the parent session happens to hold, including the delegation socket.
+Letting `HOME` default to the operator's real home directory would hand the child `~/.claude/settings.json`, which can define hooks that execute arbitrary commands, defeating the tool restrictions entirely.
+
+**Consequence.** Credentials reach the child only through the caller's explicit environment map, under a name Zentra chooses, and `HOME` points at a dedicated harness home rather than the operator's.
+Subtracting a known-bad list is never sufficient here: the variable set is undocumented and version-dependent, so a future release adding a delegation channel would reopen the hole silently.
 
 ---
 
