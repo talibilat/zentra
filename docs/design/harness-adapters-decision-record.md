@@ -429,6 +429,72 @@ Isolation of the rest is D24's environment allow-list plus D26's surface verific
 
 ---
 
+## D29. Hooks execute outside the tool-permission model, and the worktree is a hook source
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** Found while looking for a way to make a writable OAuth harness home safe.
+A `PreToolUse` hook placed in a project-level `.claude/settings.json` executed `touch HOOK_FIRED` during a run whose only tool call was a `Read` that was **denied**.
+`Bash` was never invoked and never needed to be.
+
+The writer's cwd is the worktree under edit.
+Any repository carrying a `.claude/settings.json` would therefore have obtained arbitrary command execution inside the writer capsule, bypassing `propose_patch`, the deny-list, and the entire permission model.
+
+**This was a live hole in the design as approved.** It is unrelated to authentication and would have applied to both modes.
+
+**Decision.** `--setting-sources ""` on every invocation, in both auth modes.
+Verified to block the hook while leaving OAuth working.
+
+**Alternative rejected.** `--setting-sources user`, which also blocked the hook.
+It still loads settings from the harness home, so it would make every future change to that home a security question.
+The empty list removes the category.
+
+**Consequence.** The live adversarial test (#132) carries a hostile-hook worktree as a permanent regression test, and it must be proven to fail when the flag is dropped.
+
+---
+
+## D30. `--bare` and OAuth are mutually exclusive; OAuth is still the default
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** `--bare` structurally disables hooks, LSP, plugin sync, auto-memory, keychain reads, and CLAUDE.md auto-discovery.
+It is by far the strongest isolation available, and it would have made D26 and D29 belt-and-braces rather than load-bearing.
+
+It also makes OAuth impossible.
+Its help text states auth is then strictly `ANTHROPIC_API_KEY` or `apiKeyHelper`, and a live run with valid OAuth credentials and `--bare` fails with `Not logged in`.
+
+**Decision.** Support both modes, OAuth default, chosen by the user against the recommendation below.
+OAuth mode reconstructs isolation from `--setting-sources ""` plus surface verification. API-key mode adds `--bare`.
+
+**Recommendation that was not taken, recorded because it may matter later.** API-key default, because `--bare` also permits a fully inert harness home, and an inert home supports a much stronger claim: that nothing in it can execute.
+OAuth requires the home to stay writable for token refresh, so that claim is unavailable.
+
+**Residual risk accepted.** `--setting-sources ""` governs settings files only.
+Plugins remain possible in OAuth mode but are caught by D26, since they surface as tools.
+Auto-memory and CLAUDE.md discovery remain active and are context injection rather than code execution.
+
+---
+
+## D31. `PreparedWriterRequest.dispose()` is required, not optional
+
+**Date:** 2026-08-15 (issue #131)
+
+**Problem.** The `propose_patch` MCP server must start in `prepare()`, because its URL carries a dynamic port and `argvSha256` must attest the argv that actually ran.
+But `beginDispatch()` runs between `prepare()` and `execute()` in `writer-worktree-capsule.ts` and throws on a claim conflict.
+On that path the server is stranded, still listening and still serving `propose_patch` to any holder of the bearer token.
+
+**Decision.** Add a required `dispose(): Promise<void>` to `PreparedWriterRequest`.
+The capsule calls it on every path that does not reach `execute()`; `execute()` calls it in a `finally`.
+
+**Why required rather than optional.** D22 and Phase 1.5 both established that an optional security obligation is one an implementation forgets: that is precisely how `FakeHarnessWriter` shipped without the `preparedRequests` guard, leaving the reference example missing one of the three mechanisms.
+
+**Alternative rejected.** Starting the server in `execute()` and moving the URL into a config file.
+That removes the leak but drops the endpoint out of the attested argv, weakening the dispatch binding to avoid a lifecycle problem that is solvable directly.
+
+**Cost accepted.** A breaking change to a shared interface, touching every writer and test double. The package is private with no external consumers.
+
+---
+
 ## Standing practices adopted
 
 - **Escalate plan gaps, do not improvise.** Twice an implementer stopped on a gap the plan did not anticipate (D10, and the swallowed `UnregisteredHarnessWriterError`). Both were correct calls and produced better outcomes than guessing.
