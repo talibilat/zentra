@@ -13,7 +13,12 @@ describe("inspectInitEvent", () => {
     const result = inspectInitEvent([
       initEvent(["Read", "Glob", "Grep", PROPOSE_TOOL], [{ name: "zentra", status: "connected" }]),
     ]);
-    expect(result).toEqual({ unexpectedTools: [], proposeToolPresent: true, disconnectedServers: [] });
+    expect(result).toEqual({
+      unexpectedTools: [],
+      proposeToolPresent: true,
+      expectedServerConnected: true,
+      disconnectedServers: [],
+    });
   });
 
   it("tolerates a missing read tool", () => {
@@ -36,6 +41,7 @@ describe("inspectInitEvent", () => {
       initEvent(["Read", PROPOSE_TOOL], [{ name: "zentra", status: "failed" }]),
     ]);
     expect(result?.disconnectedServers).toEqual(["zentra"]);
+    expect(result?.expectedServerConnected).toBe(false);
   });
 
   it("treats an unknown server status as disconnected", () => {
@@ -43,6 +49,29 @@ describe("inspectInitEvent", () => {
       initEvent(["Read", PROPOSE_TOOL], [{ name: "zentra", status: "degraded" }]),
     ]);
     expect(result?.disconnectedServers).toEqual(["zentra"]);
+    expect(result?.expectedServerConnected).toBe(false);
+  });
+
+  it("treats an empty mcp_servers list as the expected server missing", () => {
+    const result = inspectInitEvent([initEvent(["Read", PROPOSE_TOOL], [])]);
+    expect(result?.expectedServerConnected).toBe(false);
+    expect(result?.disconnectedServers).toEqual([]);
+  });
+
+  it("treats a missing mcp_servers key as the expected server missing", () => {
+    const result = inspectInitEvent([
+      { type: "system", subtype: "init", tools: ["Read", PROPOSE_TOOL] },
+    ]);
+    expect(result?.expectedServerConnected).toBe(false);
+    expect(result?.disconnectedServers).toEqual([]);
+  });
+
+  it("treats a different connected server with zentra absent as the expected server missing", () => {
+    const result = inspectInitEvent([
+      initEvent(["Read", PROPOSE_TOOL], [{ name: "other", status: "connected" }]),
+    ]);
+    expect(result?.expectedServerConnected).toBe(false);
+    expect(result?.disconnectedServers).toEqual([]);
   });
 
   it("reports the propose tool missing", () => {
