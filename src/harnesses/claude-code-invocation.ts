@@ -1,4 +1,4 @@
-import { EXPECTED_SERVER_NAME } from "./claude-code-stream.js";
+import { EXPECTED_SERVER_NAME, PROPOSE_PATCH_TOOL } from "./claude-code-stream.js";
 
 /**
  * Tools denied structurally. NotebookEdit is on this list because it writes
@@ -18,7 +18,14 @@ const DENIED_TOOLS = [
   "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
   "TaskUpdate", "ToolSearch", "WebSearch", "Workflow", "Artifact",
 ] as const;
-const ALLOWED_TOOLS = ["Read", "Glob", "Grep"] as const;
+/**
+ * Tools permitted at the permission layer. propose_patch must be here: under
+ * --permission-mode default a headless run auto-denies anything absent, and
+ * without it the writer's only sanctioned way to express a change cannot be
+ * used at all (D33). Imported rather than restated so it cannot drift from
+ * the name the surface check expects.
+ */
+const ALLOWED_TOOLS = ["Read", "Glob", "Grep", PROPOSE_PATCH_TOOL] as const;
 
 const PROTOCOL_INSTRUCTIONS = [
   "You are a Zentra writer. You cannot modify any file directly.",

@@ -463,6 +463,32 @@ This does not change the default, which the user chose, but it is a further entr
 
 ---
 
+## D33. `propose_patch` must be in the permission allow-list, and only a live run could show it
+
+**Date:** 2026-08-16 (issue #131, found during Task 8)
+
+**Problem.** `ALLOWED_TOOLS` was `["Read", "Glob", "Grep"]`.
+`mcp__zentra__propose_patch` was absent, so under `--permission-mode default` in headless mode the real binary auto-denied it:
+`Claude requested permissions to use mcp__zentra__propose_patch, but you haven't granted it yet`.
+
+The writer's only sanctioned way to express a change could not be used at all.
+
+**Decision.** Add `PROPOSE_PATCH_TOOL` to `ALLOWED_TOOLS`, imported from `claude-code-stream.ts` rather than restated, for the same drift reason as D31's sibling finding on `EXPECTED_SERVER_NAME`.
+`--disallowedTools` is unchanged.
+
+**Why this is not a weakening.** `--allowedTools` is the permission allow-list, and `propose_patch` is Zentra's own tool, served from its own loopback server behind a per-task bearer token.
+It is the sanctioned channel, not an escape from one.
+It was already in `EXPECTED_TOOLS`, so the surface check had always expected it present: the two lists simply disagreed.
+
+**Why this matters more than the fix.** Every fixture-based test in Tasks 3 through 7 passed while this was broken.
+The unit tests asserted the flags were constructed correctly, and they were, against an assumption about what the flags mean that turned out to be wrong.
+Nothing short of running the real binary could have caught it.
+
+This is the second production bug the live suite found in one task, after D32.
+It is the strongest available argument for keeping that suite in CI rather than treating it as an optional extra, and for Phase 3 running Codex against its real binary before trusting any fixture.
+
+---
+
 ## D29. Hooks execute outside the tool-permission model, and the worktree is a hook source
 
 **Date:** 2026-08-15 (issue #131)

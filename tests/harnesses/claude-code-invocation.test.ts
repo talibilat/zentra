@@ -7,7 +7,7 @@ import {
   redactClaudeCodeArgv,
   resolveClaudeCodeAuth,
 } from "../../src/harnesses/claude-code-invocation.js";
-import { EXPECTED_SERVER_NAME } from "../../src/harnesses/claude-code-stream.js";
+import { EXPECTED_SERVER_NAME, PROPOSE_PATCH_TOOL } from "../../src/harnesses/claude-code-stream.js";
 
 const base = { packet: '{"brief":"x"}', model: "claude-haiku-4-5-20251001", mcpConfig: '{"mcpServers":{}}' };
 
@@ -96,6 +96,24 @@ describe("buildClaudeCodeArgv", () => {
     for (const tool of ["Read", "Glob", "Grep"]) {
       expect(denied).not.toContain(tool);
     }
+  });
+
+  it("permits propose_patch at the permission layer", () => {
+    // Regression test for D33. --allowedTools is a permission allow-list, and a
+    // headless run under --permission-mode default auto-denies anything absent
+    // from it. With propose_patch missing, the real binary refused the writer's
+    // only sanctioned way to make a change. Every fixture test still passed,
+    // because they asserted the flags were built as specified and they were -
+    // the specification was wrong. Only the live suite caught it.
+    const argv = buildClaudeCodeArgv({ ...base, auth: { mode: "oauth" } });
+    const allowed = argv[argv.indexOf("--allowedTools") + 1]!.split(",");
+    expect(allowed).toContain(PROPOSE_PATCH_TOOL);
+  });
+
+  it("does not structurally remove propose_patch", () => {
+    const argv = buildClaudeCodeArgv({ ...base, auth: { mode: "oauth" } });
+    const denied = argv[argv.indexOf("--disallowedTools") + 1]!.split(",");
+    expect(denied).not.toContain(PROPOSE_PATCH_TOOL);
   });
 
   it("adds --bare only in api_key mode", () => {
