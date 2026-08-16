@@ -12,9 +12,11 @@ import { EXPECTED_SERVER_NAME } from "../../src/harnesses/claude-code-stream.js"
 const base = { packet: '{"brief":"x"}', model: "claude-haiku-4-5-20251001", mcpConfig: '{"mcpServers":{}}' };
 
 const originalApiKey = process.env.ANTHROPIC_API_KEY;
+const originalUser = process.env.USER;
 
 beforeEach(() => {
   delete process.env.ANTHROPIC_API_KEY;
+  process.env.USER = "zentra-test-user";
 });
 
 afterEach(() => {
@@ -22,6 +24,11 @@ afterEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
   } else {
     process.env.ANTHROPIC_API_KEY = originalApiKey;
+  }
+  if (originalUser === undefined) {
+    delete process.env.USER;
+  } else {
+    process.env.USER = originalUser;
   }
 });
 
@@ -113,6 +120,28 @@ describe("buildClaudeCodeEnvironment", () => {
   it("carries the key in api_key mode", () => {
     const env = buildClaudeCodeEnvironment({ mcpToken: "tok", auth: { mode: "api_key", apiKey: "sk-x" } });
     expect(env["ANTHROPIC_API_KEY"]).toBe("sk-x");
+  });
+
+  it("carries USER from Zentra's own environment in oauth mode, for the macOS keychain lookup", () => {
+    const env = buildClaudeCodeEnvironment({ mcpToken: "tok", auth: { mode: "oauth" } });
+    expect(env["USER"]).toBe("zentra-test-user");
+  });
+
+  it("does not carry USER in api_key mode, since --bare never reads the keychain", () => {
+    const env = buildClaudeCodeEnvironment({ mcpToken: "tok", auth: { mode: "api_key", apiKey: "sk-x" } });
+    expect(env["USER"]).toBeUndefined();
+  });
+
+  it("throws in oauth mode when Zentra's own USER is unset, rather than shipping a confusing 'Not logged in'", () => {
+    delete process.env.USER;
+    expect(() => buildClaudeCodeEnvironment({ mcpToken: "tok", auth: { mode: "oauth" } }))
+      .toThrow("oauth mode requires USER");
+  });
+
+  it("throws in oauth mode when Zentra's own USER is an empty string", () => {
+    process.env.USER = "";
+    expect(() => buildClaudeCodeEnvironment({ mcpToken: "tok", auth: { mode: "oauth" } }))
+      .toThrow("oauth mode requires USER");
   });
 
   it("never forwards a parent Claude Code delegation variable", () => {

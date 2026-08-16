@@ -78,8 +78,35 @@ export function buildClaudeCodeEnvironment(input: {
   return {
     ...(input.home === undefined ? {} : { HOME: input.home }),
     ZENTRA_WRITER_MCP_TOKEN: input.mcpToken,
-    ...(input.auth.mode === "api_key" ? { ANTHROPIC_API_KEY: input.auth.apiKey! } : {}),
+    ...(input.auth.mode === "api_key" ? { ANTHROPIC_API_KEY: input.auth.apiKey! } : { USER: requireOAuthUser() }),
   };
+}
+
+/**
+ * OAuth mode does not set --bare, so the real binary reads its OAuth token
+ * from the macOS keychain rather than ANTHROPIC_API_KEY. Measured empirically
+ * (issue #131 follow-up): that keychain lookup is keyed by USER specifically,
+ * not LOGNAME. ProcessSupervisor's own ENV_ALLOWLIST deliberately does not
+ * include USER, because that allow-list is shared by every supervised
+ * process - OpenCode writers, validations, reviewers, all running in
+ * read-only capsules (D24) - and widening it for one harness's benefit is
+ * exactly what D24 forbids. USER is added here instead, in this writer's own
+ * explicit environment map, scoped to oauth mode only. api_key mode sets
+ * --bare and never reads the keychain, so USER must stay out of that
+ * environment to keep it as tight as it already is.
+ *
+ * Reads from Zentra's own process environment, never the spawned harness's
+ * (same rule as resolveClaudeCodeAuth's ANTHROPIC_API_KEY read above).
+ */
+function requireOAuthUser(): string {
+  const user = process.env.USER;
+  if (user === undefined || user === "") {
+    throw new Error(
+      "Claude Code writer oauth mode requires USER in Zentra's own environment for macOS keychain lookup; "
+      + "set USER, or switch to api_key mode by setting ANTHROPIC_API_KEY",
+    );
+  }
+  return user;
 }
 
 export function buildMcpConfig(url: string, tokenEnvVar: string): string {
