@@ -1,3 +1,5 @@
+import { EXPECTED_SERVER_NAME } from "./claude-code-stream.js";
+
 /**
  * Tools denied structurally. NotebookEdit is on this list because it writes
  * files and survived the originally specified deny-list (D26). The list is a
@@ -70,7 +72,7 @@ export function buildClaudeCodeEnvironment(input: {
 
 export function buildMcpConfig(url: string, tokenEnvVar: string): string {
   return JSON.stringify({
-    mcpServers: { zentra: { type: "http", url, headers: { Authorization: `Bearer \${${tokenEnvVar}}` } } },
+    mcpServers: { [EXPECTED_SERVER_NAME]: { type: "http", url, headers: { Authorization: `Bearer \${${tokenEnvVar}}` } } },
   });
 }
 

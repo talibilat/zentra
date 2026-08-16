@@ -6,6 +6,7 @@ import {
   buildMcpConfig,
   redactClaudeCodeArgv,
 } from "../../src/harnesses/claude-code-invocation.js";
+import { EXPECTED_SERVER_NAME } from "../../src/harnesses/claude-code-stream.js";
 
 const base = { packet: '{"brief":"x"}', model: "claude-haiku-4-5-20251001", mcpConfig: '{"mcpServers":{}}' };
 
@@ -82,6 +83,14 @@ describe("buildMcpConfig", () => {
     const config = buildMcpConfig("http://127.0.0.1:1/mcp", "ZENTRA_WRITER_MCP_TOKEN");
     expect(config).toContain("${ZENTRA_WRITER_MCP_TOKEN}");
     expect(JSON.parse(config).mcpServers.zentra.type).toBe("http");
+  });
+
+  it("uses EXPECTED_SERVER_NAME for the server key, binding it to inspectInitEvent's expectation", () => {
+    const config = buildMcpConfig("http://127.0.0.1:1/mcp", "ZENTRA_WRITER_MCP_TOKEN");
+    const parsed = JSON.parse(config);
+    const serverKeys = Object.keys(parsed.mcpServers);
+    expect(serverKeys).toHaveLength(1);
+    expect(serverKeys[0]).toBe(EXPECTED_SERVER_NAME);
   });
 });
 
