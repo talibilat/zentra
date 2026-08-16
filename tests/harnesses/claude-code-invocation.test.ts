@@ -1,14 +1,60 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import {
   buildClaudeCodeArgv,
   buildClaudeCodeEnvironment,
   buildMcpConfig,
   redactClaudeCodeArgv,
+  resolveClaudeCodeAuth,
 } from "../../src/harnesses/claude-code-invocation.js";
 import { EXPECTED_SERVER_NAME } from "../../src/harnesses/claude-code-stream.js";
 
 const base = { packet: '{"brief":"x"}', model: "claude-haiku-4-5-20251001", mcpConfig: '{"mcpServers":{}}' };
+
+const originalApiKey = process.env.ANTHROPIC_API_KEY;
+
+beforeEach(() => {
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+afterEach(() => {
+  if (originalApiKey === undefined) {
+    delete process.env.ANTHROPIC_API_KEY;
+  } else {
+    process.env.ANTHROPIC_API_KEY = originalApiKey;
+  }
+});
+
+describe("resolveClaudeCodeAuth", () => {
+  it("returns oauth mode when ANTHROPIC_API_KEY is unset", () => {
+    const auth = resolveClaudeCodeAuth();
+    expect(auth).toEqual({ mode: "oauth" });
+  });
+
+  it("returns oauth mode when ANTHROPIC_API_KEY is an empty string", () => {
+    process.env.ANTHROPIC_API_KEY = "";
+    const auth = resolveClaudeCodeAuth();
+    expect(auth).toEqual({ mode: "oauth" });
+  });
+
+  it("returns oauth mode when ANTHROPIC_API_KEY is whitespace only", () => {
+    process.env.ANTHROPIC_API_KEY = "   ";
+    const auth = resolveClaudeCodeAuth();
+    expect(auth).toEqual({ mode: "oauth" });
+  });
+
+  it("returns api_key mode with the original value when ANTHROPIC_API_KEY is set to a real value", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-123";
+    const auth = resolveClaudeCodeAuth();
+    expect(auth).toEqual({ mode: "api_key", apiKey: "sk-test-key-123" });
+  });
+
+  it("preserves leading and trailing whitespace in the api key", () => {
+    process.env.ANTHROPIC_API_KEY = "  sk-test-key  ";
+    const auth = resolveClaudeCodeAuth();
+    expect(auth).toEqual({ mode: "api_key", apiKey: "  sk-test-key  " });
+  });
+});
 
 describe("buildClaudeCodeArgv", () => {
   it("carries every isolation flag", () => {

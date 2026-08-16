@@ -34,7 +34,7 @@ function fakeWriter(): HarnessWriter {
 }
 
 describe("InstalledMilestoneRunner harness resolution", () => {
-  it("only opencode is registered by default, matching today's behavior", () => {
+  it("allows an explicitly injected registry to override the default writer registration", () => {
     const registry = new HarnessWriterRegistry({ opencode: fakeWriter() });
     expect(() => registry.get("opencode")).not.toThrow();
     expect(() => registry.get("claude_code")).toThrow(UnregisteredHarnessWriterError);

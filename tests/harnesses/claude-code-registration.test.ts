@@ -5,8 +5,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DisabledModelBroker } from "../../src/capsule/model-broker.js";
+import { ClaudeCodeWriter } from "../../src/harnesses/claude-code-writer.js";
 import { UnregisteredHarnessWriterError } from "../../src/harnesses/harness-writer-registry.js";
 import type { HarnessWriterRegistry } from "../../src/harnesses/harness-writer-registry.js";
+import { OpenCodeWriter } from "../../src/harnesses/opencode-writer.js";
 import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
 import { AgentTailJsonlFileSink } from "../../src/observability/agent-tail-file-sink.js";
 import { InstalledMilestoneRunner } from "../../src/orchestration/installed-milestone.js";
@@ -32,13 +34,15 @@ function defaultRegistry(): HarnessWriterRegistry {
 }
 
 describe("default harness writer registration", () => {
-  it("resolves claude_code without throwing UnregisteredHarnessWriterError", () => {
+  it("resolves claude_code as an instance of ClaudeCodeWriter", () => {
     const registry = defaultRegistry();
-    expect(() => registry.get("claude_code")).not.toThrow(UnregisteredHarnessWriterError);
+    const writer = registry.get("claude_code");
+    expect(writer).toBeInstanceOf(ClaudeCodeWriter);
   });
 
-  it("still resolves opencode", () => {
+  it("resolves opencode as an instance of OpenCodeWriter", () => {
     const registry = defaultRegistry();
-    expect(() => registry.get("opencode")).not.toThrow(UnregisteredHarnessWriterError);
+    const writer = registry.get("opencode");
+    expect(writer).toBeInstanceOf(OpenCodeWriter);
   });
 });
