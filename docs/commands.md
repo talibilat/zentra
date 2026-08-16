@@ -1002,3 +1002,46 @@ Logging:
 
 - Appends the terminal completion to the journal.
 - It does not create a separate trace.
+
+## Live Testing
+
+Some test suites run the real harness binary instead of a fixture.
+They are gated behind `ZENTRA_LIVE_*` environment variables and are skipped by default.
+`.env.example` lists every variable with an empty value; fill them in locally and never commit real values.
+
+### OpenCode
+
+`ZENTRA_LIVE_OPENCODE_E2E=1` enables `tests/package/installed-milestone-live.e2e.test.ts`.
+It also requires `ZENTRA_LIVE_OPENCODE_EXECUTABLE`, `ZENTRA_LIVE_OPENCODE_HOME`, `ZENTRA_LIVE_OPENCODE_SHA256`, `ZENTRA_LIVE_OPENCODE_VERSION`, and the Azure OpenAI variables the milestone calls models through.
+Without `ZENTRA_LIVE_OPENCODE_E2E=1` the suite skips.
+
+### Claude Code
+
+`ZENTRA_LIVE_CLAUDE_CODE_E2E=1` enables `tests/harnesses/claude-code-live.e2e.test.ts`.
+This suite dispatches `ClaudeCodeWriter` against the real `claude` binary and proves the security claim against product behavior, not a scripted double: no direct filesystem writes, no hook execution from a hostile worktree, a real `propose_patch` proposal for a legitimate change, and a hard failure when the MCP server is unreachable.
+
+It requires:
+
+- `ZENTRA_LIVE_CLAUDE_CODE_E2E=1`.
+- `ZENTRA_LIVE_CLAUDE_CODE_EXECUTABLE`, an absolute path to the `claude` executable.
+- `ZENTRA_LIVE_CLAUDE_CODE_HOME`, a `HOME` directory with an authenticated Claude Code OAuth session.
+
+Without `ZENTRA_LIVE_CLAUDE_CODE_E2E=1` and `ZENTRA_LIVE_CLAUDE_CODE_EXECUTABLE`, the suite is skipped and its `describe` title says so.
+An empty run cannot be mistaken for a passing one.
+
+`ZENTRA_LIVE_CLAUDE_CODE_API_KEY` selects API-key mode for other callers of the writer.
+The live suite itself always runs in OAuth mode and does not read it.
+
+`ZENTRA_LIVE_CLAUDE_CODE_SHA256` and `ZENTRA_LIVE_CLAUDE_CODE_VERSION` are declared for the same executable-attestation use as `zentra milestone run --harness-sha256 --harness-version`.
+The live writer suite does not read them: it measures `claude --version` itself and compares it against a version pinned inside the test file.
+
+Every assertion in `claude-code-live.e2e.test.ts` was measured against Claude Code 2.1.207.
+A version change is not safe to just re-run against.
+Hook execution order, the denial channels the suite reads, and the init event shape it inspects can all change between releases.
+If the measured version does not match the pinned one, the suite stops with an error instead of running.
+Re-measure the suite's assumptions against the new binary before trusting a green run, then update the pinned version once the re-measurement is done.
+
+### Codex
+
+`ZENTRA_LIVE_CODEX_*` variables are declared in `.env.example` for the same purpose but are not yet consumed by any test.
+The Codex writer adapter is a later phase.
