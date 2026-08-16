@@ -1,5 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, realpathSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { WorkerAdapter, WorkerResult } from "../workers/worker-adapter.js";
@@ -13,6 +12,7 @@ import {
 import { extractWriterPatchProposal, type WriterPatchProposal } from "../contracts/writer-patch.js";
 import { brandSupervisedReport } from "./writer-brand.js";
 import { createPreparedWriterRegistry } from "./writer-prepared.js";
+import { canonicalDirectory, canonicalExecutable, sha256, sha256File } from "./writer-canonical.js";
 import type {
   HarnessWriter,
   PreparedWriterRequest,
@@ -417,31 +417,3 @@ function addTokenCount(total: number, value: number, label: string): number {
   return next;
 }
 
-function canonicalDirectory(candidate: string): string {
-  const canonical = realpathSync.native(candidate);
-  if (!statSync(canonical).isDirectory()) throw new Error("OpenCode writer cwd must be a directory");
-  return canonical;
-}
-
-function canonicalExecutable(candidate: string): string {
-  const canonical = realpathSync.native(candidate);
-  const stat = statSync(canonical);
-  if (candidate !== canonical || !stat.isFile() || (stat.mode & 0o111) === 0) {
-    throw new Error("OpenCode writer executable must be a canonical executable file");
-  }
-  return canonical;
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function sha256File(filePath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
-}
