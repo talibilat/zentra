@@ -32,6 +32,18 @@ export interface ClaudeCodeAuth {
   readonly apiKey?: string;
 }
 
+/**
+ * Resolves how the Claude Code writer authenticates, from Zentra's own process
+ * environment (never the spawned harness's environment). OAuth is the default
+ * (D30): api_key mode additionally selects --bare, which is structurally
+ * stronger isolation but mutually exclusive with a live OAuth session, so it
+ * is only chosen when Zentra itself has a non-empty ANTHROPIC_API_KEY.
+ */
+export function resolveClaudeCodeAuth(): ClaudeCodeAuth {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  return apiKey === undefined || apiKey.trim() === "" ? { mode: "oauth" } : { mode: "api_key", apiKey };
+}
+
 export function buildClaudeCodeArgv(input: {
   readonly packet: string;
   readonly model: string;

@@ -10,6 +10,8 @@ import { MilestonePlanSchema, type MilestonePlan, type PlannedTask } from "../co
 import { digestCanonical } from "../contracts/authority-attention.js";
 import { HarnessProbe } from "../harnesses/harness-probe.js";
 import { attestHostHarnessExecutable } from "../harnesses/harness-attestation.js";
+import { resolveClaudeCodeAuth } from "../harnesses/claude-code-invocation.js";
+import { ClaudeCodeWriter } from "../harnesses/claude-code-writer.js";
 import type { HarnessId } from "../harnesses/harness-id.js";
 import { HarnessWriterRegistry } from "../harnesses/harness-writer-registry.js";
 import { OpenCodeWriter } from "../harnesses/opencode-writer.js";
@@ -153,7 +155,10 @@ export class InstalledMilestoneRunner {
       : new ProjectingEventJournal(options.journal, options.sink);
     this.worker = options.worker ?? new ProcessSupervisor();
     this.capsule = options.readOnlyCapsule ?? new DockerOpenCodeReadOnlyCapsule();
-    this.writers = options.writers ?? new HarnessWriterRegistry({ opencode: new OpenCodeWriter(this.worker) });
+    this.writers = options.writers ?? new HarnessWriterRegistry({
+      opencode: new OpenCodeWriter(this.worker),
+      claude_code: new ClaudeCodeWriter(this.worker, resolveClaudeCodeAuth()),
+    });
   }
 
   async run(request: InstalledMilestoneRunRequest): Promise<MilestoneRecord> {
