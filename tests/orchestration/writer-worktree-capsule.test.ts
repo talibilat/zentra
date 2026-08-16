@@ -508,6 +508,125 @@ describe("WriterWorktreeCapsule", () => {
 
     expect(disposed).toBe(1);
   });
+
+  // Discriminates the fix for the three unguarded `preparedWriter.dispose()`
+  // calls in writer-worktree-capsule.ts: close() memoizes its outcome
+  // including rejections, so re-awaiting a writer's already-rejected
+  // dispose() here must not let that teardown failure displace the real
+  // report or the real propagating error the try block already decided.
+  it("does not let a rejecting dispose() replace a successful writer report", async () => {
+    const fixture = await projectFixture();
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { throw new Error("dispose exploded"); } };
+      },
+      async execute(prepared) {
+        return completedWriterReport(prepared.binding);
+      },
+    };
+
+    const result = await capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  it("does not let a rejecting dispose() replace the real error when the writer throws", async () => {
+    const fixture = await projectFixture();
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { throw new Error("dispose exploded"); } };
+      },
+      async execute() {
+        throw new Error("execute exploded");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+    })).rejects.toThrow("execute exploded");
+  });
+
+  it("does not let a rejecting dispose() replace the real error when beginDispatch fails", async () => {
+    const fixture = await projectFixture();
+    const { journal } = journalFixture();
+    const claims = new FailingBeginDispatchClaims(journal);
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { throw new Error("dispose exploded"); } };
+      },
+      async execute() {
+        throw new Error("execute must not run when beginDispatch throws");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+      writeClaim: {
+        service: claims,
+        claimId: "claim-dispose-rejects",
+        ownerId: "writer-model",
+        paths: ["src/greeting.ts"],
+        leaseMs: 60_000,
+        correlationId: "run-dispose-rejects",
+        maxToolCalls: 1,
+      },
+      dispatchAuthority: { mode: "unscheduled" },
+    })).rejects.toThrow("claim conflict");
+
+    journal.close();
+  });
+
+  it("does not let a rejecting dispose() replace the AggregateError when beginDispatch and recordUncertain both fail", async () => {
+    const fixture = await projectFixture();
+    const { journal } = journalFixture();
+    const claims = new FailingBeginDispatchAndRecordUncertainClaims(journal);
+    const writer: HarnessWriter = {
+      async prepare() {
+        return { binding: testBinding(), dispose: async () => { throw new Error("dispose exploded"); } };
+      },
+      async execute() {
+        throw new Error("execute must not run when beginDispatch throws");
+      },
+    };
+
+    await expect(capsuleWith(writer).run({
+      project: fixture.project,
+      task: plannedTask(),
+      model: writerModel(),
+      security: security(fixture.repository),
+      executable: "/fake/harness",
+      signal: AbortSignal.timeout(10_000),
+      writeClaim: {
+        service: claims,
+        claimId: "claim-dispose-rejects-aggregate",
+        ownerId: "writer-model",
+        paths: ["src/greeting.ts"],
+        leaseMs: 60_000,
+        correlationId: "run-dispose-rejects-aggregate",
+        maxToolCalls: 1,
+      },
+      dispatchAuthority: { mode: "unscheduled" },
+    })).rejects.toThrow(AggregateError);
+
+    journal.close();
+  });
 });
 
 function capsule(): { run(request: Omit<WriterCapsuleRequest, "capabilityBinding">): ReturnType<WriterWorktreeCapsule["run"]> } {

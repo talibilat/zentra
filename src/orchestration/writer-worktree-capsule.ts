@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type { HarnessWriter, WriterReport, WriterTaskPacket } from "../harnesses/harness-writer.js";
+import type { HarnessWriter, PreparedWriterRequest, WriterReport, WriterTaskPacket } from "../harnesses/harness-writer.js";
 import { isHarnessId } from "../harnesses/harness-id.js";
 import type { ModelCapability } from "../policy/model-sheet.js";
 import type { SecuritySheet } from "../policy/security-sheet.js";
@@ -213,10 +213,10 @@ export class WriterWorktreeCapsule {
             correlationId: request.writeClaim!.correlationId,
           });
         } catch (uncertaintyError) {
-          await preparedWriter.dispose();
+          await disposePreparedWriter(preparedWriter);
           throw new AggregateError([error, uncertaintyError], "writer dispatch claim failed and uncertainty could not be recorded");
         }
-        await preparedWriter.dispose();
+        await disposePreparedWriter(preparedWriter);
         throw error;
       }
     }
@@ -379,7 +379,7 @@ export class WriterWorktreeCapsule {
       }
       throw error;
     } finally {
-      await preparedWriter.dispose();
+      await disposePreparedWriter(preparedWriter);
     }
   }
 
@@ -441,6 +441,19 @@ export class WriterWorktreeCapsule {
     }
     return result.exitCode === 0 ? result.stdout.trim() : null;
   }
+}
+
+/**
+ * A teardown failure must never displace a real propagating error or a
+ * successful report - the same reasoning ClaudeCodeWriter.execute already
+ * applies to its own dispose() call. close() memoizes its outcome including
+ * rejections, so an unguarded second await here would re-surface the exact
+ * error the adapter already swallowed.
+ */
+async function disposePreparedWriter(prepared: PreparedWriterRequest): Promise<void> {
+  await prepared.dispose().catch((disposeError: unknown) => {
+    console.error("WriterWorktreeCapsule: dispose() failed during teardown", disposeError);
+  });
 }
 
 function sha256(value: string): string {
