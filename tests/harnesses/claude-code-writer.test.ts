@@ -19,6 +19,22 @@ function init(tools: readonly string[], status = "connected"): unknown {
   return { type: "system", subtype: "init", tools, mcp_servers: [{ name: "zentra", status }] };
 }
 
+/**
+ * Like init(), but for the mcp_servers shapes init() cannot produce: an empty
+ * array, or the key omitted entirely. Both read as "no server at all" and
+ * are what distinguishes expectedServerConnected from the stale
+ * disconnectedServers.length > 0 check - an empty/absent mcp_servers never
+ * populates disconnectedServers, so that check would read it as healthy.
+ * `tools` still advertises the propose tool, matching the real binary's
+ * documented behavior of reporting an empty mcp_servers array while a
+ * misconfigured client can still list stale tool names.
+ */
+function initWithMcpServers(tools: readonly string[], mcpServers: readonly unknown[] | "absent"): unknown {
+  const base: Record<string, unknown> = { type: "system", subtype: "init", tools };
+  if (mcpServers !== "absent") base["mcp_servers"] = mcpServers;
+  return base;
+}
+
 const OK_RESULT = { type: "result", subtype: "success", is_error: false, permission_denials: [] };
 
 /**
@@ -211,6 +227,35 @@ describe("ClaudeCodeWriter", () => {
     );
     const prepared = await writer.prepare(writerRequest());
     const report = await writer.execute(prepared, new AbortController().signal);
+    expect(report.protocolFailure).toBe("mcp_server_unavailable");
+  });
+
+  // These two cases are the ones that actually discriminate
+  // expectedServerConnected from the stale disconnectedServers.length > 0
+  // check (see the comment on InitInspection.expectedServerConnected).
+  // tools still advertises the propose tool here, so a check that only
+  // looked at disconnectedServers - which stays empty when mcp_servers is
+  // empty or missing, since the loop that populates it never runs - would
+  // wrongly read the run as healthy.
+  it("fails with mcp_server_unavailable when mcp_servers is empty despite the propose tool being advertised", async () => {
+    const writer = new ClaudeCodeWriter(
+      scriptedSupervisor([initWithMcpServers(["Read", PROPOSE_TOOL], []), OK_RESULT]),
+      { mode: "oauth" },
+    );
+    const prepared = await writer.prepare(writerRequest());
+    const report = await writer.execute(prepared, new AbortController().signal);
+    expect(report.outcome).toBe("failed");
+    expect(report.protocolFailure).toBe("mcp_server_unavailable");
+  });
+
+  it("fails with mcp_server_unavailable when mcp_servers is absent despite the propose tool being advertised", async () => {
+    const writer = new ClaudeCodeWriter(
+      scriptedSupervisor([initWithMcpServers(["Read", PROPOSE_TOOL], "absent"), OK_RESULT]),
+      { mode: "oauth" },
+    );
+    const prepared = await writer.prepare(writerRequest());
+    const report = await writer.execute(prepared, new AbortController().signal);
+    expect(report.outcome).toBe("failed");
     expect(report.protocolFailure).toBe("mcp_server_unavailable");
   });
 
