@@ -221,6 +221,30 @@ describe("ClaudeCodeWriter", () => {
     const report = await writer.execute(prepared, new AbortController().signal);
     expect(report.outcome).toBe("failed");
     expect(report.protocolFailure).toBe("unexpected_tool_surface");
+    // protocolFailure must stay a bounded token, so the actual offending
+    // tool name (needed to tell operators on a second machine what to add
+    // to DENIED_TOOLS) has to travel somewhere else.
+    expect(report.unexpectedTools).toEqual(["NotebookEdit"]);
+  });
+
+  it("names every offending tool, not just the first, and carries none when the failure is unrelated", async () => {
+    const withMultiple = new ClaudeCodeWriter(
+      scriptedSupervisor([init(["Read", "NotebookEdit", "WebFetch", PROPOSE_TOOL]), OK_RESULT]),
+      { mode: "oauth" },
+    );
+    const preparedMultiple = await withMultiple.prepare(writerRequest());
+    const reportMultiple = await withMultiple.execute(preparedMultiple, new AbortController().signal);
+    expect(reportMultiple.protocolFailure).toBe("unexpected_tool_surface");
+    expect(reportMultiple.unexpectedTools).toEqual(["NotebookEdit", "WebFetch"]);
+
+    const withoutSurfaceIssue = new ClaudeCodeWriter(
+      scriptedSupervisor([init(["Read", PROPOSE_TOOL], "failed"), OK_RESULT]),
+      { mode: "oauth" },
+    );
+    const preparedClean = await withoutSurfaceIssue.prepare(writerRequest());
+    const reportClean = await withoutSurfaceIssue.execute(preparedClean, new AbortController().signal);
+    expect(reportClean.protocolFailure).toBe("mcp_server_unavailable");
+    expect(reportClean.unexpectedTools).toBeUndefined();
   });
 
   it("fails when the propose tool is absent", async () => {

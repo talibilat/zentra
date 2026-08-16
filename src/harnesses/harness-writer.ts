@@ -96,6 +96,17 @@ export interface WriterReport {
   readonly eventChain: WriterEventChain;
   readonly rawOutputPolicy: "not_retained";
   readonly protocolFailure: string | null;
+  /**
+   * The tool names that caused protocolFailure "unexpected_tool_surface" -
+   * present on the deny-list but still advertised at init, meaning a future
+   * harness release added a mutating tool the deny-list does not name yet.
+   * protocolFailure itself must stay a bounded token, so the offending names
+   * live here instead: diagnostic only, not part of the durable receipt
+   * (WriterReceiptBodySchema does not carry this field), so an operator
+   * debugging a run can see what actually got denied without it becoming
+   * attested evidence. Absent whenever that failure did not occur.
+   */
+  readonly unexpectedTools?: readonly string[];
   /** Transient process output. Callers must not journal or otherwise retain it. */
   readonly stdout: string;
   readonly stderr: string;

@@ -103,6 +103,7 @@ export class ClaudeCodeWriter implements HarnessWriter {
 
       let eventChain: WriterEventChain;
       let protocolFailure: string | null = null;
+      let unexpectedTools: readonly string[] = [];
       try {
         eventChain = createWriterEventChain(result.rawStdout, result.events);
       } catch {
@@ -121,6 +122,7 @@ export class ClaudeCodeWriter implements HarnessWriter {
           protocolFailure = "mcp_server_unavailable";
         } else if (init.unexpectedTools.length > 0) {
           protocolFailure = "unexpected_tool_surface";
+          unexpectedTools = init.unexpectedTools;
         }
       }
 
@@ -151,6 +153,7 @@ export class ClaudeCodeWriter implements HarnessWriter {
         eventChain,
         rawOutputPolicy: "not_retained",
         protocolFailure,
+        ...(unexpectedTools.length === 0 ? {} : { unexpectedTools: Object.freeze(unexpectedTools) }),
         stdout: result.rawStdout,
         stderr: result.stderr,
         startedAt,
