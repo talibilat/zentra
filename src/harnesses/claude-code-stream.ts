@@ -1,3 +1,5 @@
+import type { WriterUsage } from "./harness-writer.js";
+
 /** The only tools a Zentra writer may be offered. Anything else aborts the run (D26). */
 export const PROPOSE_PATCH_TOOL = "mcp__zentra__propose_patch";
 export const EXPECTED_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", PROPOSE_PATCH_TOOL]);
@@ -73,4 +75,104 @@ function asRecord(value: unknown): Readonly<Record<string, unknown>> | null {
 
 function asStringArray(value: unknown): readonly string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/**
+ * Claude Code emits this when a tool was structurally removed by
+ * --disallowedTools. Unlike a permission-layer denial it never reaches
+ * permission_denials, so the stream is the only record of the attempt (D25).
+ */
+const NOT_ENABLED_MARKER = "is not enabled in this context";
+
+const MAX_TOKENS = 2_000_000;
+
+export function parseClaudeCodeUsage(events: readonly unknown[]): {
+  readonly usage: WriterUsage;
+  readonly evidence: "native" | "none";
+} {
+  let toolCalls = 0;
+  let evidence: "native" | "none" = "none";
+  let usage: Omit<WriterUsage, "toolCalls"> = {
+    inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  };
+  for (const event of events) {
+    const record = asRecord(event);
+    if (record === null) continue;
+    for (const block of contentBlocks(record)) {
+      if (block["type"] === "tool_use") toolCalls += 1;
+    }
+    if (record["type"] !== "result") continue;
+    const block = asRecord(record["usage"]);
+    if (block === null) continue;
+    if (evidence === "native") throw new Error("Claude Code writer stream contains more than one result usage block");
+    evidence = "native";
+    usage = {
+      inputTokens: tokenCount(block["input_tokens"], "input_tokens"),
+      outputTokens: tokenCount(block["output_tokens"], "output_tokens"),
+      reasoningTokens: 0,
+      cacheReadTokens: tokenCount(block["cache_read_input_tokens"], "cache_read_input_tokens"),
+      cacheWriteTokens: tokenCount(block["cache_creation_input_tokens"], "cache_creation_input_tokens"),
+    };
+  }
+  if (!Number.isSafeInteger(toolCalls) || toolCalls > 100_000) {
+    throw new Error("Claude Code writer tool usage exceeds bounded range");
+  }
+  return { usage: { ...usage, toolCalls }, evidence };
+}
+
+export function parseDeniedToolRequests(
+  events: readonly unknown[],
+): readonly { readonly tool: string; readonly path: string | null }[] {
+  const denied: { tool: string; path: string | null }[] = [];
+  const toolNamesById = new Map<string, string>();
+  for (const event of events) {
+    const record = asRecord(event);
+    if (record === null) continue;
+    for (const block of contentBlocks(record)) {
+      if (block["type"] === "tool_use" && typeof block["id"] === "string" && typeof block["name"] === "string") {
+        toolNamesById.set(block["id"], block["name"]);
+        continue;
+      }
+      if (block["type"] !== "tool_result" || block["is_error"] !== true) continue;
+      if (!textOf(block["content"]).includes(NOT_ENABLED_MARKER)) continue;
+      const id = typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : "";
+      denied.push({ tool: toolNamesById.get(id) ?? "unknown", path: null });
+    }
+    if (record["type"] !== "result" || !Array.isArray(record["permission_denials"])) continue;
+    for (const entry of record["permission_denials"]) {
+      const denial = asRecord(entry);
+      if (denial === null) continue;
+      const input = asRecord(denial["tool_input"]);
+      const path = input === null ? null : input["file_path"];
+      denied.push({
+        tool: typeof denial["tool_name"] === "string" ? denial["tool_name"] : "unknown",
+        path: typeof path === "string" ? path : null,
+      });
+    }
+  }
+  return denied;
+}
+
+function contentBlocks(record: Readonly<Record<string, unknown>>): readonly Readonly<Record<string, unknown>>[] {
+  const message = asRecord(record["message"]);
+  const content = message === null ? undefined : message["content"];
+  if (!Array.isArray(content)) return [];
+  return content.map(asRecord).filter((block): block is Readonly<Record<string, unknown>> => block !== null);
+}
+
+function textOf(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.map((entry) => {
+    const block = asRecord(entry);
+    return block !== null && typeof block["text"] === "string" ? block["text"] : "";
+  }).join("");
+}
+
+function tokenCount(value: unknown, label: string): number {
+  if (value === undefined) return 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > MAX_TOKENS) {
+    throw new Error(`Claude Code writer ${label} must be a nonnegative bounded safe integer`);
+  }
+  return value;
 }
