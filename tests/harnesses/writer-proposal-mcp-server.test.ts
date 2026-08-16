@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   startWriterProposalMcpServer,
@@ -164,5 +165,36 @@ describe("writer proposal MCP server", () => {
     const outcome = await server.close();
     expect(outcome.proposal).toBeNull();
     expect(outcome.protocolFailure).toBe(true);
+  });
+
+  // Discriminates the closeServer fix: a rejecting mcp.close() must not
+  // strand the HTTP listener (still carrying a live bearer token) open, and
+  // that rejection must not be memoized forever - a later close() call has
+  // to be able to retry and actually succeed.
+  it("still closes the HTTP listener when the MCP session close rejects", async () => {
+    const closeSpy = vi.spyOn(McpServer.prototype, "close")
+      .mockRejectedValueOnce(new Error("mcp close exploded"));
+    const server = await startServer();
+
+    await expect(server.close()).rejects.toThrow("mcp close exploded");
+
+    const refused = await fetch(server.url, { method: "POST" }).then(() => "reachable", () => "refused");
+    expect(refused).toBe("refused");
+
+    closeSpy.mockRestore();
+  });
+
+  it("retries a failed close instead of memoizing the rejection forever", async () => {
+    const closeSpy = vi.spyOn(McpServer.prototype, "close")
+      .mockRejectedValueOnce(new Error("mcp close exploded"));
+    const server = await startServer();
+
+    await expect(server.close()).rejects.toThrow("mcp close exploded");
+    // The real McpServer#close() is idempotent, so the retry below hits the
+    // unmocked implementation and this resolves instead of repeating the
+    // same rejection the first call already saw.
+    await expect(server.close()).resolves.toMatchObject({ proposal: null });
+
+    closeSpy.mockRestore();
   });
 });

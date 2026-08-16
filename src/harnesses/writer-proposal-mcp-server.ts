@@ -96,18 +96,39 @@ export async function startWriterProposalMcpServer(): Promise<EphemeralWriterPro
     bearerTokenEnvVar: BEARER_TOKEN_ENV_VAR,
     bearerTokenValue,
     close() {
-      shutdown ??= closeServer(mcp, httpServer).then(() => outcome);
+      if (shutdown === null) {
+        const attempt: Promise<WriterProposalOutcome> = closeServer(mcp, httpServer).then(() => outcome);
+        shutdown = attempt;
+        // A rejection is not terminal: clear the memo so the next close()
+        // call starts a fresh attempt instead of handing back the same
+        // permanently-rejected promise forever, which would leave a caller
+        // with no way to retry closing a still-listening server.
+        attempt.catch(() => { if (shutdown === attempt) shutdown = null; });
+      }
       return shutdown;
     },
   };
 }
 
 async function closeServer(mcp: McpServer, httpServer: Server): Promise<void> {
-  await mcp.close();
-  await new Promise<void>((resolve, reject) => {
-    httpServer.close((error) => (error ? reject(error) : resolve()));
-    httpServer.closeAllConnections();
-  });
+  try {
+    await mcp.close();
+  } finally {
+    // Runs even if mcp.close() throws: the HTTP listener - carrying a live
+    // bearer token - must never be stranded open because the unrelated MCP
+    // session teardown failed. ERR_SERVER_NOT_RUNNING is tolerated rather
+    // than rejected: it means a previous attempt's finally (or an earlier
+    // successful close()) already closed the listener, so the outcome this
+    // step exists to guarantee already holds - retrying it is not itself an
+    // error.
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((error) => {
+        if (error === undefined || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
+        else reject(error);
+      });
+      httpServer.closeAllConnections();
+    });
+  }
 }
 
 function isAuthorized(request: IncomingMessage, bearerTokenValue: string): boolean {
