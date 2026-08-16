@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ClaudeCodeWriter } from "../../src/harnesses/claude-code-writer.js";
 import { EXPECTED_SERVER_NAME } from "../../src/harnesses/claude-code-stream.js";
+import { SqliteEventJournal } from "../../src/journal/sqlite-journal.js";
+import { appendSupervisedWriterReceipt, PathClaimService } from "../../src/workspaces/path-claims.js";
 import type { WorkerAdapter, WorkerResult } from "../../src/workers/worker-adapter.js";
 import type { WriterDispatchBinding, WriterRequest } from "../../src/harnesses/harness-writer.js";
 
@@ -79,10 +81,11 @@ function workspaceDir(): string {
   return directory;
 }
 
-function writerRequest(): WriterRequest {
+function writerRequest(dispatchAuthority?: WriterRequest["dispatchAuthority"]): WriterRequest {
   const taskId = `task-claude-code-writer-${randomUUID()}`;
   return {
     taskId,
+    ...(dispatchAuthority === undefined ? {} : { dispatchAuthority }),
     executable: canonicalNodeExecutable(),
     model: {
       id: "claude-implementer",
@@ -335,6 +338,71 @@ describe("ClaudeCodeWriter", () => {
     const prepared = await writer.prepare(writerRequest());
     await prepared.dispose();
     await expect(prepared.dispose()).resolves.toBeUndefined();
+  });
+
+  // Discriminates the receipt invariant fix in src/agents/writer-events.ts:
+  // every prior Claude Code test above reaches only writer.execute(), never
+  // the durable receipt path, so it could not catch usage.toolCalls (counted
+  // from nested message.content[] blocks) diverging from the chain's
+  // retained tool_use events (previously always empty for Claude Code,
+  // since createWriterEventChain only recognized OpenCode's top-level/"part"
+  // shape). Two parallel tool_use blocks on one stdout line exercise the
+  // multi-block-per-line split, not just the single-block case.
+  it("produces a report whose receipt is accepted through appendSupervisedWriterReceipt", async () => {
+    const parallelToolUse = {
+      type: "assistant",
+      message: { content: [
+        { type: "tool_use", id: "t1", name: "Read", input: { file_path: "a.txt" } },
+        { type: "tool_use", id: "t2", name: "Glob", input: { pattern: "*.ts" } },
+      ] },
+    };
+    const directory = mkdtempSync(path.join(tmpdir(), "zentra-claude-code-writer-receipt-"));
+    directories.push(directory);
+    const journal = new SqliteEventJournal(path.join(directory, "journal.sqlite"));
+    const service = new PathClaimService(journal);
+    const claim = service.acquire({
+      projectId: "project-claude-code", claimId: "claim-claude-code", ownerId: "claude-implementer",
+      revision: BASE_REVISION, paths: ["a.txt"], leaseMs: 60_000, correlationId: "run-claude-code",
+    });
+    const dispatchId = randomUUID();
+
+    const writer = new ClaudeCodeWriter(
+      scriptedSupervisor(
+        [init(["Read", "Glob", PROPOSE_TOOL]), parallelToolUse, OK_RESULT],
+        async (argv, env) => {
+          await callProposePatch(mcpUrlFrom(argv), env["ZENTRA_WRITER_MCP_TOKEN"]!, {
+            proposalId: "RECEIPT-PROOF", baseRevision: BASE_REVISION,
+            operations: [{ path: "a.txt", expectedSha256: null, content: "x", contentSha256: sha256("x") }],
+          });
+        },
+      ),
+      { mode: "oauth" },
+    );
+    const prepared = await writer.prepare(writerRequest({
+      dispatchId, projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
+      revision: claim.revision, leaseToken: claim.leaseToken,
+    }));
+    service.beginDispatch({
+      projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
+      revision: claim.revision, leaseToken: claim.leaseToken,
+      dispatchId, binding: prepared.binding, correlationId: "run-claude-code",
+    });
+
+    const report = await writer.execute(prepared, new AbortController().signal);
+    expect(report.protocolFailure).toBeNull();
+    expect(report.usage.toolCalls).toBe(2);
+
+    const receipt = appendSupervisedWriterReceipt(service, {
+      projectId: claim.projectId, claimId: claim.claimId, ownerId: claim.ownerId,
+      revision: claim.revision, correlationId: "run-claude-code",
+      leaseToken: claim.leaseToken, dispatchId,
+    }, report, prepared.binding);
+
+    expect(receipt.usage.toolCalls).toBe(2);
+    expect(receipt.eventChain.events.filter((event) =>
+      event.type === "tool_use" && event.status !== "denied" && event.tool !== null)).toHaveLength(2);
+
+    journal.close();
   });
 
   it("refuses a request it did not prepare", async () => {
