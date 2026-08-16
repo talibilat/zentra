@@ -429,6 +429,40 @@ Isolation of the rest is D24's environment allow-list plus D26's surface verific
 
 ---
 
+## D32. OAuth needs `USER` in the child environment, scoped to the writer not the supervisor
+
+**Date:** 2026-08-16 (issue #131, found during Task 8)
+
+**Problem.** Found by an implementer running the live suite, and independently reproduced.
+`ProcessSupervisor` builds the child environment from `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL` plus the caller's explicit map.
+Under exactly that environment the real binary cannot authenticate:
+
+```
+PATH/HOME/TMPDIR/LANG only        ->  Not logged in - Please run /login
+same + USER                       ->  OK
+same + LOGNAME (instead of USER)  ->  Not logged in
+```
+
+It is `USER` specifically, not `LOGNAME`: macOS keychain lookup is by account name.
+Without it, OAuth mode could not authenticate in production either, not merely in tests.
+
+**Decision.** Add `USER` to the explicit environment map in `buildClaudeCodeEnvironment`, **only in OAuth mode**.
+In API-key mode `--bare` is set and the keychain is never read, so it is omitted there.
+An unset `USER` in OAuth mode throws with a message naming the cause, rather than falling through to a confusing `Not logged in`.
+
+**Alternative rejected: adding `USER` to `ProcessSupervisor`'s allow-list.**
+That list feeds every supervised process, including the read-only OpenCode capsules for planner, researcher, and reviewer.
+Widening a shared security control for one harness's benefit is exactly what D24 forbids, and the need here is specific to one auth mode of one writer.
+
+**This is D24's predicted trap arriving on schedule.**
+D24 said the obvious ways to make authentication work would reopen the hole, and named widening the shared allow-list as the first of them.
+The prediction held: the first real attempt to authenticate produced exactly that proposal.
+
+**Consequence for D30.** The OAuth default carries another cost the API-key path does not: it needs an extra environment variable and it fails in a way that does not name its own cause.
+This does not change the default, which the user chose, but it is a further entry in the ledger against it.
+
+---
+
 ## D29. Hooks execute outside the tool-permission model, and the worktree is a hook source
 
 **Date:** 2026-08-15 (issue #131)
