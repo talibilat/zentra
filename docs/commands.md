@@ -1041,6 +1041,9 @@ Hook execution order, the denial channels the suite reads, and the init event sh
 If the measured version does not match the pinned one, the suite stops with an error instead of running.
 Re-measure the suite's assumptions against the new binary before trusting a green run, then update the pinned version once the re-measurement is done.
 
+`DENIED_TOOLS` in `src/harnesses/claude-code-invocation.ts` was also calibrated against that same 2.1.207 build, specifically a desktop-flavoured install - the extra entries beyond the obvious mutating tools (`CronCreate`, `EnterWorktree`, `SendMessage`, and the rest) were only discovered by enumerating what a real init event advertised.
+A plain CLI-only install may advertise a different extra surface, so re-measure `DENIED_TOOLS` against one before trusting it there rather than assuming the desktop-measured list transfers unchanged.
+
 ### Codex
 
 `ZENTRA_LIVE_CODEX_*` variables are declared in `.env.example` for the same purpose but are not yet consumed by any test.

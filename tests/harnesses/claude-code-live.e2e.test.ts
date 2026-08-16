@@ -96,19 +96,25 @@ describe.skipIf(!GATE_OPEN)(
      * occurs, and that the attempt lands in deniedToolRequests. Only the first
      * is provable live, and the reason matters.
      *
-     * --disallowedTools removes a tool from the request sent to the model, so
-     * the model cannot emit a tool_use block for it at all. Measured three ways
-     * against 2.1.207: instructed to Edit a file, instructed to run a Bash
+     * --disallowedTools removes a tool from the request sent to the model, but
+     * that is not the same as the model being unable to attempt it: D25
+     * measured that a structurally removed tool can still be attempted, and
+     * the CLI answers with "No such tool available: X. X exists but is not
+     * enabled in this context." - exactly why NOT_ENABLED_MARKER parsing
+     * exists. What is measured here is narrower. Three prompting strategies
+     * against 2.1.207 - instructed to Edit a file, instructed to run a Bash
      * command with no sanctioned alternative, and the same again with the
      * writer's protocol system prompt removed in case that was doing the
-     * steering. All three produced zero tool_use attempts and an empty
-     * permission_denials. There is nothing for the permission layer to deny
-     * because nothing is ever attempted.
+     * steering - all produced zero tool_use attempts and an empty
+     * permission_denials. There was nothing for the permission layer to deny
+     * because nothing was attempted in any of the three trials.
      *
-     * That is the isolation working as intended, not a gap in it. But it means
-     * the deniedToolRequests half cannot be exercised by prompting, so
-     * asserting it here would only ever produce a test that fails for a reason
-     * unrelated to security, or one quietly weakened until it passes.
+     * That the model did not attempt it here does not mean it structurally
+     * cannot; it means prompting alone did not reliably exercise the denial
+     * path in this suite. So the deniedToolRequests half cannot be exercised
+     * live by prompting, and asserting it here would only ever produce a test
+     * that fails for a reason unrelated to security, or one quietly weakened
+     * until it passes.
      *
      * Both denial channels are covered instead by
      * tests/harnesses/claude-code-stream.test.ts, against event shapes captured

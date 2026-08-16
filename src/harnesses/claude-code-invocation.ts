@@ -2,9 +2,14 @@ import { EXPECTED_SERVER_NAME, PROPOSE_PATCH_TOOL } from "./claude-code-stream.j
 
 /**
  * Tools denied structurally. NotebookEdit is on this list because it writes
- * files and survived the originally specified deny-list (D26). The list is a
- * floor, not the security boundary: inspectInitEvent is what actually holds,
- * because a future release could add a mutating tool this list does not name.
+ * files and survived the originally specified deny-list (D26). No single
+ * mechanism is the security boundary here (D28): this list removes tools
+ * structurally, --permission-mode default enforces ALLOWED_TOOLS below at
+ * the permission layer, and inspectInitEvent verifies the resulting surface
+ * against both after the process exits. inspectInitEvent is a detective
+ * control - it runs post hoc over the finished event stream, catching a
+ * future release that adds a mutating tool this list does not yet name - not
+ * a preventive one. All three are independent and load-bearing.
  */
 const DENIED_TOOLS = [
   // Mutating or executing.

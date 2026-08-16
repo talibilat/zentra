@@ -62,9 +62,9 @@ export function createWriterEventChain(rawStdout: string, parsedEvents: readonly
       stdoutBytes: Buffer.byteLength(rawStdout, "utf8"), stdoutSha256: sha256(rawStdout), events: [] });
     return WriterEventChainSchema.parse({ ...body, chainSha256: digestCanonical(body) });
   }
-  if (!rawStdout.endsWith("\n")) throw new Error("OpenCode writer JSON output must end on an event boundary");
+  if (!rawStdout.endsWith("\n")) throw new Error("harness writer JSON output must end on an event boundary");
   const rawLines = rawStdout.slice(0, -1).split("\n");
-  if (rawLines.length !== parsedEvents.length || rawLines.length === 0) throw new Error("OpenCode writer output contains non-event data");
+  if (rawLines.length !== parsedEvents.length || rawLines.length === 0) throw new Error("harness writer output contains non-event data");
   let prefix = "";
   let previousPrefixSha256 = sha256(prefix);
   let sequence = 0;
@@ -91,12 +91,12 @@ export function createWriterEventChain(rawStdout: string, parsedEvents: readonly
   for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
     const line = rawLines[lineIndex]!;
     let parsed: unknown;
-    try { parsed = JSON.parse(line.trim()); } catch { throw new Error("OpenCode writer output contains invalid JSON"); }
-    if (digestCanonical(parsed) !== digestCanonical(parsedEvents[lineIndex])) throw new Error("OpenCode writer parsed event order changed");
+    try { parsed = JSON.parse(line.trim()); } catch { throw new Error("harness writer output contains invalid JSON"); }
+    if (digestCanonical(parsed) !== digestCanonical(parsedEvents[lineIndex])) throw new Error("harness writer parsed event order changed");
     const record = objectRecord(parsed);
     const part = objectRecord(record["part"]);
     const type = stringField(record, "type") ?? stringField(part, "type");
-    if (type === null) throw new Error("OpenCode writer event has no native type");
+    if (type === null) throw new Error("harness writer event has no native type");
     const framed = `${line}\n`;
     const lineSha256 = sha256(framed);
     const lineByteCount = Buffer.byteLength(framed, "utf8");

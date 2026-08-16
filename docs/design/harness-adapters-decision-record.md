@@ -405,7 +405,8 @@ With `--output-format json` there is no signal at all that the server failed.
 
 There is a signal, but only in the stream. `--output-format stream-json --verbose` emits a `system:init` event carrying `mcp_servers: [{"name": "zentra", "status": "failed"}]`.
 
-**Decision.** `ClaudeCodeWriter` uses `stream-json`, not `json`, and gates on the init event: every configured MCP server must report connected, and `mcp__zentra__propose_patch` must be present in the advertised tool list, or the run aborts before the first turn.
+**Decision.** `ClaudeCodeWriter` uses `stream-json`, not `json`, and gates on the init event: the named `zentra` server specifically must report connected (`expectedServerConnected`), and `mcp__zentra__propose_patch` must be present in the advertised tool list, or the run aborts before the first turn.
+The gate is that narrower positive check, not "no server reports a non-connected status" - an empty or absent `mcp_servers` array satisfies the latter without the former, which is exactly the fail-open Task 3's review caught and fixed.
 
 **Why this matters beyond a health check.** Without it, an unreachable server yields a successful run with no patch proposed, which is byte-identical to a run where the model legitimately decided no change was needed.
 A broken capsule would be indistinguishable from a clean no-op, and the failure mode is silent in exactly the direction that loses work.
