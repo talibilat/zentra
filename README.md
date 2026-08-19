@@ -1,7 +1,7 @@
 # Zentra
 
 Zentra is a local software-development orchestrator
-It coordinates bounded work and keeps durable evidence
+It coordinates bounded work and keeps durable evidence.
 
 Zentra provides two main paths:
 
